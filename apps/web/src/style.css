@@ -159,6 +159,14 @@ button {
   color: #4c42bb;
   font-size: 0.83rem;
 }
+.confirm-panel {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid #e5c6c7;
+  border-radius: 12px;
+  background: #fffafa;
+  line-height: 1.5;
+}
 @media (max-width: 520px) {
   .shell {
     padding: 16px;

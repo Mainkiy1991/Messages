@@ -28,6 +28,7 @@ export const strings = {
     logout: "Выйти",
     confirmLogout:
       "Убедитесь, что сохранили сид-фразу. Выйти и удалить ключи с этого устройства?",
+    confirm: "Выйти и удалить ключи",
     cancel: "Отмена",
     back: "Назад",
     language: "Язык",
@@ -59,6 +60,7 @@ export const strings = {
     logout: "Sign out",
     confirmLogout:
       "Make sure you have saved your seed phrase. Sign out and delete keys from this device?",
+    confirm: "Sign out and delete keys",
     cancel: "Cancel",
     back: "Back",
     language: "Language",

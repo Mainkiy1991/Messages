@@ -32,6 +32,7 @@ function App() {
   const [answers, setAnswers] = useState<string[]>(["", "", ""]);
   const [hasError, setHasError] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [showLogoutConfirmation, setShowLogoutConfirmation] = useState(false);
 
   useEffect(() => {
     void restoreSession().then((saved) => {
@@ -97,11 +98,11 @@ function App() {
     }
   }
 
-  async function logout() {
-    if (!window.confirm(t.confirmLogout)) return;
+  async function confirmLogout() {
     await clearSession();
     setKeys(null);
     setPhrase("");
+    setShowLogoutConfirmation(false);
     setScreen("welcome");
   }
 
@@ -242,9 +243,30 @@ function App() {
                 {copied ? t.copied : t.copy}
               </button>
             </div>
-            <button className="danger" onClick={() => void logout()}>
+            <button
+              className="danger"
+              onClick={() => setShowLogoutConfirmation(true)}
+            >
               {t.logout}
             </button>
+            {showLogoutConfirmation && (
+              <div
+                className="confirm-panel"
+                role="alertdialog"
+                aria-labelledby="logout-message"
+              >
+                <p id="logout-message">{t.confirmLogout}</p>
+                <button className="danger" onClick={() => void confirmLogout()}>
+                  {t.confirm}
+                </button>
+                <button
+                  className="secondary"
+                  onClick={() => setShowLogoutConfirmation(false)}
+                >
+                  {t.cancel}
+                </button>
+              </div>
+            )}
           </>
         )}
         {(screen === "login" || screen === "create" || screen === "verify") && (
