@@ -40,7 +40,7 @@ suite("server authentication (PostgreSQL)", () => {
 
   beforeAll(async () => {
     await pool!.query(
-      "DROP TABLE IF EXISTS sessions, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS messages, sessions, users, schema_migrations CASCADE",
     );
     await pool!.query(
       await readFile(
