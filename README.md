@@ -6,7 +6,14 @@
 
 Messages — открытый мессенджер, задуманный с авторизацией по сид-фразе и шифрованием на клиенте. Криптографическая обработка приватных данных должна оставаться на устройстве пользователя.
 
-**Статус:** ранняя разработка. Сейчас репозиторий содержит каркас монорепозитория, стартовую веб-страницу, серверный health endpoint и экспериментальную библиотеку для получения ключей из BIP-39 мнемоники.
+**Статус:** ранняя разработка.
+
+### Что уже работает
+
+- Создание аккаунта с фразой BIP-39 на 12 или 24 слова и вход по существующей фразе.
+- Локальная сессия в IndexedDB, содержащая производные ключи; выход удаляет хранилище.
+- Получение стабильного ID и переключение интерфейса RU/EN.
+- Серверный health endpoint `GET /health`.
 
 ### Запуск локально
 
@@ -39,7 +46,14 @@ pnpm test
 
 Messages is an open-source messenger designed around seed-phrase sign-in and client-side encryption. Cryptographic processing of private data is intended to remain on the user's device.
 
-**Status:** early development. The repository currently contains a monorepo scaffold, a starter web page, a server health endpoint, and an experimental library for deriving keys from a BIP-39 mnemonic.
+**Status:** early development.
+
+### What already works
+
+- Create an account with a 12- or 24-word BIP-39 phrase, or sign in with an existing phrase.
+- A local IndexedDB session containing derived keys; signing out deletes the database.
+- Stable user ID derivation and RU/EN interface switching.
+- Server health endpoint at `GET /health`.
 
 ### Run locally
 

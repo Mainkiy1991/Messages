@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "concurrently -k -n web,server \"pnpm --filter @messages/web dev\" \"pnpm --filter @messages/server dev\"",
     "build": "pnpm -r build",
-    "test": "pnpm --filter @messages/crypto test",
+    "test": "pnpm -r test",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write ."
   },
