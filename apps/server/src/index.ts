@@ -1,22 +1,13 @@
-import { createServer } from "node:http";
+import { buildApp } from "./app.js";
+import { loadConfig } from "./config.js";
 
-const port = Number(process.env.PORT ?? 3000);
-
-const server = createServer((request, response) => {
-  if (request.method === "GET" && request.url === "/health") {
-    response.writeHead(200, {
-      "content-type": "application/json; charset=utf-8",
-    });
-    response.end(JSON.stringify({ status: "ok" }));
-    return;
-  }
-
-  response.writeHead(404, {
-    "content-type": "application/json; charset=utf-8",
-  });
-  response.end(JSON.stringify({ error: "Not found" }));
-});
-
-server.listen(port, () => {
-  console.log(`Messages server listening on http://localhost:${port}`);
-});
+try {
+  const config = loadConfig();
+  const app = await buildApp({ databaseUrl: config.DATABASE_URL });
+  await app.listen({ port: config.PORT, host: "0.0.0.0" });
+} catch (error) {
+  console.error(
+    error instanceof Error ? error.message : "Server startup failed",
+  );
+  process.exitCode = 1;
+}
