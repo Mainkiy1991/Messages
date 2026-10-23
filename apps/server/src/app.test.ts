@@ -43,13 +43,13 @@ suite("server authentication (PostgreSQL)", () => {
     );
     await pool!.query(
       await readFile(
-        join(import.meta.dirname, "..", "migrations", "002_messages.sql"),
+        join(import.meta.dirname, "..", "migrations", "001_initial.sql"),
         "utf8",
       ),
     );
     await pool!.query(
       await readFile(
-        join(import.meta.dirname, "..", "migrations", "001_initial.sql"),
+        join(import.meta.dirname, "..", "migrations", "002_messages.sql"),
         "utf8",
       ),
     );
