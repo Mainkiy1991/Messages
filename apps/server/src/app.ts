@@ -15,6 +15,7 @@ import {
 } from "@messages/crypto";
 import { z } from "zod";
 import { loadConfig } from "./config.js";
+import { closeWebSocketsForToken, registerWebSocket } from "./ws.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -50,6 +51,8 @@ export async function buildApp(options: {
   databaseUrl: string;
   now?: () => number;
   trustProxy?: boolean;
+  wsAuthTimeoutMs?: number;
+  wsBatchSize?: number;
 }): Promise<FastifyInstance> {
   const config = loadConfig({
     ...process.env,
@@ -99,11 +102,11 @@ export async function buildApp(options: {
   async function authenticate(
     request: FastifyRequest,
     reply: FastifyReply,
-  ): Promise<void> {
+  ): Promise<void | FastifyReply> {
     const token = bearerToken(request);
     if (!token) {
       await reply.code(401).send({ error: "unauthorized" });
-      return;
+      return reply;
     }
     const result = await pool.query(
       "SELECT user_id FROM sessions WHERE token_hash=$1 AND expires_at > now()",
@@ -111,7 +114,7 @@ export async function buildApp(options: {
     );
     if (!result.rowCount) {
       await reply.code(401).send({ error: "unauthorized" });
-      return;
+      return reply;
     }
     request.userId = result.rows[0].user_id as string;
     await pool.query("UPDATE users SET last_seen_at=now() WHERE id=$1", [
@@ -140,6 +143,12 @@ export async function buildApp(options: {
     clearInterval(sessionCleanup);
     clearInterval(cleanupChallenges);
     await pool.end();
+  });
+
+  await registerWebSocket(app, pool, {
+    origin: config.WEB_ORIGIN,
+    authTimeoutMs: options.wsAuthTimeoutMs,
+    batchSize: options.wsBatchSize,
   });
 
   app.get("/health", async () => ({ status: "ok" }));
@@ -238,6 +247,7 @@ export async function buildApp(options: {
       await pool.query("DELETE FROM sessions WHERE token_hash=$1", [
         hashToken(token),
       ]);
+      closeWebSocketsForToken(app, hashToken(token));
       return reply.code(204).send();
     },
   );
