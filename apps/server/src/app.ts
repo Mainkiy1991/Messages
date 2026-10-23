@@ -1,5 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, {
+  type FastifyInstance,
+  type FastifyReply,
+  type FastifyRequest,
+} from "fastify";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { Pool } from "pg";
@@ -12,8 +16,15 @@ import {
 import { z } from "zod";
 import { loadConfig } from "./config.js";
 
+declare module "fastify" {
+  interface FastifyRequest {
+    userId: string | null;
+  }
+}
+
 const challengeTtl = 60_000;
 const sessionTtl = 30 * 24 * 60 * 60 * 1000;
+const sessionCleanupInterval = 60 * 60 * 1000;
 const challengeSchema = z.object({}).strict();
 const loginSchema = z.object({
   challengeId: z.string().regex(/^[0-9a-f]{32}$/u),
@@ -24,9 +35,10 @@ const loginSchema = z.object({
 });
 const challenges = new Map<string, { challenge: string; expiresAt: number }>();
 
-function hashToken(token: string) {
+function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
+
 function bearerToken(request: FastifyRequest): string | null {
   const header = request.headers.authorization;
   return header && /^Bearer [A-Za-z0-9_-]{43}$/u.test(header)
@@ -34,39 +46,60 @@ function bearerToken(request: FastifyRequest): string | null {
     : null;
 }
 
-export async function buildApp(
-  options: { databaseUrl?: string; now?: () => number } = {},
-): Promise<FastifyInstance> {
+export async function buildApp(options: {
+  databaseUrl: string;
+  now?: () => number;
+  trustProxy?: boolean;
+}): Promise<FastifyInstance> {
   const config = loadConfig({
     ...process.env,
-    DATABASE_URL:
-      options.databaseUrl ??
-      process.env.DATABASE_URL ??
-      "postgres://localhost/messages",
+    DATABASE_URL: options.databaseUrl,
+    TRUST_PROXY:
+      options.trustProxy === undefined
+        ? process.env.TRUST_PROXY
+        : String(options.trustProxy),
   });
   const now = options.now ?? Date.now;
   const pool = new Pool({ connectionString: config.DATABASE_URL });
   const app = Fastify({
+    trustProxy: config.TRUST_PROXY,
     logger: {
       redact: ["req.headers.authorization", "req.body", "req.headers.cookie"],
     },
   });
-  app.setErrorHandler((_error, _request, reply) => {
-    return reply.code(500).send({ error: "internal_error" });
-  });
-  app.addHook("onClose", async () => {
-    clearInterval(cleanup);
-    await pool.end();
+  app.decorateRequest("userId", null);
+  app.setErrorHandler((error, request, reply) => {
+    const statusCode =
+      error &&
+      typeof error === "object" &&
+      "statusCode" in error &&
+      typeof error.statusCode === "number"
+        ? error.statusCode
+        : 500;
+    if (statusCode >= 500) {
+      request.log.error({ err: error }, "Request failed");
+      return reply.code(500).send({ error: "internal_error" });
+    }
+
+    const errorCode =
+      statusCode === 400
+        ? "invalid_request"
+        : statusCode === 401
+          ? "unauthorized"
+          : statusCode === 404
+            ? "not_found"
+            : statusCode === 429
+              ? "rate_limited"
+              : "request_error";
+    return reply.code(statusCode).send({ error: errorCode });
   });
   await app.register(cors, { origin: config.WEB_ORIGIN });
   await app.register(rateLimit, { global: false });
-  app.addHook("preHandler", async (request, reply) => {
-    if (
-      request.url !== "/me" &&
-      !request.url.startsWith("/users/") &&
-      request.url !== "/auth/logout"
-    )
-      return;
+
+  async function authenticate(
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<void> {
     const token = bearerToken(request);
     if (!token) {
       await reply.code(401).send({ error: "unauthorized" });
@@ -80,30 +113,50 @@ export async function buildApp(
       await reply.code(401).send({ error: "unauthorized" });
       return;
     }
-    request.headers["x-auth-user-id"] = result.rows[0].user_id as string;
+    request.userId = result.rows[0].user_id as string;
     await pool.query("UPDATE users SET last_seen_at=now() WHERE id=$1", [
-      result.rows[0].user_id,
+      request.userId,
     ]);
-  });
-  const cleanup = setInterval(() => {
+  }
+
+  await pool.query("DELETE FROM sessions WHERE expires_at < now()");
+  const sessionCleanup = setInterval(() => {
+    void pool
+      .query("DELETE FROM sessions WHERE expires_at < now()")
+      .catch((error: unknown) => {
+        app.log.error({ err: error }, "Expired session cleanup failed");
+      });
+  }, sessionCleanupInterval);
+  sessionCleanup.unref();
+
+  const cleanupChallenges = setInterval(() => {
     const current = now();
-    for (const [id, value] of challenges)
+    for (const [id, value] of challenges) {
       if (value.expiresAt <= current) challenges.delete(id);
+    }
   }, 15_000);
-  cleanup.unref();
+  cleanupChallenges.unref();
+  app.addHook("onClose", async () => {
+    clearInterval(sessionCleanup);
+    clearInterval(cleanupChallenges);
+    await pool.end();
+  });
 
   app.get("/health", async () => ({ status: "ok" }));
   app.post(
     "/auth/challenge",
     { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
-    async (_request, reply) => {
-      if (!challengeSchema.safeParse(_request.body ?? {}).success)
+    async (request, reply) => {
+      if (!challengeSchema.safeParse(request.body ?? {}).success) {
         return reply.code(400).send({ error: "invalid_request" });
+      }
       const current = now();
-      for (const [id, entry] of challenges)
+      for (const [id, entry] of challenges) {
         if (entry.expiresAt <= current) challenges.delete(id);
-      if (challenges.size >= 10_000)
+      }
+      if (challenges.size >= 10_000) {
         return reply.code(503).send({ error: "temporarily_unavailable" });
+      }
       const challengeId = randomBytes(16).toString("hex");
       const challenge = randomBytes(32).toString("hex");
       const expiresAt = current + challengeTtl;
@@ -121,13 +174,15 @@ export async function buildApp(
     { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
     async (request, reply) => {
       const parsed = loginSchema.safeParse(request.body);
-      if (!parsed.success)
+      if (!parsed.success) {
         return reply.code(401).send({ error: "invalid_credentials" });
+      }
       const input = parsed.data;
       const pending = challenges.get(input.challengeId);
       challenges.delete(input.challengeId);
-      if (!pending || pending.expiresAt <= now())
+      if (!pending || pending.expiresAt <= now()) {
         return reply.code(401).send({ error: "invalid_credentials" });
+      }
       const identity = hexToBytes(input.identityPublicKey);
       const encryption = hexToBytes(input.encryptionPublicKey);
       const signature = hexToBytes(input.signature);
@@ -151,8 +206,9 @@ export async function buildApp(
         await client.query("BEGIN");
         await client.query(
           `INSERT INTO users(id, encryption_public_key, key_binding_signature, last_seen_at)
-        VALUES($1,$2,$3,now()) ON CONFLICT(id) DO UPDATE SET encryption_public_key=EXCLUDED.encryption_public_key,
-        key_binding_signature=EXCLUDED.key_binding_signature,last_seen_at=now()`,
+           VALUES($1,$2,$3,now()) ON CONFLICT(id) DO UPDATE SET
+           encryption_public_key=EXCLUDED.encryption_public_key,
+           key_binding_signature=EXCLUDED.key_binding_signature,last_seen_at=now()`,
           [userId, input.encryptionPublicKey, input.keyBindingSignature],
         );
         await client.query(
@@ -172,7 +228,10 @@ export async function buildApp(
 
   app.post(
     "/auth/logout",
-    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    {
+      preHandler: authenticate,
+      config: { rateLimit: { max: 20, timeWindow: "1 minute" } },
+    },
     async (request, reply) => {
       const token = bearerToken(request);
       if (!token) return reply.code(401).send({ error: "unauthorized" });
@@ -182,19 +241,20 @@ export async function buildApp(
       return reply.code(204).send();
     },
   );
-  app.get("/me", async (request) => {
-    const userId = request.headers["x-auth-user-id"] as string;
+  app.get("/me", { preHandler: authenticate }, async (request) => {
     const result = await pool.query(
       'SELECT id AS "userId", encryption_public_key AS "encryptionPublicKey", key_binding_signature AS "keyBindingSignature" FROM users WHERE id=$1',
-      [userId],
+      [request.userId],
     );
     return result.rows[0];
   });
   app.get<{ Params: { userId: string } }>(
     "/users/:userId/keys",
+    { preHandler: authenticate },
     async (request, reply) => {
-      if (!/^[0-9a-f]{64}$/u.test(request.params.userId))
+      if (!/^[0-9a-f]{64}$/u.test(request.params.userId)) {
         return reply.code(404).send({ error: "not_found" });
+      }
       const result = await pool.query(
         'SELECT id AS "userId", encryption_public_key AS "encryptionPublicKey", key_binding_signature AS "keyBindingSignature" FROM users WHERE id=$1',
         [request.params.userId],

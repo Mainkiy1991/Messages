@@ -18,9 +18,11 @@ pnpm --filter @messages/server migrate
 pnpm dev
 ```
 
-`.env` содержит пароль: никогда не коммитьте его и не показывайте другим.
+`.env` содержит пароль: никогда не коммитьте его и не показывайте другим. `TRUST_PROXY=false` используется по умолчанию. На Render установите `TRUST_PROXY=true`, чтобы rate limit учитывал клиентский IP из заголовков доверенного прокси.
 
 API на `http://localhost:3000`: `GET /health`; `POST /auth/challenge` выдаёт одноразовый challenge; `POST /auth/login` проверяет Ed25519-подписи и выдаёт Bearer-токен; `POST /auth/logout` удаляет сессию; `GET /me` возвращает ваши публичные ключи; `GET /users/:userId/keys` возвращает публичный ключ пользователя. Для защищённых запросов используйте `Authorization: Bearer <token>`.
+
+Проверка полного цикла входа на запущенном сервере: `pnpm --filter @messages/server smoke`. По умолчанию проверяется `http://localhost:3000`; для другого адреса задайте `SMOKE_URL`.
 
 ### Проверки
 
@@ -54,9 +56,11 @@ pnpm --filter @messages/server migrate
 pnpm dev
 ```
 
-`.env` contains your database password. Never commit or share it.
+`.env` contains your database password. Never commit or share it. `TRUST_PROXY=false` is the default. Set `TRUST_PROXY=true` when deploying behind Render's proxy so rate limits use each client's forwarded IP.
 
 API at `http://localhost:3000`: `GET /health`; `POST /auth/challenge` creates a one-use challenge; `POST /auth/login` verifies Ed25519 signatures and returns a Bearer token; `POST /auth/logout` removes the session; `GET /me` returns your public keys; `GET /users/:userId/keys` returns a user's public key. Send `Authorization: Bearer <token>` for protected requests.
+
+Check the complete sign-in flow against a running server with `pnpm --filter @messages/server smoke`. It uses `http://localhost:3000` by default; set `SMOKE_URL` to check another server.
 
 ### Checks
 
