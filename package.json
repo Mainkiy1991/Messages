@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
-  "packageManager": "pnpm@10.19.0",
+  "packageManager": "pnpm@11.25.0",
   "scripts": {
     "dev": "concurrently -k -n web,server \"pnpm --filter @messages/web dev\" \"pnpm --filter @messages/server dev\"",
     "build": "pnpm -r build",

@@ -10,7 +10,7 @@ Messages — открытый мессенджер, задуманный с ав
 
 ### Запуск локально
 
-Требуются Node.js 22 и pnpm 10.
+Требуются Node.js 22 и pnpm 11.
 
 ```sh
 pnpm install
@@ -43,7 +43,7 @@ Messages is an open-source messenger designed around seed-phrase sign-in and cli
 
 ### Run locally
 
-Requires Node.js 22 and pnpm 10.
+Requires Node.js 22 and pnpm 11.
 
 ```sh
 pnpm install
