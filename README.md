@@ -4,67 +4,61 @@
 
 ## Русский
 
-Messages — открытый мессенджер, задуманный с авторизацией по сид-фразе и шифрованием на клиенте. Криптографическая обработка приватных данных должна оставаться на устройстве пользователя.
+Messages — открытый мессенджер с входом по сид-фразе и шифрованием на клиенте. Приватные данные не покидают устройство.
 
-**Статус:** ранняя разработка.
+**Статус:** ранняя разработка; проект не проходил аудит безопасности.
 
-### Что уже работает
+### Запуск сервера
 
-- Создание аккаунта с фразой BIP-39 на 12 или 24 слова и вход по существующей фразе.
-- Локальная сессия в IndexedDB, содержащая производные ключи; выход удаляет хранилище.
-- Получение стабильного ID и переключение интерфейса RU/EN.
-- Серверный health endpoint `GET /health`.
-
-### Запуск локально
-
-Требуются Node.js 22 и pnpm 11.
+Требуются Node.js 22 и pnpm 11. Создайте бесплатную БД на [Neon](https://neon.tech/): зарегистрируйтесь, создайте проект, выберите регион и скопируйте строку подключения в разделе **Connect**. Скопируйте `apps/server/.env.example` в `apps/server/.env`, вставьте строку как `DATABASE_URL`.
 
 ```sh
 pnpm install
+pnpm --filter @messages/server migrate
 pnpm dev
 ```
 
-Веб-приложение доступно на http://localhost:5173, сервер — на http://localhost:3000. Проверка сервера: `GET http://localhost:3000/health` возвращает `{"status":"ok"}`.
+`.env` содержит пароль: никогда не коммитьте его и не показывайте другим.
+
+API на `http://localhost:3000`: `GET /health`; `POST /auth/challenge` выдаёт одноразовый challenge; `POST /auth/login` проверяет Ed25519-подписи и выдаёт Bearer-токен; `POST /auth/logout` удаляет сессию; `GET /me` возвращает ваши публичные ключи; `GET /users/:userId/keys` возвращает публичный ключ пользователя. Для защищённых запросов используйте `Authorization: Bearer <token>`.
+
+### Проверки
 
 ```sh
 pnpm lint
 pnpm build
 pnpm test
 ```
+
+Серверные интеграционные тесты требуют `TEST_DATABASE_URL`. CI автоматически запускает их на PostgreSQL 16; локально без переменной тесты сервера пропускаются с сообщением.
 
 ### Структура
 
 - `apps/web` — React, Vite и TypeScript.
-- `apps/server` — Node.js сервер и `GET /health`.
-- `packages/crypto` — BIP-39 и детерминированное получение Ed25519, X25519 и ключа истории.
-
-### Предупреждение
-
-Проект экспериментальный и ещё не прошёл аудит безопасности. Не используйте его для защиты реальных сообщений или хранения ценных секретов. Никогда не передавайте сид-фразы и приватные ключи другим людям или сервисам.
+- `apps/server` — Fastify API, PostgreSQL, миграции, challenge-response и сессии.
+- `packages/crypto` — BIP-39, Ed25519, X25519 и функции подписи.
 
 ## English
 
-Messages is an open-source messenger designed around seed-phrase sign-in and client-side encryption. Cryptographic processing of private data is intended to remain on the user's device.
+Messages is an open-source messenger with seed-phrase sign-in and client-side encryption. Private data stays on the user's device.
 
-**Status:** early development.
+**Status:** early development; the project has not undergone a security audit.
 
-### What already works
+### Run the server
 
-- Create an account with a 12- or 24-word BIP-39 phrase, or sign in with an existing phrase.
-- A local IndexedDB session containing derived keys; signing out deletes the database.
-- Stable user ID derivation and RU/EN interface switching.
-- Server health endpoint at `GET /health`.
-
-### Run locally
-
-Requires Node.js 22 and pnpm 11.
+Requires Node.js 22 and pnpm 11. Create a free database at [Neon](https://neon.tech/): sign up, create a project, choose a region, and copy the connection string from **Connect**. Copy `apps/server/.env.example` to `apps/server/.env` and set `DATABASE_URL` to that string.
 
 ```sh
 pnpm install
+pnpm --filter @messages/server migrate
 pnpm dev
 ```
 
-The web app is available at http://localhost:5173 and the server at http://localhost:3000. `GET http://localhost:3000/health` returns `{"status":"ok"}`.
+`.env` contains your database password. Never commit or share it.
+
+API at `http://localhost:3000`: `GET /health`; `POST /auth/challenge` creates a one-use challenge; `POST /auth/login` verifies Ed25519 signatures and returns a Bearer token; `POST /auth/logout` removes the session; `GET /me` returns your public keys; `GET /users/:userId/keys` returns a user's public key. Send `Authorization: Bearer <token>` for protected requests.
+
+### Checks
 
 ```sh
 pnpm lint
@@ -72,12 +66,10 @@ pnpm build
 pnpm test
 ```
 
+Server integration tests require `TEST_DATABASE_URL`. CI runs them against PostgreSQL 16; locally, server tests are skipped with a message when the variable is not set.
+
 ### Repository structure
 
 - `apps/web` — React, Vite, and TypeScript.
-- `apps/server` — Node.js server and `GET /health`.
-- `packages/crypto` — BIP-39 and deterministic Ed25519, X25519, and history-key derivation.
-
-### Warning
-
-This project is experimental and has not undergone a security audit. Do not use it to protect real messages or store valuable secrets. Never share seed phrases or private keys with other people or services.
+- `apps/server` — Fastify API, PostgreSQL, migrations, challenge-response, and sessions.
+- `packages/crypto` — BIP-39, Ed25519, X25519, and signing functions.

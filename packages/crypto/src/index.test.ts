@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   deriveKeys,
+  signAuth,
+  signKeyBinding,
+  verifyAuth,
+  verifyKeyBinding,
+  bytesToHex,
+  hexToBytes,
   generateMnemonic,
   normalizeMnemonic,
   shortId,
@@ -97,6 +103,87 @@ describe("deriveKeys", () => {
     expect(first.identity.publicKey).not.toEqual(second.identity.publicKey);
     expect(first.encryption.publicKey).not.toEqual(second.encryption.publicKey);
     expect(first.historyKey).not.toEqual(second.historyKey);
+  });
+});
+
+describe("authentication signatures", () => {
+  const keys = deriveKeys(
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  );
+  const challenge = "ab".repeat(32);
+  const auth = signAuth(keys.identity.privateKey, "01".repeat(16), challenge);
+  const binding = signKeyBinding(
+    keys.identity.privateKey,
+    keys.encryption.publicKey,
+  );
+  it("round-trips strict hex", () => {
+    expect(bytesToHex(hexToBytes("00aB"))).toBe("00ab");
+    expect(() => hexToBytes("0")).toThrow();
+    expect(() => hexToBytes("gg")).toThrow();
+  });
+  it("verifies domain-separated auth and key binding", () => {
+    expect(auth).toHaveLength(64);
+    expect(bytesToHex(auth)).toBe(
+      "b88f8a2c1a6193948151dbef073962b79d2012fec1b9ac6f6a562c1a75a20c1a49b619c18110e5a49f368309fda18b480a8ce80ada4412536c7ec67bfde2c002",
+    );
+    expect(
+      verifyAuth(keys.identity.publicKey, "01".repeat(16), challenge, auth),
+    ).toBe(true);
+    expect(
+      verifyAuth(keys.identity.publicKey, "02".repeat(16), challenge, auth),
+    ).toBe(false);
+    expect(
+      verifyAuth(
+        keys.identity.publicKey,
+        "01".repeat(16),
+        "cd".repeat(32),
+        auth,
+      ),
+    ).toBe(false);
+    expect(
+      verifyAuth(
+        deriveKeys(
+          "legal winner thank year wave sausage worth useful legal winner thank yellow",
+        ).identity.publicKey,
+        "01".repeat(16),
+        challenge,
+        auth,
+      ),
+    ).toBe(false);
+    expect(
+      verifyAuth(
+        keys.identity.publicKey,
+        "01".repeat(16),
+        challenge,
+        auth.slice(0, 10),
+      ),
+    ).toBe(false);
+    expect(
+      verifyKeyBinding(
+        keys.identity.publicKey,
+        keys.encryption.publicKey,
+        binding,
+      ),
+    ).toBe(true);
+    expect(
+      verifyKeyBinding(keys.identity.publicKey, new Uint8Array(32), binding),
+    ).toBe(false);
+    expect(
+      verifyAuth(keys.identity.publicKey, "01".repeat(16), challenge, binding),
+    ).toBe(false);
+    expect(
+      verifyKeyBinding(
+        keys.identity.publicKey,
+        keys.encryption.publicKey,
+        auth,
+      ),
+    ).toBe(false);
+    expect(verifyAuth(new Uint8Array(), "x", "y", new Uint8Array())).toBe(
+      false,
+    );
+    expect(
+      verifyKeyBinding(new Uint8Array(), new Uint8Array(), new Uint8Array()),
+    ).toBe(false);
   });
 });
 
