@@ -36,6 +36,7 @@ const encryptionPublicKey = bytesToHex(keys.encryption.publicKey);
 suite("server authentication (PostgreSQL)", () => {
   let app: Awaited<ReturnType<typeof buildApp>>;
   let clock = Date.now();
+  let accountIp = 1;
 
   beforeAll(async () => {
     await pool!.query(
@@ -53,7 +54,11 @@ suite("server authentication (PostgreSQL)", () => {
         "utf8",
       ),
     );
-    app = await buildApp({ databaseUrl: databaseUrl!, now: () => clock });
+    app = await buildApp({
+      databaseUrl: databaseUrl!,
+      now: () => clock,
+      trustProxy: true,
+    });
   });
 
   afterAll(async () => {
@@ -61,10 +66,11 @@ suite("server authentication (PostgreSQL)", () => {
     await pool?.end();
   });
 
-  async function createChallenge(target = app) {
+  async function createChallenge(target = app, forwardedFor?: string) {
     const response = await target.inject({
       method: "POST",
       url: "/auth/challenge",
+      ...(forwardedFor ? { headers: { "x-forwarded-for": forwardedFor } } : {}),
       payload: {},
     });
     return response.json() as { challengeId: string; challenge: string };
@@ -106,10 +112,12 @@ suite("server authentication (PostgreSQL)", () => {
     const accountKeys = deriveKeys(generateMnemonic(12));
     const accountId = bytesToHex(accountKeys.identity.publicKey);
     const accountEncryption = bytesToHex(accountKeys.encryption.publicKey);
-    const challenge = await createChallenge();
+    const forwardedFor = `198.51.100.${accountIp++}`;
+    const challenge = await createChallenge(app, forwardedFor);
     const response = await app.inject({
       method: "POST",
       url: "/auth/login",
+      headers: { "x-forwarded-for": forwardedFor },
       payload: {
         challengeId: challenge.challengeId,
         identityPublicKey: accountId,
@@ -449,10 +457,14 @@ suite("server authentication (PostgreSQL)", () => {
 
   it("rejects a WebSocket handshake with an unexpected Origin", async () => {
     const socket = connect(await listen(), { origin: "https://evil.example" });
+    socket.on("error", () => {
+      // The expected HTTP 403 prevents the WebSocket upgrade.
+    });
     const failed = new Promise<number>((resolve) =>
-      socket.once("unexpected-response", (_request, response) =>
-        resolve(response.statusCode ?? 0),
-      ),
+      socket.once("unexpected-response", (_request, response) => {
+        response.resume();
+        resolve(response.statusCode ?? 0);
+      }),
     );
     expect(await failed).toBe(403);
     socket.terminate();
