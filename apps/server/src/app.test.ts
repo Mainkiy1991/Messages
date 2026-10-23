@@ -54,6 +54,17 @@ suite("server authentication (PostgreSQL)", () => {
         "utf8",
       ),
     );
+    await pool!.query(
+      await readFile(
+        join(
+          import.meta.dirname,
+          "..",
+          "migrations",
+          "003_message_sequence.sql",
+        ),
+        "utf8",
+      ),
+    );
     app = await buildApp({
       databaseUrl: databaseUrl!,
       now: () => clock,
@@ -149,9 +160,18 @@ suite("server authentication (PostgreSQL)", () => {
     return `ws://127.0.0.1:${address.port}/ws`;
   }
 
-  function connect(url: string, options: { origin?: string } = {}) {
+  let websocketIp = 1;
+
+  function connect(
+    url: string,
+    options: { origin?: string; forwardedFor?: string } = {},
+  ) {
+    const forwardedFor = options.forwardedFor ?? `192.0.2.${websocketIp++}`;
     const socket = new WebSocket(url, {
-      headers: options.origin ? { origin: options.origin } : {},
+      headers: {
+        origin: options.origin ?? "http://localhost:5173",
+        "x-forwarded-for": forwardedFor,
+      },
     });
     frameBuffers.set(socket, []);
     socket.on("message", (data) => {
@@ -415,6 +435,42 @@ suite("server authentication (PostgreSQL)", () => {
     socket.close();
   });
 
+  it("serializes duplicate auth frames and removes closed connections from the limit", async () => {
+    const account = await createAccount();
+    const url = await listen();
+    const sockets: WebSocket[] = [];
+    for (let index = 0; index < 5; index++) {
+      const socket = connect(url);
+      sockets.push(socket);
+      await new Promise<void>((resolve, reject) => {
+        socket.once("open", resolve);
+        socket.once("error", reject);
+      });
+      const authOk = nextFrame(socket, (frame) => frame.type === "auth_ok");
+      const duplicateAuthError = nextFrame(
+        socket,
+        (frame) => frame.type === "error" && frame.code === "invalid_frame",
+      );
+      const auth = JSON.stringify({ type: "auth", token: account.token });
+      socket.send(auth);
+      socket.send(auth);
+      await authOk;
+      await duplicateAuthError;
+    }
+    await Promise.all(
+      sockets.map(
+        (socket) =>
+          new Promise<void>((resolve) => {
+            socket.once("close", () => resolve());
+            socket.close();
+          }),
+      ),
+    );
+    const reopened = (await connectAuth(account.token, url)).socket;
+    expect(reopened.readyState).toBe(WebSocket.OPEN);
+    reopened.close();
+  });
+
   it("closes WebSocket with 4401 for an invalid token", async () => {
     const socket = connect(await listen(), { origin: "http://localhost:5173" });
     await new Promise<void>((resolve) => socket.once("open", resolve));
@@ -504,6 +560,77 @@ suite("server authentication (PostgreSQL)", () => {
     b.close();
   });
 
+  it("preserves sequential send order for online and mailbox delivery", async () => {
+    const sender = await createAccount();
+    const onlineRecipient = await createAccount();
+    const offlineRecipient = await createAccount();
+    const url = await listen();
+    const senderSocket = (await connectAuth(sender.token, url)).socket;
+    const onlineSocket = (await connectAuth(onlineRecipient.token, url)).socket;
+    const onlineOrder: string[] = [];
+    const onlineReceived = new Promise<void>((resolve) => {
+      onlineSocket.on("message", (data) => {
+        const frame = JSON.parse(data.toString());
+        if (frame.type !== "message") return;
+        onlineOrder.push(frame.ciphertext);
+        if (onlineOrder.length === 10) resolve();
+      });
+    });
+    const sendPromises = Array.from({ length: 10 }, (_, index) =>
+      nextFrame(
+        senderSocket,
+        (frame) =>
+          frame.type === "sent" &&
+          frame.clientMsgId === index.toString(16).padStart(32, "0"),
+      ),
+    );
+    for (let index = 0; index < 10; index++) {
+      sendFrame(senderSocket, {
+        ...payload(
+          onlineRecipient.userId,
+          index.toString(16).padStart(32, "0"),
+        ),
+        ciphertext: Buffer.from([index + 1]).toString("base64"),
+      });
+      sendFrame(senderSocket, {
+        ...payload(
+          offlineRecipient.userId,
+          (index + 100).toString(16).padStart(32, "0"),
+        ),
+        ciphertext: Buffer.from([index + 1]).toString("base64"),
+      });
+    }
+    await Promise.all(sendPromises);
+    await onlineReceived;
+    const expectedOrder = Array.from({ length: 10 }, (_, index) =>
+      Buffer.from([index + 1]).toString("base64"),
+    );
+    expect(onlineOrder).toEqual(expectedOrder);
+
+    const offlineSocket = connect(url);
+    await new Promise<void>((resolve, reject) => {
+      offlineSocket.once("open", resolve);
+      offlineSocket.once("error", reject);
+    });
+    const authOk = nextFrame(
+      offlineSocket,
+      (frame) => frame.type === "auth_ok",
+    );
+    const mailboxMessages = Array.from({ length: 10 }, () =>
+      nextFrame(offlineSocket, (frame) => frame.type === "message"),
+    );
+    offlineSocket.send(
+      JSON.stringify({ type: "auth", token: offlineRecipient.token }),
+    );
+    await authOk;
+    expect(
+      (await Promise.all(mailboxMessages)).map((frame) => frame.ciphertext),
+    ).toEqual(expectedOrder);
+    senderSocket.close();
+    onlineSocket.close();
+    offlineSocket.close();
+  });
+
   it("delivers offline messages from the mailbox after auth", async () => {
     const sender = await createAccount();
     const recipient = await createAccount();
@@ -574,18 +701,32 @@ suite("server authentication (PostgreSQL)", () => {
     }
   });
 
-  it("does not create duplicate messages for repeated clientMsgId", async () => {
+  it("does not redeliver an already delivered message on repeated clientMsgId", async () => {
     const sender = await createAccount();
     const recipient = await createAccount();
-    const a = (await connectAuth(sender.token, await listen())).socket;
+    const url = await listen();
+    const a = (await connectAuth(sender.token, url)).socket;
+    const b = (await connectAuth(recipient.token, url)).socket;
     const id = randomId();
+    let receivedMessages = 0;
+    b.on("message", (data) => {
+      if ((JSON.parse(data.toString()) as { type?: string }).type === "message")
+        receivedMessages += 1;
+    });
     const sent1 = nextFrame(a, (f) => f.type === "sent");
+    const message = nextFrame(b, (f) => f.type === "message");
     sendFrame(a, payload(recipient.userId, id));
     const first = await sent1;
+    const firstMessage = await message;
+    const delivered = nextFrame(a, (f) => f.type === "delivered");
+    sendFrame(b, { type: "ack", ids: [firstMessage.id] });
+    await delivered;
     const sent2 = nextFrame(a, (f) => f.type === "sent");
     sendFrame(a, payload(recipient.userId, id));
     const second = await sent2;
+    await new Promise((resolve) => setTimeout(resolve, 100));
     expect(second.id).toBe(first.id);
+    expect(receivedMessages).toBe(1);
     expect(
       (
         await pool!.query(
@@ -595,6 +736,38 @@ suite("server authentication (PostgreSQL)", () => {
       ).rows[0].count,
     ).toBe(1);
     a.close();
+    b.close();
+  });
+
+  it("returns client_msg_id_conflict when a retry changes recipient", async () => {
+    const sender = await createAccount();
+    const firstRecipient = await createAccount();
+    const secondRecipient = await createAccount();
+    const url = await listen();
+    const senderSocket = (await connectAuth(sender.token, url)).socket;
+    const firstSocket = (await connectAuth(firstRecipient.token, url)).socket;
+    const secondSocket = (await connectAuth(secondRecipient.token, url)).socket;
+    const clientMsgId = randomId();
+    const originalSent = nextFrame(
+      senderSocket,
+      (frame) => frame.type === "sent",
+    );
+    const originalMessage = nextFrame(
+      firstSocket,
+      (frame) => frame.type === "message",
+    );
+    sendFrame(senderSocket, payload(firstRecipient.userId, clientMsgId));
+    await originalSent;
+    await originalMessage;
+    const conflict = nextFrame(senderSocket, (frame) => frame.type === "error");
+    sendFrame(senderSocket, payload(secondRecipient.userId, clientMsgId));
+    expect(await conflict).toMatchObject({
+      code: "client_msg_id_conflict",
+      clientMsgId,
+    });
+    senderSocket.close();
+    firstSocket.close();
+    secondSocket.close();
   });
 
   it("returns recipient_not_found for an unknown recipient", async () => {
@@ -617,6 +790,45 @@ suite("server authentication (PostgreSQL)", () => {
     });
     expect(await error).toMatchObject({ code: "invalid_frame" });
     a.close();
+  });
+
+  it("accepts ciphertext and senderCopy at exactly 64 KiB", async () => {
+    const sender = await createAccount();
+    const recipient = await createAccount();
+    const url = await listen();
+    const a = (await connectAuth(sender.token, url)).socket;
+    const b = (await connectAuth(recipient.token, url)).socket;
+    const maximumField = Buffer.alloc(64 * 1024, 7).toString("base64");
+    const sent = nextFrame(a, (frame) => frame.type === "sent");
+    const message = nextFrame(b, (frame) => frame.type === "message");
+    sendFrame(a, {
+      ...payload(recipient.userId),
+      ciphertext: maximumField,
+      senderCopy: maximumField,
+    });
+    await sent;
+    expect((await message).ciphertext).toBe(maximumField);
+    a.close();
+    b.close();
+  });
+
+  it("returns internal_error with clientMsgId when frame processing hits a database error", async () => {
+    const sender = await createAccount();
+    const recipient = await createAccount();
+    const a = (await connectAuth(sender.token, await listen())).socket;
+    const clientMsgId = randomId();
+    await pool!.query("ALTER TABLE messages RENAME TO messages_test_hold");
+    try {
+      const error = nextFrame(a, (frame) => frame.type === "error");
+      sendFrame(a, payload(recipient.userId, clientMsgId));
+      expect(await error).toMatchObject({
+        code: "internal_error",
+        clientMsgId,
+      });
+    } finally {
+      await pool!.query("ALTER TABLE messages_test_hold RENAME TO messages");
+      a.close();
+    }
   });
 
   it("reports malformed JSON and keeps the server healthy", async () => {
@@ -673,18 +885,59 @@ suite("server authentication (PostgreSQL)", () => {
     expect(await closed).toBe(4401);
   });
 
-  it("rate limits more than 30 send frames in ten seconds", async () => {
+  it("closes a connection after 120 frames in ten seconds", async () => {
     const sender = await createAccount();
-    const recipient = await createAccount();
-    const a = (await connectAuth(sender.token, await listen())).socket;
-    const error = nextFrame(
-      a,
-      (f) => f.type === "error" && f.code === "rate_limited",
+    const a = connect(await listen());
+    await new Promise<void>((resolve, reject) => {
+      a.once("open", resolve);
+      a.once("error", reject);
+    });
+    const invalidFrameErrors = new Promise<void>((resolve) => {
+      let count = 0;
+      a.on("message", (data) => {
+        const frame = JSON.parse(data.toString());
+        if (frame.type === "error" && frame.code === "invalid_frame") {
+          count += 1;
+          if (count === 119) resolve();
+        }
+      });
+    });
+    const auth = JSON.stringify({ type: "auth", token: sender.token });
+    for (let index = 0; index < 120; index++) a.send(auth);
+    await invalidFrameErrors;
+    const closed = new Promise<number>((resolve) =>
+      a.once("close", (code) => resolve(code)),
     );
-    for (let index = 0; index < 31; index++)
-      sendFrame(a, payload(recipient.userId));
-    expect(await error).toMatchObject({ code: "rate_limited" });
-    a.close();
+    sendFrame(a, { type: "unknown" });
+    expect(await closed).toBe(4429);
+  });
+
+  it("rate limits WebSocket handshakes to 30 per minute per IP", async () => {
+    const url = await listen();
+    const sharedIp = "203.0.113.30";
+    for (let index = 0; index < 30; index++) {
+      const socket = connect(url, { forwardedFor: sharedIp });
+      await new Promise<void>((resolve, reject) => {
+        socket.once("open", resolve);
+        socket.once("error", reject);
+      });
+      const closed = new Promise<void>((resolve) =>
+        socket.once("close", () => resolve()),
+      );
+      socket.close();
+      await closed;
+    }
+    const limited = connect(url, { forwardedFor: sharedIp });
+    limited.on("error", () => {
+      // The expected HTTP 429 prevents the WebSocket upgrade.
+    });
+    const status = new Promise<number>((resolve) =>
+      limited.once("unexpected-response", (_request, response) => {
+        response.resume();
+        resolve(response.statusCode ?? 0);
+      }),
+    );
+    expect(await status).toBe(429);
   });
 
   it("returns 400 for malformed JSON", async () => {

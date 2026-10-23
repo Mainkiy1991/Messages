@@ -54,12 +54,47 @@ function decodeBase64Size(value: string): number {
   return bytes.toString("base64") === value ? bytes.length : -1;
 }
 
+function clientMsgIdFromFrame(frame: unknown): string | undefined {
+  if (
+    frame &&
+    typeof frame === "object" &&
+    "clientMsgId" in frame &&
+    typeof frame.clientMsgId === "string"
+  ) {
+    return frame.clientMsgId;
+  }
+  return undefined;
+}
+
+function clientMsgIdFromData(
+  data: WebSocket.RawData,
+  isBinary: boolean,
+): string | undefined {
+  if (isBinary) return undefined;
+  try {
+    return clientMsgIdFromFrame(JSON.parse(data.toString()));
+  } catch {
+    return undefined;
+  }
+}
+
+function errorFrame(socket: WebSocket, code: string, clientMsgId?: string) {
+  if (socket.readyState !== WebSocket.OPEN) return;
+  socket.send(
+    JSON.stringify({
+      type: "error",
+      code,
+      ...(clientMsgId ? { clientMsgId } : {}),
+    }),
+  );
+}
+
 export async function registerWebSocket(
   app: FastifyInstance,
   pool: Pool,
   options: WsOptions,
 ): Promise<void> {
-  const maxPayload = options.maxPayload ?? 128 * 1024;
+  const maxPayload = options.maxPayload ?? 256 * 1024;
   const batchSize = options.batchSize ?? 200;
   const maxConnections = options.maxConnectionsPerUser ?? 5;
   const hub = createMessageHub(pool, batchSize);
@@ -99,6 +134,7 @@ export async function registerWebSocket(
     "/ws",
     {
       websocket: true,
+      config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
       preValidation: async (request: FastifyRequest, reply: FastifyReply) => {
         const origin = request.headers.origin;
         if (origin && origin !== options.origin) {
@@ -111,10 +147,14 @@ export async function registerWebSocket(
       let authenticated = false;
       let closed = false;
       let lastWindow = Date.now();
-      let sendCount = 0;
+      let frameCount = 0;
+      let frameQueue: Promise<void> = Promise.resolve();
+
       const authTimer = setTimeout(() => {
-        if (!authenticated && !closed)
+        if (!authenticated && !closed) {
+          closed = true;
           socket.close(4401, "authentication required");
+        }
       }, options.authTimeoutMs ?? 5000);
       authTimer.unref();
 
@@ -129,27 +169,47 @@ export async function registerWebSocket(
       socket.on("error", () => {
         closed = true;
       });
-      socket.on("message", (data, isBinary) => {
-        void (async () => {
-          if (isBinary) {
-            if (authenticated)
-              socket.send(
-                JSON.stringify({ type: "error", code: "invalid_frame" }),
-              );
-            else socket.close(4401, "authentication required");
-            return;
+
+      async function processFrame(
+        data: WebSocket.RawData,
+        isBinary: boolean,
+      ): Promise<void> {
+        if (closed || socket.readyState !== WebSocket.OPEN) return;
+
+        const now = Date.now();
+        if (now - lastWindow >= 10_000) {
+          lastWindow = now;
+          frameCount = 0;
+        }
+        frameCount += 1;
+        if (frameCount > 120) {
+          closed = true;
+          socket.close(4429, "frame rate limit exceeded");
+          return;
+        }
+
+        if (isBinary) {
+          if (authenticated) errorFrame(socket, "invalid_frame");
+          else {
+            closed = true;
+            socket.close(4401, "authentication required");
           }
-          let frame: unknown;
-          try {
-            frame = JSON.parse(data.toString());
-          } catch {
-            if (authenticated)
-              socket.send(
-                JSON.stringify({ type: "error", code: "invalid_frame" }),
-              );
-            else socket.close(4401, "authentication required");
-            return;
+          return;
+        }
+
+        let frame: unknown;
+        try {
+          frame = JSON.parse(data.toString());
+        } catch {
+          if (authenticated) errorFrame(socket, "invalid_frame");
+          else {
+            closed = true;
+            socket.close(4401, "authentication required");
           }
+          return;
+        }
+
+        try {
           if (!authenticated) {
             if (
               !frame ||
@@ -158,6 +218,7 @@ export async function registerWebSocket(
               typeof (frame as { token?: unknown }).token !== "string" ||
               !tokenPattern.test((frame as { token: string }).token)
             ) {
+              closed = true;
               socket.close(4401, "authentication required");
               return;
             }
@@ -167,7 +228,9 @@ export async function registerWebSocket(
               "SELECT user_id FROM sessions WHERE token_hash=$1 AND expires_at > now()",
               [hash],
             );
+            if (closed || socket.readyState !== WebSocket.OPEN) return;
             if (!result.rowCount) {
+              closed = true;
               socket.close(4401, "invalid token");
               return;
             }
@@ -175,6 +238,7 @@ export async function registerWebSocket(
             const userConnections =
               perUser.get(userId) ?? new Set<Connection>();
             if (userConnections.size >= maxConnections) {
+              closed = true;
               socket.close(4401, "connection limit");
               return;
             }
@@ -193,31 +257,20 @@ export async function registerWebSocket(
             await hub.sendMailbox(socket, userId);
             return;
           }
+
           if (
             !frame ||
             typeof frame !== "object" ||
             typeof (frame as { type?: unknown }).type !== "string"
           ) {
-            socket.send(
-              JSON.stringify({ type: "error", code: "invalid_frame" }),
-            );
+            errorFrame(socket, "invalid_frame");
             return;
           }
+
           const type = (frame as { type: string }).type;
           if (type === "send") {
-            const current = Date.now();
-            if (current - lastWindow >= 10_000) {
-              lastWindow = current;
-              sendCount = 0;
-            }
-            sendCount += 1;
-            if (sendCount > 30) {
-              socket.send(
-                JSON.stringify({ type: "error", code: "rate_limited" }),
-              );
-              return;
-            }
             const parsed = sendSchema.safeParse(frame);
+            const clientMsgId = clientMsgIdFromFrame(frame);
             if (
               !parsed.success ||
               decodeBase64Size(parsed.data?.ciphertext ?? "") <= 0 ||
@@ -225,20 +278,7 @@ export async function registerWebSocket(
               decodeBase64Size(parsed.data?.senderCopy ?? "") <= 0 ||
               decodeBase64Size(parsed.data?.senderCopy ?? "") > 64 * 1024
             ) {
-              socket.send(
-                JSON.stringify({
-                  type: "error",
-                  code: "invalid_frame",
-                  ...("clientMsgId" in frame &&
-                  typeof (frame as { clientMsgId?: unknown }).clientMsgId ===
-                    "string"
-                    ? {
-                        clientMsgId: (frame as { clientMsgId: string })
-                          .clientMsgId,
-                      }
-                    : {}),
-                }),
-              );
+              errorFrame(socket, "invalid_frame", clientMsgId);
               return;
             }
             const input = parsed.data;
@@ -247,20 +287,15 @@ export async function registerWebSocket(
               [input.to],
             );
             if (!recipient.rowCount) {
-              socket.send(
-                JSON.stringify({
-                  type: "error",
-                  code: "recipient_not_found",
-                  clientMsgId: input.clientMsgId,
-                }),
-              );
+              errorFrame(socket, "recipient_not_found", input.clientMsgId);
               return;
             }
-            const saved = await pool.query<MessageRow>(
+
+            const inserted = await pool.query<MessageRow>(
               `INSERT INTO messages(sender_id, recipient_id, client_msg_id, ciphertext, sender_copy)
-             VALUES($1,$2,$3,$4,$5)
-             ON CONFLICT(sender_id, client_msg_id) DO UPDATE SET client_msg_id=EXCLUDED.client_msg_id
-             RETURNING id, sender_id, recipient_id, client_msg_id, ciphertext, sender_copy, created_at, delivered_at`,
+               VALUES($1,$2,$3,$4,$5)
+               ON CONFLICT(sender_id, client_msg_id) DO NOTHING
+               RETURNING id, sender_id, recipient_id, client_msg_id, ciphertext, sender_copy, created_at, delivered_at`,
               [
                 connection!.userId,
                 input.to,
@@ -269,7 +304,24 @@ export async function registerWebSocket(
                 input.senderCopy,
               ],
             );
-            const row = saved.rows[0];
+            const isNew = inserted.rows.length > 0;
+            let row = inserted.rows[0];
+            if (!row) {
+              const existing = await pool.query<MessageRow>(
+                `SELECT id, sender_id, recipient_id, client_msg_id, ciphertext,
+                        sender_copy, created_at, delivered_at
+                 FROM messages WHERE sender_id=$1 AND client_msg_id=$2`,
+                [connection!.userId, input.clientMsgId],
+              );
+              row = existing.rows[0];
+              if (!row)
+                throw new Error("Conflicting message row was not found");
+            }
+            if (row.recipient_id !== input.to) {
+              errorFrame(socket, "client_msg_id_conflict", input.clientMsgId);
+              return;
+            }
+
             const createdAt = row.created_at.toISOString();
             hub.sendToUser(connection!.userId, {
               type: "sent",
@@ -277,29 +329,30 @@ export async function registerWebSocket(
               id: row.id,
               createdAt,
             });
-            hub.sendToUser(input.to, {
-              type: "message",
-              id: row.id,
-              from: row.sender_id,
-              ciphertext: row.ciphertext,
-              createdAt,
-            });
+            if (isNew) {
+              hub.sendToUser(row.recipient_id, {
+                type: "message",
+                id: row.id,
+                from: row.sender_id,
+                ciphertext: row.ciphertext,
+                createdAt,
+              });
+            }
             return;
           }
+
           if (type === "ack") {
             const parsed = ackSchema.safeParse(frame);
             if (!parsed.success) {
-              socket.send(
-                JSON.stringify({ type: "error", code: "invalid_frame" }),
-              );
+              errorFrame(socket, "invalid_frame");
               return;
             }
             const ids = parsed.data.ids;
             if (!ids.length) return;
             const acknowledged = await pool.query<MessageRow>(
               `UPDATE messages SET delivered_at=now()
-             WHERE recipient_id=$1 AND id=ANY($2::uuid[]) AND delivered_at IS NULL
-             RETURNING id, sender_id, recipient_id, client_msg_id, ciphertext, sender_copy, created_at, delivered_at`,
+               WHERE recipient_id=$1 AND id=ANY($2::uuid[]) AND delivered_at IS NULL
+               RETURNING id, sender_id, recipient_id, client_msg_id, ciphertext, sender_copy, created_at, delivered_at`,
               [connection!.userId, ids],
             );
             for (const row of acknowledged.rows) {
@@ -313,13 +366,38 @@ export async function registerWebSocket(
             await hub.acknowledge(socket, ids, connection!.userId);
             return;
           }
-          socket.send(JSON.stringify({ type: "error", code: "invalid_frame" }));
-        })().catch(() => {
-          if (socket.readyState === WebSocket.OPEN)
-            socket.send(
-              JSON.stringify({ type: "error", code: "invalid_frame" }),
+
+          errorFrame(socket, "invalid_frame");
+        } catch (error) {
+          const errorType = error instanceof Error ? error.name : typeof error;
+          const errorMessage =
+            error instanceof Error ? error.message : "Unknown frame error";
+          app.log.error(
+            { event: "ws_frame_error", errorType, errorMessage },
+            "WebSocket frame processing failed",
+          );
+          errorFrame(socket, "internal_error", clientMsgIdFromFrame(frame));
+        }
+      }
+
+      socket.on("message", (data, isBinary) => {
+        frameQueue = frameQueue
+          .then(() => processFrame(data, isBinary))
+          .catch((error: unknown) => {
+            const errorType =
+              error instanceof Error ? error.name : typeof error;
+            const errorMessage =
+              error instanceof Error ? error.message : "Unknown frame error";
+            app.log.error(
+              { event: "ws_frame_error", errorType, errorMessage },
+              "WebSocket frame processing failed",
             );
-        });
+            errorFrame(
+              socket,
+              "internal_error",
+              clientMsgIdFromData(data, isBinary),
+            );
+          });
       });
     },
   );
@@ -337,7 +415,6 @@ export async function registerWebSocket(
   }, 30_000);
   heartbeat.unref();
   app.addHook("onClose", async () => clearInterval(heartbeat));
-  // Expose the closure to the logout route without retaining raw tokens.
   (
     app as FastifyInstance & { closeWsToken?: (hash: string) => void }
   ).closeWsToken = closeToken;

@@ -34,7 +34,7 @@ export function createMessageHub(pool: Pool, batchSize = 200): MessageHub {
       `SELECT id, sender_id, recipient_id, client_msg_id, ciphertext,
               sender_copy, created_at, delivered_at
        FROM messages WHERE recipient_id=$1 AND delivered_at IS NULL
-       ORDER BY created_at ASC, id ASC LIMIT $2`,
+       ORDER BY seq ASC LIMIT $2`,
       [userId, batchSize],
     );
     if (result.rows.length === 0) return;
