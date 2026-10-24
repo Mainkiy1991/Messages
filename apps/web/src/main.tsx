@@ -593,6 +593,16 @@ function App() {
                     >
                       <strong>{chat.peerId.slice(-10)}</strong>
                       <span>{chat.messages.at(-1)?.text ?? t.noMessages}</span>
+                      {chat.messages.at(-1) && (
+                        <small>
+                          {new Date(
+                            chat.messages.at(-1)!.createdAt,
+                          ).toLocaleTimeString(
+                            language === "ru" ? "ru-RU" : "en-US",
+                            { hour: "2-digit", minute: "2-digit" },
+                          )}
+                        </small>
+                      )}
                     </button>
                   ))}
               </aside>

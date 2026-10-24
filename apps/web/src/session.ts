@@ -60,12 +60,6 @@ export async function restoreServerSession(): Promise<ServerSession | null> {
   return value ?? null;
 }
 
-export async function saveServerSessionValue(
-  session: ServerSession,
-): Promise<void> {
-  await saveServerSession(session);
-}
-
 export async function restoreSession(): Promise<DerivedKeys | null> {
   const db = await openDatabase();
   const value = await new Promise<DerivedKeys | undefined>(
