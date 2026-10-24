@@ -63,7 +63,10 @@ export async function buildApp(options: {
         : String(options.trustProxy),
   });
   const now = options.now ?? Date.now;
-  const pool = new Pool({ connectionString: config.DATABASE_URL });
+  const pool = new Pool({
+    connectionString: config.DATABASE_URL,
+    connectionTimeoutMillis: 10_000,
+  });
   const app = Fastify({
     trustProxy: config.TRUST_PROXY,
     logger: {
@@ -122,7 +125,12 @@ export async function buildApp(options: {
     ]);
   }
 
-  await pool.query("DELETE FROM sessions WHERE expires_at < now()");
+  try {
+    await pool.query("DELETE FROM sessions WHERE expires_at < now()");
+  } catch {
+    await pool.end().catch(() => undefined);
+    throw new Error("Не удалось подключиться к базе данных");
+  }
   const sessionCleanup = setInterval(() => {
     void pool
       .query("DELETE FROM sessions WHERE expires_at < now()")
