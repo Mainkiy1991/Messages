@@ -92,6 +92,7 @@ export function hexToBytes(hex: string): Uint8Array {
 
 const MESSAGE_INFO = encoder.encode("messages/v1/message");
 const HISTORY_INFO = encoder.encode("messages/v1/history-entry");
+const CONTACTS_INFO = encoder.encode("messages/v1/contacts");
 const VERSION = 1;
 const NONCE_LENGTH = 24;
 const MAX_TEXT_CHARS = 4000;
@@ -282,6 +283,76 @@ export function decryptHistoryEntry(input: {
     );
   } catch {
     throw new DecryptError();
+  }
+}
+
+export function encryptContactBook(input: {
+  historyKey: Uint8Array;
+  contacts: Record<string, string>;
+}): string {
+  checkKey(input.historyKey);
+  validateContacts(input.contacts);
+  const key = hkdf(sha256, input.historyKey, HKDF_SALT, CONTACTS_INFO, 32);
+  const nonce = randomBytes(NONCE_LENGTH);
+  const plaintext = encoder.encode(
+    JSON.stringify({ v: VERSION, contacts: input.contacts }),
+  );
+  return bytesToBase64(
+    concat(
+      Uint8Array.of(VERSION),
+      nonce,
+      xchacha20poly1305(key, nonce, CONTACTS_INFO).encrypt(plaintext),
+    ),
+  );
+}
+
+export function decryptContactBook(input: {
+  historyKey: Uint8Array;
+  blob: string;
+}): Record<string, string> {
+  try {
+    checkKey(input.historyKey);
+    const packed = base64ToBytes(input.blob);
+    const decoded = decodeEnvelope(packed);
+    const key = hkdf(sha256, input.historyKey, HKDF_SALT, CONTACTS_INFO, 32);
+    const value = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(
+        xchacha20poly1305(key, decoded.nonce, CONTACTS_INFO).decrypt(
+          decoded.body,
+        ),
+      ),
+    ) as Record<string, unknown>;
+    if (
+      value.v !== VERSION ||
+      !value.contacts ||
+      typeof value.contacts !== "object" ||
+      Array.isArray(value.contacts)
+    )
+      throw new Error("Invalid contact book");
+    const contacts = value.contacts as Record<string, string>;
+    validateContacts(contacts);
+    return contacts;
+  } catch {
+    throw new DecryptError();
+  }
+}
+
+function validateContacts(contacts: Record<string, string>): void {
+  if (
+    !contacts ||
+    typeof contacts !== "object" ||
+    Array.isArray(contacts) ||
+    Object.keys(contacts).length > 1000
+  )
+    throw new TypeError("Invalid contacts");
+  for (const [userId, name] of Object.entries(contacts)) {
+    if (
+      !/^[0-9a-f]{64}$/u.test(userId) ||
+      typeof name !== "string" ||
+      name.trim().length === 0 ||
+      Array.from(name.trim()).length > 64
+    )
+      throw new TypeError("Invalid contact");
   }
 }
 
