@@ -28,13 +28,15 @@ $EDITOR apps/server/.env
 
 Команды сервера, миграции и smoke загружают `apps/server/.env` относительно расположения исходного файла; переменные, уже заданные в окружении, имеют приоритет. Например, после копирования файла команда migrate сама найдёт `DATABASE_URL`.
 
+После миграции запустите сайт и API вместе из корня командой `pnpm dev`. Сервер автоматически перезапускается при изменении файлов. Для отдельных терминалов используйте `pnpm dev:web` и `pnpm dev:server`. Если запуск через `concurrently` на вашей системе не подходит, откройте два терминала в корне и выполните эти две команды отдельно. Сервер по умолчанию слушает `127.0.0.1:3000`; готовность видна по строке `Server listening. Сервер запущен: http://127.0.0.1:3000`, а `http://localhost:3000/health` возвращает `{"status":"ok"}`. Таймаут подключения к PostgreSQL — 10 секунд; при ошибке сервер сообщает `Не удалось подключиться к базе данных`.
+
 ```sh
 pnpm install
 pnpm --filter @messages/server migrate
 pnpm dev
 ```
 
-`.env` содержит пароль: никогда не коммитьте его и не показывайте другим. `TRUST_PROXY=false` используется по умолчанию. На Render установите `TRUST_PROXY=true`, чтобы rate limit учитывал клиентский IP из заголовков доверенного прокси.
+`.env` содержит пароль: никогда не коммитьте его и не показывайте другим. `HOST=127.0.0.1` и `TRUST_PROXY=false` используются по умолчанию. На Render установите `HOST=0.0.0.0`, чтобы сервер принимал внешние подключения, и `TRUST_PROXY=true`, чтобы rate limit учитывал клиентский IP из заголовков доверенного прокси.
 
 API на `http://localhost:3000`: `GET /health`; `POST /auth/challenge` выдаёт одноразовый challenge; `POST /auth/login` проверяет Ed25519-подписи и выдаёт Bearer-токен; `POST /auth/logout` удаляет сессию; `GET /me` возвращает ваши публичные ключи; `GET /users/:userId/keys` возвращает публичный ключ пользователя. Для защищённых запросов используйте `Authorization: Bearer <token>`.
 
@@ -98,13 +100,15 @@ $EDITOR apps/server/.env
 
 The server, migration, and smoke entrypoints load `apps/server/.env` relative to their source file. Variables already present in the environment take precedence, so migrate finds `DATABASE_URL` after the file is copied.
 
+After migrating, start the website and API together from the repository root with `pnpm dev`. The server restarts automatically when files change. For separate terminals, run `pnpm dev:web` and `pnpm dev:server`. If `concurrently` does not work on your system, open two terminals at the repository root and run these commands separately. By default, the server listens on `127.0.0.1:3000`; look for `Server listening. Сервер запущен: http://127.0.0.1:3000`, and `http://localhost:3000/health` returns `{"status":"ok"}`. The PostgreSQL connection timeout is 10 seconds; on failure, the server reports `Не удалось подключиться к базе данных`.
+
 ```sh
 pnpm install
 pnpm --filter @messages/server migrate
 pnpm dev
 ```
 
-`.env` contains your database password. Never commit or share it. `TRUST_PROXY=false` is the default. Set `TRUST_PROXY=true` when deploying behind Render's proxy so rate limits use each client's forwarded IP.
+`.env` contains your database password. Never commit or share it. `HOST=127.0.0.1` and `TRUST_PROXY=false` are the defaults. On Render, set `HOST=0.0.0.0` so the server accepts external connections, and set `TRUST_PROXY=true` so rate limits use each client's forwarded IP.
 
 API at `http://localhost:3000`: `GET /health`; `POST /auth/challenge` creates a one-use challenge; `POST /auth/login` verifies Ed25519 signatures and returns a Bearer token; `POST /auth/logout` removes the session; `GET /me` returns your public keys; `GET /users/:userId/keys` returns a user's public key. Send `Authorization: Bearer <token>` for protected requests.
 

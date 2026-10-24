@@ -6,7 +6,10 @@ try {
   await loadServerEnv();
   const config = loadConfig();
   const app = await buildApp({ databaseUrl: config.DATABASE_URL });
-  await app.listen({ port: config.PORT, host: "0.0.0.0" });
+  await app.listen({ port: config.PORT, host: config.HOST });
+  console.log(
+    `Server listening. Сервер запущен: http://${config.HOST}:${config.PORT}`,
+  );
 } catch (error) {
   console.error(
     error instanceof Error ? error.message : "Server startup failed",
