@@ -229,10 +229,15 @@ function App() {
         {screen === "welcome" && (
           <>
             <h1>{t.welcome}</h1>
-            <button className="primary" onClick={() => setScreen("create")}>
+            <button
+              data-testid="create-account"
+              className="primary"
+              onClick={() => setScreen("create")}
+            >
               {t.create}
             </button>
             <button
+              data-testid="open-login"
               className="secondary"
               onClick={() => {
                 setPhrase("");
@@ -266,7 +271,7 @@ function App() {
           <form onSubmit={finishCreate}>
             <h1>{t.verify}</h1>
             <p className="warning">{t.warning}</p>
-            <ol className="seed-list">
+            <ol className="seed-list" data-testid="seed-phrase">
               {phrase.split(" ").map((word, i) => (
                 <li key={i}>
                   <span>{word}</span>
@@ -320,7 +325,11 @@ function App() {
         {screen === "home" && (
           <>
             <h1>{t.title}</h1>
-            <p className="muted">
+            <p
+              className="muted"
+              data-testid="connection-status"
+              data-state={socketState}
+            >
               {t.chats} ·{" "}
               {socketState === "connected"
                 ? t.connected
@@ -330,7 +339,7 @@ function App() {
             </p>
             <div className="id-box">
               <label>{t.userId}</label>
-              <code>{userId}</code>
+              <code data-testid="user-id">{userId}</code>
               <button
                 className="secondary"
                 onClick={() => {
@@ -348,49 +357,64 @@ function App() {
                 <form
                   onSubmit={(event) => void openChat(event)}
                   className="new-chat"
+                  data-testid="new-chat-form"
                 >
                   <input
                     aria-label={t.peerId}
+                    data-testid="peer-id-input"
                     value={peerInput}
                     onChange={(event) => setPeerInput(event.target.value)}
                     placeholder={t.peerId}
                   />
-                  <button className="secondary">{t.newChat}</button>
+                  <button data-testid="new-chat" className="secondary">
+                    {t.newChat}
+                  </button>
                 </form>
                 {chatError && <p className="error">{chatError}</p>}
-                {chats
-                  .slice()
-                  .sort((a, b) =>
-                    (b.messages.at(-1)?.createdAt ?? "").localeCompare(
-                      a.messages.at(-1)?.createdAt ?? "",
-                    ),
-                  )
-                  .map((chat) => (
-                    <button
-                      className={`chat-list-item ${chat.peerId === activePeer ? "selected" : ""}`}
-                      key={chat.peerId}
-                      onClick={() => {
-                        controllerRef.current?.selectChat(chat.peerId);
-                        setMobileChat(true);
-                      }}
-                    >
-                      <strong>{chat.peerId.slice(-10)}</strong>
-                      <span>{chat.messages.at(-1)?.text ?? t.noMessages}</span>
-                      {chat.unreadCount > 0 && (
-                        <b className="unread-count">{chat.unreadCount}</b>
-                      )}
-                      {chat.messages.at(-1) && (
-                        <small>
-                          {new Date(
-                            chat.messages.at(-1)!.createdAt,
-                          ).toLocaleTimeString(
-                            language === "ru" ? "ru-RU" : "en-US",
-                            { hour: "2-digit", minute: "2-digit" },
-                          )}
-                        </small>
-                      )}
-                    </button>
-                  ))}
+                <div data-testid="chat-list">
+                  {chats
+                    .slice()
+                    .sort((a, b) =>
+                      (b.messages.at(-1)?.createdAt ?? "").localeCompare(
+                        a.messages.at(-1)?.createdAt ?? "",
+                      ),
+                    )
+                    .map((chat) => (
+                      <button
+                        data-testid="chat-item"
+                        data-peer-id={chat.peerId}
+                        className={`chat-list-item ${chat.peerId === activePeer ? "selected" : ""}`}
+                        key={chat.peerId}
+                        onClick={() => {
+                          controllerRef.current?.selectChat(chat.peerId);
+                          setMobileChat(true);
+                        }}
+                      >
+                        <strong>{chat.peerId.slice(-10)}</strong>
+                        <span>
+                          {chat.messages.at(-1)?.text ?? t.noMessages}
+                        </span>
+                        {chat.unreadCount > 0 && (
+                          <b
+                            className="unread-count"
+                            data-testid="unread-count"
+                          >
+                            {chat.unreadCount}
+                          </b>
+                        )}
+                        {chat.messages.at(-1) && (
+                          <small>
+                            {new Date(
+                              chat.messages.at(-1)!.createdAt,
+                            ).toLocaleTimeString(
+                              language === "ru" ? "ru-RU" : "en-US",
+                              { hour: "2-digit", minute: "2-digit" },
+                            )}
+                          </small>
+                        )}
+                      </button>
+                    ))}
+                </div>
               </aside>
               <section className="conversation">
                 {activePeer ? (
@@ -413,6 +437,9 @@ function App() {
                           ?.messages ?? []
                       ).map((message) => (
                         <article
+                          data-testid="message"
+                          data-status={message.status}
+                          data-direction={message.direction}
                           className={`message ${message.direction}`}
                           key={message.id}
                         >
@@ -421,7 +448,7 @@ function App() {
                               ? t.decryptFailed
                               : message.text}
                           </div>
-                          <small>
+                          <small data-testid="message-status">
                             {new Date(message.createdAt).toLocaleTimeString(
                               language === "ru" ? "ru-RU" : "en-US",
                               { hour: "2-digit", minute: "2-digit" },
@@ -457,6 +484,7 @@ function App() {
                     >
                       <textarea
                         value={draft}
+                        data-testid="message-input"
                         maxLength={4000}
                         onChange={(event) => setDraft(event.target.value)}
                         onKeyDown={(event) => {
@@ -467,7 +495,11 @@ function App() {
                         }}
                         placeholder={t.messagePlaceholder}
                       />
-                      <button className="primary" disabled={!draft.trim()}>
+                      <button
+                        data-testid="send-message"
+                        className="primary"
+                        disabled={!draft.trim()}
+                      >
                         {t.send}
                       </button>
                     </form>
@@ -478,6 +510,7 @@ function App() {
               </section>
             </section>
             <button
+              data-testid="logout"
               className="danger"
               onClick={() => setShowLogoutConfirmation(true)}
             >
@@ -490,7 +523,11 @@ function App() {
                 aria-labelledby="logout-message"
               >
                 <p id="logout-message">{t.confirmLogout}</p>
-                <button className="danger" onClick={() => void confirmLogout()}>
+                <button
+                  data-testid="confirm-logout"
+                  className="danger"
+                  onClick={() => void confirmLogout()}
+                >
                   {t.confirm}
                 </button>
                 <button
