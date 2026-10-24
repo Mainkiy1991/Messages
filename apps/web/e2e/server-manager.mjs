@@ -10,15 +10,14 @@ let child;
 
 async function waitForServer() {
   for (let attempt = 0; attempt < 100; attempt++) {
-    if (
-      (child?.exitCode !== null && child?.exitCode !== undefined) ||
-      (child?.signalCode !== null && child?.signalCode !== undefined)
-    ) {
+    if (!child || child.exitCode !== null || child.signalCode !== null) {
       throw new Error(`Server exited with code ${child.exitCode}`);
     }
     try {
       const response = await globalThis.fetch("http://127.0.0.1:3000/health");
-      if (response.ok) return;
+      if (response.ok && child.exitCode === null && child.signalCode === null) {
+        return;
+      }
     } catch {
       // The API process is still starting.
     }
@@ -27,8 +26,19 @@ async function waitForServer() {
   throw new Error("Timed out waiting for the API server");
 }
 
+async function assertPortAvailable(targetPort) {
+  const probe = createServer();
+  await new Promise((resolveProbe, rejectProbe) => {
+    probe.once("error", rejectProbe);
+    probe.listen(targetPort, "127.0.0.1", () => {
+      probe.close((error) => (error ? rejectProbe(error) : resolveProbe()));
+    });
+  });
+}
+
 async function startServer() {
   if (child && child.exitCode === null && child.signalCode === null) return;
+  await assertPortAvailable(3000);
   const databaseUrl = process.env.E2E_DATABASE_URL;
   if (!databaseUrl) throw new Error("E2E_DATABASE_URL is required");
   child = spawn(process.execPath, ["apps/server/dist/index.js"], {

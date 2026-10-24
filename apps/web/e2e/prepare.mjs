@@ -22,5 +22,10 @@ for (const args of [
   ["--filter", "@messages/web", "build"],
   ["--filter", "@messages/server", "migrate"],
 ]) {
-  execFileSync(pnpm, args, { cwd: root, env, stdio: "inherit" });
+  execFileSync(pnpm, args, {
+    cwd: root,
+    env,
+    stdio: "inherit",
+    shell: process.platform === "win32",
+  });
 }

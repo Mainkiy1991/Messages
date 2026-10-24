@@ -18,14 +18,14 @@ export default defineConfig({
     {
       command: "node e2e/server-manager.mjs",
       url: "http://127.0.0.1:3001/health",
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 30_000,
     },
     {
       command:
         "pnpm exec vite preview --host 127.0.0.1 --port 5173 --strictPort",
       url: "http://localhost:5173",
-      reuseExistingServer: !process.env.CI,
+      reuseExistingServer: false,
       timeout: 30_000,
     },
   ],

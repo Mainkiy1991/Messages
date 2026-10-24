@@ -6,7 +6,12 @@ import {
   type Page,
 } from "@playwright/test";
 
-type User = { context: BrowserContext; page: Page; errors: string[] };
+type User = {
+  context: BrowserContext;
+  page: Page;
+  errors: string[];
+  expectedDisconnect: boolean;
+};
 type Fixtures = {
   serverControl: { stop(): Promise<void>; start(): Promise<void> };
 };
@@ -30,14 +35,22 @@ async function openUser(browser: Browser): Promise<User> {
     localStorage.setItem("messages-language", "en");
   });
   const page = await context.newPage();
-  const errors: string[] = [];
-  page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
+  const user: User = { context, page, errors: [], expectedDisconnect: false };
+  page.on("pageerror", (error) =>
+    user.errors.push(`pageerror: ${error.message}`),
+  );
   page.on("console", (message) => {
-    if (message.type() === "error")
-      errors.push(`console.error: ${message.text()}`);
+    if (message.type() !== "error") return;
+    const expectedSocketRefusal =
+      user.expectedDisconnect &&
+      /^WebSocket connection to 'ws:\/\/localhost:3000\/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED$/u.test(
+        message.text(),
+      );
+    // Chromium emits this network diagnostic during the deliberately stopped-server window.
+    if (!expectedSocketRefusal)
+      user.errors.push(`console.error: ${message.text()}`);
   });
   await page.goto("/");
-  const user = { context, page, errors };
   activeUsers.push(user);
   return user;
 }
@@ -135,15 +148,16 @@ test.describe("real browser chat", () => {
     await expect(
       a.page.locator('[data-testid="message"][data-status="delivered"]'),
     ).toContainText("Hello from Alice");
-    await expect(b.page.getByTestId("message")).toContainText(
-      "Hello from Alice",
-    );
+    await expect(chatWith(b.page, alice.id)).toContainText("Hello from Alice");
     await expect(
       chatWith(b.page, alice.id).getByTestId("unread-count"),
     ).toHaveText("1");
     await expect(b.page.locator(".conversation-head")).toHaveCount(0);
 
     await chatWith(b.page, alice.id).click();
+    await expect(b.page.getByTestId("message")).toContainText(
+      "Hello from Alice",
+    );
     await send(b.page, "Hi Alice");
     await expect(a.page.getByTestId("message")).toContainText("Hi Alice");
   });
@@ -164,12 +178,7 @@ test.describe("real browser chat", () => {
     const bobChat = chatWith(b.page, alice.id);
     await expect(bobChat).toBeVisible();
     await bobChat.click();
-    await expect(
-      b.page
-        .locator('[data-testid="message"]')
-        .filter({ hasText: /^Queued (one|two)$/ }),
-    ).toHaveCount(2);
-    await expect(b.page.getByTestId("message")).toContainText([
+    await expect(b.page.locator(".message-list .message-text")).toHaveText([
       "Queued one",
       "Queued two",
     ]);
@@ -191,6 +200,8 @@ test.describe("real browser chat", () => {
     await b.page.getByTestId("peer-id-input").fill(alice.id);
     await b.page.getByTestId("new-chat").click();
 
+    a.expectedDisconnect = true;
+    b.expectedDisconnect = true;
     await serverControl.stop();
     await expect(a.page.getByTestId("connection-status")).toHaveAttribute(
       "data-state",
@@ -215,11 +226,19 @@ test.describe("real browser chat", () => {
       "connected",
       { timeout: 45_000 },
     );
-    await expect(a.page.getByTestId("message")).toContainText("During outage", {
+    a.expectedDisconnect = false;
+    b.expectedDisconnect = false;
+    await expect(
+      a.page.getByText("During outage", { exact: true }),
+    ).toBeVisible({
       timeout: 45_000,
     });
-    await expect(a.page.getByTestId("message")).toContainText("Before outage");
-    await expect(b.page.getByTestId("message")).toContainText("Before outage");
+    await expect(
+      a.page.getByText("Before outage", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      b.page.getByText("Before outage", { exact: true }),
+    ).toBeVisible();
   });
 
   test("incoming message from a third user does not change the active chat", async ({
@@ -244,7 +263,7 @@ test.describe("real browser chat", () => {
     await expect(
       chatWith(a.page, charlie.id).getByTestId("unread-count"),
     ).toHaveText("1");
-    await expect(a.page.getByTestId("message")).not.toContainText(
+    await expect(a.page.locator(".message-list")).not.toContainText(
       "Hello Alice from Charlie",
     );
   });
