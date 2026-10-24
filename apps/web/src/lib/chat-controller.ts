@@ -141,8 +141,14 @@ export class ChatController {
       {
         onState: (connectionState) => {
           this.update({ connectionState });
-          if (connectionState === "connected" && typeof window !== "undefined")
+          if (
+            connectionState === "connected" &&
+            typeof window !== "undefined"
+          ) {
             void this.loadAccountData();
+            if (this.state.activePeer)
+              void this.loadHistory(this.state.activePeer);
+          }
         },
         onFrame: (frame) => this.handleFrame(frame),
         onSend: (clientMsgId) =>
