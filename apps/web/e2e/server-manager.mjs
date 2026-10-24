@@ -10,7 +10,10 @@ let child;
 
 async function waitForServer() {
   for (let attempt = 0; attempt < 100; attempt++) {
-    if (child?.exitCode !== null && child?.exitCode !== undefined) {
+    if (
+      (child?.exitCode !== null && child?.exitCode !== undefined) ||
+      (child?.signalCode !== null && child?.signalCode !== undefined)
+    ) {
       throw new Error(`Server exited with code ${child.exitCode}`);
     }
     try {
@@ -25,7 +28,7 @@ async function waitForServer() {
 }
 
 async function startServer() {
-  if (child && child.exitCode === null) return;
+  if (child && child.exitCode === null && child.signalCode === null) return;
   const databaseUrl = process.env.E2E_DATABASE_URL;
   if (!databaseUrl) throw new Error("E2E_DATABASE_URL is required");
   child = spawn(process.execPath, ["apps/server/dist/index.js"], {
@@ -44,14 +47,15 @@ async function startServer() {
 }
 
 async function stopServer() {
-  if (!child || child.exitCode !== null) return;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
   const current = child;
   current.kill("SIGTERM");
   await Promise.race([
     new Promise((resolveExit) => current.once("exit", resolveExit)),
     delay(5000),
   ]);
-  if (current.exitCode === null) current.kill("SIGKILL");
+  if (current.exitCode === null && current.signalCode === null)
+    current.kill("SIGKILL");
 }
 
 const manager = createServer(async (request, response) => {

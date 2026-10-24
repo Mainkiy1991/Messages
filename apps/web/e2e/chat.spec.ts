@@ -65,6 +65,10 @@ async function createAccount(
   await page.getByLabel("I have saved the phrase").check();
   await page.getByRole("button", { name: "Finish account setup" }).click();
   await expect(page.getByTestId("user-id")).toBeVisible();
+  await expect(page.getByTestId("connection-status")).toHaveAttribute(
+    "data-state",
+    "connected",
+  );
   return { phrase, id: (await page.getByTestId("user-id").innerText()).trim() };
 }
 
@@ -73,6 +77,10 @@ async function signIn(page: Page, phrase: string): Promise<string> {
   await page.getByLabel("Seed phrase").fill(phrase);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(page.getByTestId("user-id")).toBeVisible();
+  await expect(page.getByTestId("connection-status")).toHaveAttribute(
+    "data-state",
+    "connected",
+  );
   return (await page.getByTestId("user-id").innerText()).trim();
 }
 
