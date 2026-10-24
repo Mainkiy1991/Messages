@@ -265,6 +265,9 @@ test.describe("real browser chat", () => {
       { timeout: 20_000 },
     );
     await send(b.page, "During outage");
+    await expect(
+      b.page.locator('[data-testid="message"][data-status="sending"]'),
+    ).toContainText("During outage");
     await b.page.reload();
     try {
       await expect(b.page.getByTestId("user-id")).toBeVisible();
