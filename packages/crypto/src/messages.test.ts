@@ -85,7 +85,15 @@ describe("recipient messages", () => {
 
   it("rejects wrong keys, tampering, identity substitution and invalid envelopes", () => {
     const ciphertext = encrypt("secret");
-    expect(() => decrypt(ciphertext, bob)).toThrow(DecryptError);
+    expect(() =>
+      decryptTextMessage({
+        recipientEncryptionPrivateKey: alice.encryption.privateKey,
+        senderEncryptionPublicKey: alice.encryption.publicKey,
+        senderId: aliceId,
+        recipientId: bobId,
+        ciphertext,
+      }),
+    ).toThrow(DecryptError);
     const packed = base64ToBytes(ciphertext);
     for (const offset of [1, 25, packed.length - 1]) {
       const changed = packed.slice();
@@ -104,7 +112,6 @@ describe("recipient messages", () => {
     const unknownVersion = packed.slice();
     unknownVersion[0] = 2;
     expect(() => decrypt(bytesToBase64(unknownVersion))).toThrow(DecryptError);
-    expect(() => decrypt(ciphertext, bob)).toThrow(DecryptError);
   });
 
   it("rejects zero and small-order public keys and invalid plaintext at encryption", () => {
@@ -112,6 +119,17 @@ describe("recipient messages", () => {
       encryptTextMessage({
         senderEncryptionPrivateKey: alice.encryption.privateKey,
         recipientEncryptionPublicKey: new Uint8Array(32),
+        senderId: aliceId,
+        recipientId: bobId,
+        text: "x",
+      }),
+    ).toThrow();
+    const smallOrderPoint = new Uint8Array(32);
+    smallOrderPoint[0] = 1;
+    expect(() =>
+      encryptTextMessage({
+        senderEncryptionPrivateKey: alice.encryption.privateKey,
+        recipientEncryptionPublicKey: smallOrderPoint,
         senderId: aliceId,
         recipientId: bobId,
         text: "x",
