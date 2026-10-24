@@ -6,10 +6,6 @@ import {
   normalizeMnemonic,
   userIdFromPublicKey,
   validateMnemonic,
-  decryptTextMessage,
-  encryptHistoryEntry,
-  encryptTextMessage,
-  newClientMsgId,
   type DerivedKeys,
 } from "@messages/crypto";
 import {
@@ -21,43 +17,18 @@ import {
 import {
   clearSession,
   restoreSession,
-  saveSession,
   restoreServerSession,
-  type ServerSession,
+  saveSession,
 } from "./session.js";
 import {
-  ApiError,
-  getUserKeys,
-  loginToServer,
-  logoutFromServer,
-  verifyUserKeys,
-} from "./lib/api.js";
-import {
-  ChatConnection,
-  type IncomingFrame,
-  type SocketState,
-} from "./lib/websocket.js";
+  ChatController,
+  DECRYPT_FAILURE_PLACEHOLDER,
+  type ChatControllerState,
+} from "./lib/chat-controller.js";
+import type { ChatMessage } from "./lib/chat-controller.js";
 import "./style.css";
 
 type Screen = "welcome" | "create" | "verify" | "login" | "home";
-type ChatMessage = {
-  id: string;
-  clientMsgId?: string;
-  text: string;
-  createdAt: string;
-  direction: "in" | "out";
-  status?: "sending" | "sent" | "delivered" | "error";
-  error?: string;
-  frame?: {
-    type: "send";
-    clientMsgId: string;
-    to: string;
-    ciphertext: string;
-    senderCopy: string;
-  };
-};
-type Chat = { peerId: string; messages: ChatMessage[] };
-
 function App() {
   const [language, setLanguage] = useState<Language>(() =>
     getInitialLanguage(localStorage, navigator.language),
@@ -72,38 +43,25 @@ function App() {
   const [hasError, setHasError] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showLogoutConfirmation, setShowLogoutConfirmation] = useState(false);
-  const [serverSession, setServerSession] = useState<ServerSession | null>(
-    null,
-  );
-  const [chats, setChats] = useState<Chat[]>([]);
-  const [activePeer, setActivePeer] = useState("");
+  const [chatState, setChatState] = useState<ChatControllerState>({
+    chats: [],
+    activePeer: "",
+    connectionState: "offline",
+    error: "",
+  });
   const [peerInput, setPeerInput] = useState("");
   const [draft, setDraft] = useState("");
   const [chatError, setChatError] = useState("");
-  const [socketState, setSocketState] = useState<SocketState>("offline");
   const [mobileChat, setMobileChat] = useState(false);
-  const connectionRef = useRef<ChatConnection | null>(null);
-  const verifiedKeys = useRef(new Map<string, Uint8Array>());
-  const tRef = useRef(t);
-  tRef.current = t;
+  const controllerRef = useRef<ChatController | null>(null);
 
   useEffect(() => {
-    void Promise.all([restoreSession(), restoreServerSession()]).then(
-      async ([saved, savedServer]) => {
-        if (saved) {
-          setKeys(saved);
-          let session = savedServer;
-          try {
-            if (!session || Date.parse(session.expiresAt) <= Date.now())
-              session = await loginToServer(saved);
-          } catch {
-            setChatError(tRef.current.serverUnavailable);
-          }
-          if (session) setServerSession(session);
-          setScreen("home");
-        }
-      },
-    );
+    void restoreSession().then(async (saved) => {
+      if (saved) {
+        setKeys(saved);
+        setScreen("home");
+      }
+    });
   }, []);
   function changeLanguage(next: Language) {
     setLanguage(next);
@@ -113,9 +71,13 @@ function App() {
   async function enter(mnemonic: string) {
     const derived = deriveKeys(normalizeMnemonic(mnemonic));
     await saveSession(derived);
-    const online = await loginToServer(derived);
     setKeys(derived);
-    setServerSession(online);
+    setChatState({
+      chats: [],
+      activePeer: "",
+      connectionState: "offline",
+      error: "",
+    });
     setPhrase("");
     setScreen("home");
     setHasError(false);
@@ -164,258 +126,78 @@ function App() {
   }
 
   async function confirmLogout() {
-    connectionRef.current?.stop();
-    connectionRef.current = null;
-    if (serverSession?.token) {
-      try {
-        await logoutFromServer(serverSession.token);
-      } catch {
-        /* Best effort logout */
-      }
-    }
+    await controllerRef.current?.logout();
+    controllerRef.current = null;
     await clearSession();
     setKeys(null);
-    setServerSession(null);
-    setChats([]);
-    setActivePeer("");
-    verifiedKeys.current.clear();
-    setSocketState("offline");
+    setChatState({
+      chats: [],
+      activePeer: "",
+      connectionState: "offline",
+      error: "",
+    });
     setPhrase("");
     setShowLogoutConfirmation(false);
     setScreen("welcome");
   }
 
   const userId = keys ? userIdFromPublicKey(keys.identity.publicKey) : "";
+  const chats = chatState.chats;
+  const activePeer = chatState.activePeer;
+  const socketState = chatState.connectionState;
+  const errorText = (code: string) =>
+    code === "invalid_id"
+      ? t.invalidId
+      : code === "self_chat"
+        ? t.selfChat
+        : code === "user_not_found"
+          ? t.userNotFound
+          : code === "invalid_text"
+            ? t.invalidText
+            : code === "send_failed"
+              ? t.sendFailed
+              : t.badPeerKey;
   useEffect(() => {
-    if (!keys || !serverSession || screen !== "home") return;
-    const connection = new ChatConnection(keys, serverSession, {
-      onState: setSocketState,
-      onMessageId: (clientMsgId) =>
-        setChats((all) =>
-          all.map((chat) => ({
-            ...chat,
-            messages: chat.messages.map((m) =>
-              m.clientMsgId === clientMsgId ? { ...m, status: "sent" } : m,
-            ),
-          })),
-        ),
-      onFrame: async (frame: IncomingFrame) => {
-        if (
-          frame.type === "message" &&
-          typeof frame.from === "string" &&
-          typeof frame.ciphertext === "string" &&
-          typeof frame.createdAt === "string" &&
-          typeof frame.id === "string"
-        ) {
-          let text: string = tRef.current.decryptFailed;
-          try {
-            let peerKey = verifiedKeys.current.get(frame.from);
-            if (!peerKey) {
-              const pub = await getUserKeys(frame.from, serverSession.token);
-              peerKey = verifyUserKeys(frame.from, pub);
-              verifiedKeys.current.set(frame.from, peerKey);
-            }
-            text = decryptTextMessage({
-              recipientEncryptionPrivateKey: keys.encryption.privateKey,
-              senderEncryptionPublicKey: peerKey,
-              senderId: frame.from,
-              recipientId: userId,
-              ciphertext: frame.ciphertext,
-            }).text;
-          } catch {
-            /* Never expose ciphertext or key errors */
-          }
-          setChats((all) => {
-            const found = all.find((chat) => chat.peerId === frame.from);
-            const next = {
-              id: frame.id as string,
-              text,
-              createdAt: frame.createdAt as string,
-              direction: "in" as const,
-            };
-            return found
-              ? all.map((chat) =>
-                  chat.peerId === frame.from
-                    ? { ...chat, messages: [...chat.messages, next] }
-                    : chat,
-                )
-              : [...all, { peerId: frame.from as string, messages: [next] }];
-          });
-          setActivePeer(frame.from);
-          setMobileChat(true);
-          return;
-        }
-        if (
-          frame.type === "sent" &&
-          typeof frame.clientMsgId === "string" &&
-          typeof frame.id === "string" &&
-          typeof frame.createdAt === "string"
-        ) {
-          setChats((all) =>
-            all.map((chat) => ({
-              ...chat,
-              messages: chat.messages.map((m) =>
-                m.clientMsgId === frame.clientMsgId
-                  ? {
-                      ...m,
-                      id: frame.id as string,
-                      createdAt: frame.createdAt as string,
-                      status: "sent",
-                    }
-                  : m,
-              ),
-            })),
-          );
-          return;
-        }
-        if (
-          frame.type === "delivered" &&
-          typeof frame.clientMsgId === "string"
-        ) {
-          setChats((all) =>
-            all.map((chat) => ({
-              ...chat,
-              messages: chat.messages.map((m) =>
-                m.clientMsgId === frame.clientMsgId
-                  ? { ...m, status: "delivered" }
-                  : m,
-              ),
-            })),
-          );
-          return;
-        }
-        if (frame.type === "error" && typeof frame.clientMsgId === "string") {
-          const code =
-            typeof frame.code === "string" ? frame.code : "internal_error";
-          const reason =
-            code === "recipient_not_found"
-              ? tRef.current.userNotFound
-              : tRef.current.sendFailed;
-          setChats((all) =>
-            all.map((chat) => ({
-              ...chat,
-              messages: chat.messages.map((m) =>
-                m.clientMsgId === frame.clientMsgId
-                  ? { ...m, status: "error", error: reason }
-                  : m,
-              ),
-            })),
-          );
-          return;
-        }
-      },
+    if (!keys || screen !== "home") return;
+    let cancelled = false;
+    void restoreServerSession().then((session) => {
+      if (cancelled) return;
+      const controller = new ChatController(keys, userId, session, {
+        onChange: setChatState,
+      });
+      controllerRef.current = controller;
+      controller.start();
     });
-    connectionRef.current = connection;
-    connection.start();
     return () => {
-      connection.stop();
-      if (connectionRef.current === connection) connectionRef.current = null;
+      cancelled = true;
+      controllerRef.current?.stop();
+      controllerRef.current = null;
     };
-  }, [keys, serverSession, screen, userId]);
+  }, [keys, screen, userId]);
 
   async function openChat(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setChatError("");
-    const peerId = peerInput.trim();
-    if (!/^[0-9a-f]{64}$/u.test(peerId)) {
-      setChatError(t.invalidId);
-      return;
-    }
-    if (peerId === userId) {
-      setChatError(t.selfChat);
-      return;
-    }
-    try {
-      const keysValue = await getUserKeys(peerId, serverSession!.token);
-      verifiedKeys.current.set(peerId, verifyUserKeys(peerId, keysValue));
-      setChats((all) =>
-        all.some((chat) => chat.peerId === peerId)
-          ? all
-          : [...all, { peerId, messages: [] }],
-      );
-      setActivePeer(peerId);
-      setMobileChat(true);
+    await controllerRef.current?.openChat(peerInput);
+    const next = controllerRef.current?.getSnapshot();
+    setChatError(next?.error ? errorText(next.error) : "");
+    if (next?.activePeer) {
       setPeerInput("");
-    } catch (error) {
-      setChatError(
-        error instanceof ApiError && error.status === 404
-          ? t.userNotFound
-          : t.badPeerKey,
-      );
+      setMobileChat(true);
     }
   }
 
-  function sendMessage(event?: React.FormEvent) {
+  async function sendMessage(event?: React.FormEvent) {
     event?.preventDefault();
     const text = draft;
-    if (!keys || !activePeer || !text.trim() || Array.from(text).length > 4000)
-      return;
-    const peerPublic = verifiedKeys.current.get(activePeer);
-    if (!peerPublic) {
-      setChatError(t.badPeerKey);
-      return;
-    }
-    const clientMsgId = newClientMsgId();
-    const sentAt = Date.now();
-    const ciphertext = encryptTextMessage({
-      senderEncryptionPrivateKey: keys.encryption.privateKey,
-      recipientEncryptionPublicKey: peerPublic,
-      senderId: userId,
-      recipientId: activePeer,
-      text,
-      sentAt,
-    });
-    const senderCopy = encryptHistoryEntry({
-      historyKey: keys.historyKey,
-      clientMsgId,
-      peerId: activePeer,
-      text,
-      sentAt,
-    });
-    const frame = {
-      type: "send" as const,
-      clientMsgId,
-      to: activePeer,
-      ciphertext,
-      senderCopy,
-    };
-    setChats((all) =>
-      all.map((chat) =>
-        chat.peerId === activePeer
-          ? {
-              ...chat,
-              messages: [
-                ...chat.messages,
-                {
-                  id: clientMsgId,
-                  clientMsgId,
-                  text,
-                  createdAt: new Date(sentAt).toISOString(),
-                  direction: "out",
-                  status: "sending",
-                  frame,
-                },
-              ],
-            }
-          : chat,
-      ),
-    );
-    connectionRef.current?.send(frame);
+    await controllerRef.current?.sendText(text);
     setDraft("");
-    setChatError("");
+    const error = controllerRef.current?.getSnapshot().error;
+    setChatError(error ? errorText(error) : "");
   }
 
   function retryMessage(message: ChatMessage) {
-    if (!message.frame) return;
-    setChats((all) =>
-      all.map((chat) => ({
-        ...chat,
-        messages: chat.messages.map((m) =>
-          m === message ? { ...m, status: "sending", error: undefined } : m,
-        ),
-      })),
-    );
-    connectionRef.current?.retryMessage(message.frame);
+    if (!message.clientMsgId || !activePeer) return;
+    controllerRef.current?.retryMessage(activePeer, message.clientMsgId);
   }
   return (
     <main className="shell">
@@ -587,12 +369,15 @@ function App() {
                       className={`chat-list-item ${chat.peerId === activePeer ? "selected" : ""}`}
                       key={chat.peerId}
                       onClick={() => {
-                        setActivePeer(chat.peerId);
+                        controllerRef.current?.selectChat(chat.peerId);
                         setMobileChat(true);
                       }}
                     >
                       <strong>{chat.peerId.slice(-10)}</strong>
                       <span>{chat.messages.at(-1)?.text ?? t.noMessages}</span>
+                      {chat.unreadCount > 0 && (
+                        <b className="unread-count">{chat.unreadCount}</b>
+                      )}
                       {chat.messages.at(-1) && (
                         <small>
                           {new Date(
@@ -612,7 +397,10 @@ function App() {
                     <div className="conversation-head">
                       <button
                         className="text-button mobile-back"
-                        onClick={() => setMobileChat(false)}
+                        onClick={() => {
+                          controllerRef.current?.closeActiveChat();
+                          setMobileChat(false);
+                        }}
                       >
                         {t.back}
                       </button>
@@ -627,7 +415,11 @@ function App() {
                           className={`message ${message.direction}`}
                           key={message.id}
                         >
-                          <div className="message-text">{message.text}</div>
+                          <div className="message-text">
+                            {message.text === DECRYPT_FAILURE_PLACEHOLDER
+                              ? t.decryptFailed
+                              : message.text}
+                          </div>
                           <small>
                             {new Date(message.createdAt).toLocaleTimeString(
                               language === "ru" ? "ru-RU" : "en-US",
@@ -644,7 +436,9 @@ function App() {
                           </small>
                           {message.status === "error" && (
                             <>
-                              <span className="error">{message.error}</span>
+                              <span className="error">
+                                {errorText(message.error ?? "send_failed")}
+                              </span>
                               <button
                                 className="text-button"
                                 onClick={() => retryMessage(message)}
@@ -656,7 +450,10 @@ function App() {
                         </article>
                       ))}
                     </div>
-                    <form className="composer" onSubmit={sendMessage}>
+                    <form
+                      className="composer"
+                      onSubmit={(event) => void sendMessage(event)}
+                    >
                       <textarea
                         value={draft}
                         maxLength={4000}
@@ -664,7 +461,7 @@ function App() {
                         onKeyDown={(event) => {
                           if (event.key === "Enter" && !event.shiftKey) {
                             event.preventDefault();
-                            sendMessage();
+                            void sendMessage();
                           }
                         }}
                         placeholder={t.messagePlaceholder}
