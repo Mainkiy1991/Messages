@@ -307,21 +307,25 @@ export class ChatConnection {
             base * (0.8 + (this.deps.random?.() ?? Math.random()) * 0.4),
           )
         : base;
-    this.timer = this.setTimer(() => {
-      this.timer = null;
-      void (async () => {
-        if (!this.active) return;
-        if (renew) {
-          try {
-            await this.refreshSession();
-          } catch {
-            this.schedule();
-            return;
+    this.timer = callSetTimer(
+      this.setTimer,
+      () => {
+        this.timer = null;
+        void (async () => {
+          if (!this.active) return;
+          if (renew) {
+            try {
+              await this.refreshSession();
+            } catch {
+              this.schedule();
+              return;
+            }
           }
-        }
-        await this.connect();
-      })();
-    }, jittered);
+          await this.connect();
+        })();
+      },
+      jittered,
+    );
   }
 }
 
