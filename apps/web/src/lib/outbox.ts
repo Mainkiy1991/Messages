@@ -26,9 +26,15 @@ function transact<T>(
       new Promise<T>((resolve, reject) => {
         const tx = db.transaction(STORE, "readwrite");
         const request = action(tx.objectStore(STORE));
-        request.onsuccess = () => resolve(request.result);
+        let result: T;
+        request.onsuccess = () => {
+          result = request.result;
+        };
         request.onerror = () => reject(request.error);
-        tx.oncomplete = () => db.close();
+        tx.oncomplete = () => {
+          db.close();
+          resolve(result!);
+        };
         tx.onerror = () => {
           db.close();
           reject(tx.error);

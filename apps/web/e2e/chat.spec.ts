@@ -267,19 +267,22 @@ test.describe("real browser chat", () => {
     );
     await send(b.page, "During outage");
     await b.page.reload();
-    await expect(b.page.getByTestId("user-id")).toBeVisible();
-    await expect(b.page.getByTestId("connection-status")).toHaveAttribute(
-      "data-state",
-      "offline",
-      { timeout: 20_000 },
-    );
-    const restoredChat = chatWith(b.page, alice.id);
-    await expect(restoredChat).toBeVisible();
-    await restoredChat.click();
-    await expect(
-      b.page.locator('[data-testid="message"][data-status="sending"]'),
-    ).toContainText("During outage");
-    await serverControl.start();
+    try {
+      await expect(b.page.getByTestId("user-id")).toBeVisible();
+      await expect(b.page.getByTestId("connection-status")).toHaveAttribute(
+        "data-state",
+        "offline",
+        { timeout: 20_000 },
+      );
+      const restoredChat = chatWith(b.page, alice.id);
+      await expect(restoredChat).toBeVisible();
+      await restoredChat.click();
+      await expect(
+        b.page.locator('[data-testid="message"][data-status="sending"]'),
+      ).toContainText("During outage");
+    } finally {
+      await serverControl.start();
+    }
 
     await expect(a.page.getByTestId("connection-status")).toHaveAttribute(
       "data-state",
