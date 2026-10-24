@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   bytesToHex,
   deriveKeys,
@@ -8,7 +8,7 @@ import {
   verifyKeyBinding,
 } from "@messages/crypto";
 import { clearSession, restoreServerSession } from "../session.js";
-import { loginToServer, verifyUserKeys } from "./api.js";
+import { getUserKeys, loginToServer, verifyUserKeys } from "./api.js";
 
 const keys = deriveKeys(
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
@@ -83,5 +83,25 @@ describe("peer key verification", () => {
         ),
       }),
     ).toEqual(keys.encryption.publicKey);
+  });
+});
+
+describe("API request timeout", () => {
+  afterEach(() => vi.useRealTimers());
+  it("aborts a request after ten seconds with network_timeout", async () => {
+    vi.useFakeTimers();
+    const fetcher: typeof fetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(new DOMException("Aborted", "AbortError")),
+        );
+      });
+    const pending = getUserKeys("0".repeat(64), "token", fetcher);
+    const assertion = expect(pending).rejects.toMatchObject({
+      status: 0,
+      code: "network_timeout",
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await assertion;
   });
 });

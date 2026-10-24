@@ -53,8 +53,10 @@ pnpm dev
 
 Известные ограничения: история не загружается после перезагрузки страницы, а список чатов и сообщения хранятся только в памяти. Имена контактов не сохраняются; в списке отображаются последние 10 символов ID.
 =======
+
 После миграции запустите сайт и API вместе из корня командой `pnpm dev`. Сервер автоматически перезапускается при изменении файлов. Для отдельных терминалов используйте `pnpm dev:web` и `pnpm dev:server`. Если запуск через `concurrently` на вашей системе не подходит, откройте два терминала в корне и выполните эти две команды отдельно. Сервер по умолчанию слушает `127.0.0.1:3000`; готовность видна по строке `Server listening. Сервер запущен: http://127.0.0.1:3000`, а `http://localhost:3000/health` возвращает `{"status":"ok"}`. Таймаут подключения к PostgreSQL — 10 секунд; при ошибке сервер сообщает `Не удалось подключиться к базе данных`.
->>>>>>> origin/main
+
+> > > > > > > origin/main
 
 ```sh
 pnpm install
@@ -151,8 +153,10 @@ Open `http://localhost:5173`. To verify messaging, create or sign in to one acco
 
 Known limitations: message history is not restored after reload; chats and messages exist only in memory. Contact names are not saved, so the chat list shows the last 10 characters of each ID.
 =======
+
 After migrating, start the website and API together from the repository root with `pnpm dev`. The server restarts automatically when files change. For separate terminals, run `pnpm dev:web` and `pnpm dev:server`. If `concurrently` does not work on your system, open two terminals at the repository root and run these commands separately. By default, the server listens on `127.0.0.1:3000`; look for `Server listening. Сервер запущен: http://127.0.0.1:3000`, and `http://localhost:3000/health` returns `{"status":"ok"}`. The PostgreSQL connection timeout is 10 seconds; on failure, the server reports `Не удалось подключиться к базе данных`.
->>>>>>> origin/main
+
+> > > > > > > origin/main
 
 ```sh
 pnpm install

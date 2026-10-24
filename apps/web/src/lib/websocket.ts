@@ -33,6 +33,8 @@ export class ChatConnection {
   private session: ServerSession | null;
   private sessionRequest: Promise<ServerSession> | null = null;
   private receiveQueue: Promise<void> = Promise.resolve();
+  private readonly setTimer: typeof setTimeout;
+  private readonly clearTimer: typeof clearTimeout;
 
   constructor(
     private readonly keys: DerivedKeys,
@@ -56,6 +58,10 @@ export class ChatConnection {
       sendTimeoutMs?: number;
     } = {},
   ) {
+    const nativeSetTimer = globalThis.setTimeout;
+    const nativeClearTimer = globalThis.clearTimeout;
+    this.setTimer = deps.setTimer ?? nativeSetTimer;
+    this.clearTimer = deps.clearTimer ?? nativeClearTimer;
     this.session =
       session?.userId === userIdFromPublicKey(keys.identity.publicKey)
         ? session
@@ -70,8 +76,8 @@ export class ChatConnection {
 
   stop(): void {
     this.active = false;
-    if (this.timer) this.clearTimer(this.timer);
-    if (this.ackTimer) this.clearTimer(this.ackTimer);
+    if (this.timer) callClearTimer(this.clearTimer, this.timer);
+    if (this.ackTimer) callClearTimer(this.clearTimer, this.ackTimer);
     this.timer = null;
     this.ackTimer = null;
     this.authenticated = false;
@@ -128,13 +134,6 @@ export class ChatConnection {
   }
   markSeen(id: string): void {
     this.seen.add(id);
-  }
-
-  private get setTimer(): typeof setTimeout {
-    return this.deps.setTimer ?? setTimeout;
-  }
-  private get clearTimer(): typeof clearTimeout {
-    return this.deps.clearTimer ?? clearTimeout;
   }
 
   private setState(state: SocketState): void {
@@ -250,15 +249,19 @@ export class ChatConnection {
     this.clearPendingTimer(pending);
     this.socket.send(JSON.stringify(pending.frame));
     this.handlers.onSend?.(pending.frame.clientMsgId);
-    pending.timer = this.setTimer(() => {
-      pending.timer = null;
-      if (this.outbox.get(pending.frame.clientMsgId) === pending)
-        this.handlers.onSendTimeout?.(pending.frame.clientMsgId);
-    }, this.deps.sendTimeoutMs ?? 15_000);
+    pending.timer = callSetTimer(
+      this.setTimer,
+      () => {
+        pending.timer = null;
+        if (this.outbox.get(pending.frame.clientMsgId) === pending)
+          this.handlers.onSendTimeout?.(pending.frame.clientMsgId);
+      },
+      this.deps.sendTimeoutMs ?? 15_000,
+    );
   }
 
   private clearPendingTimer(pending: PendingFrame): void {
-    if (pending.timer) this.clearTimer(pending.timer);
+    if (pending.timer) callClearTimer(this.clearTimer, pending.timer);
     pending.timer = null;
   }
 
@@ -269,14 +272,18 @@ export class ChatConnection {
       return;
     }
     if (!this.ackTimer)
-      this.ackTimer = this.setTimer(() => {
-        this.ackTimer = null;
-        this.flushAcks();
-      }, 50);
+      this.ackTimer = callSetTimer(
+        this.setTimer,
+        () => {
+          this.ackTimer = null;
+          this.flushAcks();
+        },
+        50,
+      );
   }
 
   private flushAcks(): void {
-    if (this.ackTimer) this.clearTimer(this.ackTimer);
+    if (this.ackTimer) callClearTimer(this.clearTimer, this.ackTimer);
     this.ackTimer = null;
     while (this.pendingAck.length) {
       const ids = this.pendingAck.splice(0, 200);
@@ -295,20 +302,39 @@ export class ChatConnection {
             base * (0.8 + (this.deps.random?.() ?? Math.random()) * 0.4),
           )
         : base;
-    this.timer = this.setTimer(() => {
-      this.timer = null;
-      void (async () => {
-        if (!this.active) return;
-        if (renew) {
-          try {
-            await this.refreshSession();
-          } catch {
-            this.schedule();
-            return;
+    this.timer = callSetTimer(
+      this.setTimer,
+      () => {
+        this.timer = null;
+        void (async () => {
+          if (!this.active) return;
+          if (renew) {
+            try {
+              await this.refreshSession();
+            } catch {
+              this.schedule();
+              return;
+            }
           }
-        }
-        await this.connect();
-      })();
-    }, jittered);
+          await this.connect();
+        })();
+      },
+      jittered,
+    );
   }
+}
+
+function callSetTimer(
+  timer: typeof setTimeout,
+  handler: TimerHandler,
+  timeout: number,
+): ReturnType<typeof setTimeout> {
+  return timer(handler, timeout) as unknown as ReturnType<typeof setTimeout>;
+}
+
+function callClearTimer(
+  timer: typeof clearTimeout,
+  handle: ReturnType<typeof setTimeout>,
+): void {
+  timer(handle);
 }

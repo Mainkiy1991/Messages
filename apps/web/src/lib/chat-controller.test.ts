@@ -6,10 +6,7 @@ import {
   signKeyBinding,
 } from "@messages/crypto";
 import { ApiError, type UserKeys } from "./api.js";
-import {
-  ChatController,
-  DECRYPT_FAILURE_PLACEHOLDER,
-} from "./chat-controller.js";
+import { ChatController } from "./chat-controller.js";
 import type { ServerSession } from "../session.js";
 
 const alice = deriveKeys(
@@ -273,14 +270,41 @@ describe("ChatController", () => {
       await waitFor(() =>
         f.sockets[0]!.decoded().some((frame) => frame.type === "ack"),
       );
-      expect(f.controller.getSnapshot().chats[0]!.messages[0]!.text).toBe(
-        DECRYPT_FAILURE_PLACEHOLDER,
-      );
+      expect(f.controller.getSnapshot().chats[0]!.messages[0]!.text).toBe("");
+      expect(
+        f.controller.getSnapshot().chats[0]!.messages[0]!.decryptFailed,
+      ).toBe(true);
       expect(JSON.stringify(f.controller.getSnapshot())).not.toContain(
         "not-valid",
       );
       f.controller.stop();
     }
+  });
+
+  it("renders the legacy placeholder string as ordinary decrypted message text", async () => {
+    const f = makeController({ initialSession: session("token-a") });
+    f.controller.start();
+    await waitFor(() => f.sockets.length === 1);
+    await authenticate(f.sockets[0]!);
+    f.sockets[0]!.frame({
+      type: "message",
+      id: crypto.randomUUID(),
+      from: bobId,
+      ciphertext: encryptTextMessage({
+        senderEncryptionPrivateKey: bob.encryption.privateKey,
+        recipientEncryptionPublicKey: alice.encryption.publicKey,
+        senderId: bobId,
+        recipientId: aliceId,
+        text: "__DECRYPT_FAILED__",
+        sentAt: Date.now(),
+      }),
+      createdAt: new Date().toISOString(),
+    });
+    await waitFor(() => f.controller.getSnapshot().chats.length === 1);
+    const message = f.controller.getSnapshot().chats[0]!.messages[0]!;
+    expect(message.text).toBe("__DECRYPT_FAILED__");
+    expect(message.decryptFailed).toBeUndefined();
+    f.controller.stop();
   });
 
   it("serializes 20 mailbox messages and shares one in-flight peer-key request", async () => {

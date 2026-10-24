@@ -29,6 +29,123 @@ async function waitFor(check: () => boolean): Promise<void> {
 }
 
 describe("websocket chat connection", () => {
+  it("calls injected timers without a receiver for ack, send timeout, reconnect, and stop", async () => {
+    vi.useFakeTimers();
+    const nativeSet = globalThis.setTimeout;
+    const nativeClear = globalThis.clearTimeout;
+    const setTimer = vi.fn(function (
+      this: unknown,
+      handler: TimerHandler,
+      ms?: number,
+    ) {
+      if (this !== undefined) throw new TypeError("Illegal invocation");
+      return nativeSet(handler, ms);
+    }) as unknown as typeof setTimeout;
+    const clearTimer = vi.fn(function (this: unknown, handle: number) {
+      if (this !== undefined) throw new TypeError("Illegal invocation");
+      nativeClear(handle);
+    }) as typeof clearTimeout;
+    const keys = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    const sockets: FakeSocket[] = [];
+    const onSendTimeout = vi.fn();
+    const connection = new ChatConnection(
+      keys,
+      {
+        token: "a".repeat(43),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+      },
+      { onState: vi.fn(), onFrame: vi.fn(), onSendTimeout },
+      {
+        socketFactory: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+        setTimer,
+        clearTimer,
+        random: () => 0,
+        sendTimeoutMs: 100,
+      },
+    );
+    connection.start();
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.open();
+    sockets[0]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.frame({ type: "message", id: "message-1" });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(sockets[0]!.sent.map((value) => JSON.parse(value).type)).toContain(
+      "ack",
+    );
+    connection.send({
+      type: "send",
+      clientMsgId: "send-1",
+      to: "02",
+      ciphertext: "c",
+      senderCopy: "s",
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(onSendTimeout).toHaveBeenCalledWith("send-1");
+    expect(setTimer).toHaveBeenCalled();
+    sockets[0]!.close();
+    await vi.advanceTimersByTimeAsync(800);
+    expect(sockets).toHaveLength(2);
+    sockets[1]!.frame({ type: "message", id: "message-stop" });
+    sockets[1]!.open();
+    sockets[1]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[1]!.frame({ type: "message", id: "message-stop-2" });
+    await vi.advanceTimersByTimeAsync(0);
+    connection.stop();
+    expect(clearTimer).toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sockets).toHaveLength(2);
+    vi.useRealTimers();
+  });
+
+  it("uses default global timers as free functions", async () => {
+    vi.useFakeTimers();
+    const nativeSet = globalThis.setTimeout;
+    const nativeClear = globalThis.clearTimeout;
+    vi.stubGlobal(
+      "setTimeout",
+      function (this: unknown, handler: TimerHandler, ms?: number) {
+        if (this !== undefined) throw new TypeError("Illegal invocation");
+        return nativeSet(handler, ms);
+      },
+    );
+    vi.stubGlobal("clearTimeout", function (this: unknown, handle: number) {
+      if (this !== undefined) throw new TypeError("Illegal invocation");
+      nativeClear(handle);
+    });
+    const keys = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    const socket = new FakeSocket();
+    const connection = new ChatConnection(
+      keys,
+      {
+        token: "a".repeat(43),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+      },
+      { onState: vi.fn(), onFrame: vi.fn() },
+      { socketFactory: () => socket as never },
+    );
+    connection.start();
+    await vi.advanceTimersByTimeAsync(0);
+    socket.open();
+    socket.frame({ type: "auth_ok" });
+    socket.close();
+    await vi.advanceTimersByTimeAsync(800);
+    connection.stop();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
   it("authenticates first and flushes queued frames only after auth_ok", async () => {
     const socket = new FakeSocket();
     const socketFactory = vi.fn(() => socket as never);

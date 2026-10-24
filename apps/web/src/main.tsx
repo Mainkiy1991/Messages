@@ -22,7 +22,6 @@ import {
 } from "./session.js";
 import {
   ChatController,
-  DECRYPT_FAILURE_PLACEHOLDER,
   type ChatControllerState,
 } from "./lib/chat-controller.js";
 import type { ChatMessage } from "./lib/chat-controller.js";
@@ -152,11 +151,13 @@ function App() {
         ? t.selfChat
         : code === "user_not_found"
           ? t.userNotFound
-          : code === "invalid_text"
-            ? t.invalidText
-            : code === "send_failed"
-              ? t.sendFailed
-              : t.badPeerKey;
+          : code === "server_unavailable"
+            ? t.serverUnavailable
+            : code === "invalid_text"
+              ? t.invalidText
+              : code === "send_failed"
+                ? t.sendFailed
+                : t.badPeerKey;
   useEffect(() => {
     if (!keys || screen !== "home") return;
     let cancelled = false;
@@ -416,7 +417,7 @@ function App() {
                           key={message.id}
                         >
                           <div className="message-text">
-                            {message.text === DECRYPT_FAILURE_PLACEHOLDER
+                            {message.decryptFailed
                               ? t.decryptFailed
                               : message.text}
                           </div>

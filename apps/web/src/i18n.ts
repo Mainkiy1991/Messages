@@ -32,8 +32,7 @@ export const strings = {
     cancel: "Отмена",
     back: "Назад",
     language: "Язык",
-    serverUnavailable:
-      "Не удалось войти на сервер. Проверьте соединение и перезагрузите страницу.",
+    serverUnavailable: "Сервер недоступен, попробуйте позже",
     connected: "подключено",
     connecting: "подключение…",
     offline: "нет связи",
@@ -87,8 +86,7 @@ export const strings = {
     cancel: "Cancel",
     back: "Back",
     language: "Language",
-    serverUnavailable:
-      "Could not sign in to the server. Check your connection and reload.",
+    serverUnavailable: "Server unavailable, try again later",
     connected: "connected",
     connecting: "connecting…",
     offline: "offline",

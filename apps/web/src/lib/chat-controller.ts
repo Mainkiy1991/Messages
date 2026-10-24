@@ -30,6 +30,7 @@ export type ChatMessage = {
   direction: "in" | "out";
   status?: SendStatus;
   error?: string;
+  decryptFailed?: boolean;
   frame?: OutgoingFrame;
   arrivalOrder: number;
 };
@@ -49,6 +50,7 @@ export type ChatError =
   | "self_chat"
   | "user_not_found"
   | "bad_peer_key"
+  | "server_unavailable"
   | "invalid_text"
   | "send_failed";
 
@@ -72,8 +74,6 @@ export type ChatControllerDependencies = {
   makeClientMsgId?: () => string;
   onChange?: (state: ChatControllerState) => void;
 };
-
-export const DECRYPT_FAILURE_PLACEHOLDER = "__DECRYPT_FAILED__";
 
 export class ChatController {
   private readonly connection: ChatConnection;
@@ -168,17 +168,18 @@ export class ChatController {
     }
     try {
       await this.getVerifiedPeerKey(peerId);
+    } catch (error) {
+      this.setError(this.peerKeyError(error));
+      return;
+    }
+    try {
       const chats = this.state.chats.some((chat) => chat.peerId === peerId)
         ? this.state.chats
         : [...this.state.chats, { peerId, messages: [], unreadCount: 0 }];
       this.update({ chats, activePeer: peerId, error: "" });
       this.resetUnread(peerId);
-    } catch (error) {
-      this.setError(
-        error instanceof ApiError && error.status === 404
-          ? "user_not_found"
-          : "bad_peer_key",
-      );
+    } catch {
+      this.setError("server_unavailable");
     }
   }
 
@@ -198,9 +199,14 @@ export class ChatController {
       this.setError("invalid_text");
       return;
     }
+    let recipientEncryptionPublicKey: Uint8Array;
     try {
-      const recipientEncryptionPublicKey =
-        await this.getVerifiedPeerKey(peerId);
+      recipientEncryptionPublicKey = await this.getVerifiedPeerKey(peerId);
+    } catch (error) {
+      this.setError(this.peerKeyError(error));
+      return;
+    }
+    try {
       const sentAt = (this.deps.now ?? Date.now)();
       const clientMsgId = (this.deps.makeClientMsgId ?? newClientMsgId)();
       const frame: OutgoingFrame = {
@@ -236,12 +242,8 @@ export class ChatController {
       this.upsertMessage(peerId, message);
       this.update({ error: "" });
       this.connection.send(frame);
-    } catch (error) {
-      this.setError(
-        error instanceof ApiError && error.status === 404
-          ? "user_not_found"
-          : "bad_peer_key",
-      );
+    } catch {
+      this.setError("server_unavailable");
     }
   }
 
@@ -273,6 +275,18 @@ export class ChatController {
     return request;
   }
 
+  private peerKeyError(error: unknown): ChatError {
+    if (error instanceof ApiError && error.status === 404)
+      return "user_not_found";
+    if (
+      error instanceof ApiError &&
+      (error.status === 0 || error.code === "network_timeout")
+    )
+      return "server_unavailable";
+    if (error instanceof TypeError) return "server_unavailable";
+    return "bad_peer_key";
+  }
+
   private async fetchAndVerifyPeerKey(peerId: string): Promise<Uint8Array> {
     const fetchKeys = this.deps.fetchPeerKeys ?? getUserKeys;
     let session = await this.connection.ensureSession();
@@ -295,7 +309,8 @@ export class ChatController {
       typeof frame.ciphertext === "string" &&
       typeof frame.createdAt === "string"
     ) {
-      let text = DECRYPT_FAILURE_PLACEHOLDER;
+      let text = "";
+      let decryptFailed = false;
       try {
         const senderEncryptionPublicKey = await this.getVerifiedPeerKey(
           frame.from,
@@ -309,12 +324,14 @@ export class ChatController {
         }).text;
       } catch {
         /* Render a safe placeholder; WebSocket still acks this frame. */
+        decryptFailed = true;
       }
       const message: ChatMessage = {
         id: frame.id,
         text,
         createdAt: frame.createdAt,
         direction: "in",
+        ...(decryptFailed ? { decryptFailed: true } : {}),
         arrivalOrder: this.arrivalOrder++,
       };
       const existing = this.state.chats.find(

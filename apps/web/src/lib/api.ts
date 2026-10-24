@@ -35,13 +35,30 @@ async function request<T>(
   token?: string,
   init?: RequestInit,
 ): Promise<T> {
-  const response = await fetcher(`${API_URL}${path}`, {
-    ...init,
-    headers: {
-      ...(init?.headers ?? {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-  });
+  const controller = new AbortController();
+  const setTimer = globalThis.setTimeout;
+  const clearTimer = globalThis.clearTimeout;
+  let timedOut = false;
+  const timer = setTimer(() => {
+    timedOut = true;
+    controller.abort();
+  }, 10_000);
+  let response: Response;
+  try {
+    response = await fetcher(`${API_URL}${path}`, {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        ...(init?.headers ?? {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    });
+  } catch (error) {
+    if (timedOut) throw new ApiError(0, "network_timeout");
+    throw error;
+  } finally {
+    clearTimer(timer);
+  }
   if (!response.ok) {
     let code = "request_error";
     try {
