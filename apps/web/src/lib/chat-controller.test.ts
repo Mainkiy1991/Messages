@@ -40,7 +40,9 @@ class TestSocket extends EventTarget {
     this.sent.push(frame);
   }
   close(code = 1000) {
-    this.dispatchEvent(new CloseEvent("close", { code }));
+    const event = new Event("close");
+    Object.defineProperty(event, "code", { value: code });
+    this.dispatchEvent(event);
   }
   open() {
     this.dispatchEvent(new Event("open"));
