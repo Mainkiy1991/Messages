@@ -38,8 +38,10 @@ const historyQuerySchema = z
   .object({
     before: z
       .string()
-      .regex(/^\d{1,19}$/u)
-      .refine((value) => BigInt(value) <= 9223372036854775807n)
+      .refine(
+        (value) =>
+          /^\d{1,19}$/u.test(value) && BigInt(value) <= 9223372036854775807n,
+      )
       .optional(),
     limit: z
       .string()
@@ -53,8 +55,10 @@ const contactsSchema = z
   .object({
     baseVersion: z
       .string()
-      .regex(/^\d{1,19}$/u)
-      .refine((value) => BigInt(value) <= 9223372036854775806n),
+      .refine(
+        (value) =>
+          /^\d{1,19}$/u.test(value) && BigInt(value) <= 9223372036854775806n,
+      ),
     blob: z
       .string()
       .regex(

@@ -1064,7 +1064,7 @@ suite("server authentication (PostgreSQL)", () => {
     expect(history.json()).toMatchObject({
       hasMore: true,
       messages: [
-        { seq: rows.rows[1].seq, direction: "in", payload: "in-payload" },
+        { seq: rows.rows[1].seq, direction: "in", payload: "out-payload" },
         { seq: rows.rows[2].seq, direction: "out", payload: "a-copy2" },
       ],
     });
