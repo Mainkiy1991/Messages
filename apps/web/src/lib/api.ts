@@ -43,9 +43,8 @@ async function request<T>(
     timedOut = true;
     controller.abort();
   }, 10_000);
-  let response: Response;
   try {
-    response = await fetcher(`${API_URL}${path}`, {
+    const response = await fetcher(`${API_URL}${path}`, {
       ...init,
       signal: controller.signal,
       headers: {
@@ -53,23 +52,23 @@ async function request<T>(
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
     });
+    if (!response.ok) {
+      let code = "request_error";
+      try {
+        code = ((await response.json()) as { error?: string }).error ?? code;
+      } catch {
+        /* Empty response */
+      }
+      throw new ApiError(response.status, code);
+    }
+    if (response.status === 204) return undefined as T;
+    return (await response.json()) as T;
   } catch (error) {
     if (timedOut) throw new ApiError(0, "network_timeout");
     throw error;
   } finally {
     clearTimer(timer);
   }
-  if (!response.ok) {
-    let code = "request_error";
-    try {
-      code = ((await response.json()) as { error?: string }).error ?? code;
-    } catch {
-      /* Empty response */
-    }
-    throw new ApiError(response.status, code);
-  }
-  if (response.status === 204) return undefined as T;
-  return (await response.json()) as T;
 }
 
 export async function loginToServer(
