@@ -11,7 +11,8 @@ type Fixtures = {
   serverControl: { stop(): Promise<void>; start(): Promise<void> };
 };
 const test = base.extend<Fixtures>({
-  serverControl: async ({}, use) => {
+  serverControl: async (dependencies, use) => {
+    void dependencies;
     const control = async (action: "stop" | "start") => {
       const response = await fetch(`http://127.0.0.1:3001/${action}`, {
         method: "POST",
