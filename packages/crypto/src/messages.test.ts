@@ -71,6 +71,7 @@ describe("recipient messages", () => {
       "Hi 👋🌍",
       "first\nsecond",
       "x".repeat(4000),
+      "😀".repeat(4000),
     ]) {
       const ciphertext = encrypt(text);
       expect(decrypt(ciphertext)).toEqual({ text, sentAt });

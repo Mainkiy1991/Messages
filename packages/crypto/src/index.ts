@@ -324,7 +324,7 @@ function checkText(text: string): void {
   if (
     typeof text !== "string" ||
     text.trim().length === 0 ||
-    text.length > MAX_TEXT_CHARS ||
+    Array.from(text).length > MAX_TEXT_CHARS ||
     encoder.encode(text).length > MAX_TEXT_BYTES
   )
     throw new TypeError("Invalid message text");
