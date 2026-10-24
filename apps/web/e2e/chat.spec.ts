@@ -249,8 +249,7 @@ test.describe("real browser chat", () => {
     await expect(
       a.page.locator('[data-testid="message"][data-status="delivered"]'),
     ).toBeVisible();
-    await b.page.getByTestId("peer-id-input").fill(alice.id);
-    await b.page.getByTestId("new-chat").click();
+    await openChat(b.page, alice.id);
 
     a.expectedDisconnect = true;
     b.expectedDisconnect = true;
