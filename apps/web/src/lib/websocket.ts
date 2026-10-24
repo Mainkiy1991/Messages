@@ -247,7 +247,12 @@ export class ChatConnection {
   private sendPending(pending: PendingFrame): void {
     if (!this.authenticated || !this.socket || !this.active) return;
     this.clearPendingTimer(pending);
-    this.socket.send(JSON.stringify(pending.frame));
+    try {
+      this.socket.send(JSON.stringify(pending.frame));
+    } catch (error) {
+      this.handlers.onSendTimeout?.(pending.frame.clientMsgId);
+      throw error;
+    }
     this.handlers.onSend?.(pending.frame.clientMsgId);
     pending.timer = callSetTimer(
       this.setTimer,

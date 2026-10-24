@@ -33,7 +33,9 @@ const userKeys = (keys: typeof alice): UserKeys => ({
 
 class TestSocket extends EventTarget {
   sent: string[] = [];
+  failSend = false;
   send(frame: string) {
+    if (this.failSend) throw new TypeError("Network unavailable");
     this.sent.push(frame);
   }
   close(code = 1000) {
@@ -440,6 +442,40 @@ describe("ChatController", () => {
     expect(f.tokens).toEqual(["expired-at-server", "token-1"]);
     expect(f.controller.currentToken()).toBe("token-1");
     expect(f.controller.getSnapshot().activePeer).toBe(bobId);
+    f.controller.stop();
+  });
+
+  it("separates missing users, bad peer keys, and unavailable key lookup", async () => {
+    for (const [failure, expected] of [
+      [new ApiError(404, "not_found"), "user_not_found"],
+      [new Error("key_binding_invalid"), "bad_peer_key"],
+      [new ApiError(0, "network_timeout"), "server_unavailable"],
+    ] as const) {
+      const f = makeController({
+        initialSession: session("token-a"),
+        userKeys: async () => {
+          throw failure;
+        },
+      });
+      await f.controller.openChat(bobId);
+      expect(f.controller.getSnapshot().error).toBe(expected);
+      expect(f.controller.getSnapshot().activePeer).toBe("");
+      f.controller.stop();
+    }
+  });
+
+  it("reports a synchronous socket send failure as unavailable and marks the message failed", async () => {
+    const f = makeController({ initialSession: session("token-a") });
+    f.controller.start();
+    await waitFor(() => f.sockets.length === 1);
+    await authenticate(f.sockets[0]!);
+    await f.controller.openChat(bobId);
+    f.sockets[0]!.failSend = true;
+    await f.controller.sendText("fails on the socket");
+    const state = f.controller.getSnapshot();
+    expect(state.error).toBe("server_unavailable");
+    expect(state.chats[0]!.messages[0]!.status).toBe("error");
+    expect(state.chats[0]!.messages[0]!.error).toBe("send_failed");
     f.controller.stop();
   });
 
