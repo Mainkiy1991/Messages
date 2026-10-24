@@ -307,8 +307,7 @@ export class ChatConnection {
             base * (0.8 + (this.deps.random?.() ?? Math.random()) * 0.4),
           )
         : base;
-    this.timer = callSetTimer(
-      this.setTimer,
+    this.timer = this.setTimer(
       () => {
         this.timer = null;
         void (async () => {
