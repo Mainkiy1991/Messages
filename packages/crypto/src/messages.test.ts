@@ -5,9 +5,11 @@ import {
   bytesToHex,
   DecryptError,
   decryptHistoryEntry,
+  decryptContactBook,
   decryptTextMessage,
   deriveKeys,
   encryptHistoryEntry,
+  encryptContactBook,
   encryptTextMessage,
   newClientMsgId,
 } from "./index.js";
@@ -21,6 +23,92 @@ const bob = deriveKeys(
 const aliceId = bytesToHex(alice.identity.publicKey);
 const bobId = bytesToHex(bob.identity.publicKey);
 const sentAt = 1_700_000_000_000;
+const contactKey = new Uint8Array(32).fill(7);
+const contactId = "ab".repeat(32);
+
+describe("encrypted contact books", () => {
+  it("decrypts the fixed contact-book compatibility vector", () => {
+    // НЕ МЕНЯТЬ: изменение формата сломает расшифровку сохранённых контактов
+    const blob =
+      "AQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCbgXix4P4PJLLOnCbynEK2BkKpV+4cJ2BZ104XAUIYsuxSBXfTvhDDIYY7z5Olbv73Yuo88YtFML2j99OZtYVwGuKjtO6ZBJ2ZDWIGbjZDldqHR4pmagCuEllL5DD9ZpfsNbXJLPpuhxy+RakI534A==";
+    expect(decryptContactBook({ historyKey: contactKey, blob })).toEqual({
+      [contactId]: "Alice",
+    });
+  });
+
+  it("round-trips names and empty books with a fresh nonce", () => {
+    const contacts = { [contactId]: " Алиса 🚀 ", [bobId]: "Bob" };
+    const first = encryptContactBook({ historyKey: contactKey, contacts });
+    const second = encryptContactBook({ historyKey: contactKey, contacts });
+    expect(decryptContactBook({ historyKey: contactKey, blob: first })).toEqual(
+      contacts,
+    );
+    expect(first).not.toBe(second);
+    expect(
+      decryptContactBook({
+        historyKey: contactKey,
+        blob: encryptContactBook({ historyKey: contactKey, contacts: {} }),
+      }),
+    ).toEqual({});
+  });
+
+  it("rejects corrupt blobs and invalid contact data", () => {
+    const blob = encryptContactBook({
+      historyKey: contactKey,
+      contacts: { [contactId]: "Alice" },
+    });
+    const damaged = bytesToBase64(
+      Uint8Array.from(base64ToBytes(blob), (byte, index) =>
+        index === 2 ? byte ^ 1 : byte,
+      ),
+    );
+    for (const invalid of [damaged, blob.slice(0, -4), "%%%="]) {
+      expect(() =>
+        decryptContactBook({ historyKey: contactKey, blob: invalid }),
+      ).toThrow(DecryptError);
+    }
+    const wrongVersion = base64ToBytes(blob);
+    wrongVersion[0] = 2;
+    expect(() =>
+      decryptContactBook({
+        historyKey: contactKey,
+        blob: bytesToBase64(wrongVersion),
+      }),
+    ).toThrow(DecryptError);
+    expect(() =>
+      decryptContactBook({ historyKey: new Uint8Array(32).fill(8), blob }),
+    ).toThrow(DecryptError);
+    expect(() =>
+      encryptContactBook({
+        historyKey: contactKey,
+        contacts: { [contactId]: "  " },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      encryptContactBook({
+        historyKey: contactKey,
+        contacts: { [contactId]: "x".repeat(65) },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      encryptContactBook({
+        historyKey: contactKey,
+        contacts: { nope: "Alice" },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      encryptContactBook({
+        historyKey: contactKey,
+        contacts: Object.fromEntries(
+          Array.from({ length: 1001 }, (_, i) => [
+            `${i.toString(16).padStart(64, "0")}`,
+            "A",
+          ]),
+        ),
+      }),
+    ).toThrow(TypeError);
+  });
+});
 
 describe("base64 and message ids", () => {
   it("round-trips standard padded base64 and rejects malformed values", () => {

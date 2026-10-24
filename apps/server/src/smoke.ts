@@ -144,6 +144,63 @@ try {
     fail(step);
   pass(step);
 
+  step = "history and contacts";
+  const senderHeaders = { authorization: `Bearer ${sender.token}` };
+  const senderHistoryResponse = await fetch(
+    new URL(`/history/${recipient.userId}`, baseUrl),
+    { headers: senderHeaders },
+  );
+  const recipientHistoryResponse = await fetch(
+    new URL(`/history/${sender.userId}`, baseUrl),
+    { headers: { authorization: `Bearer ${recipient.token}` } },
+  );
+  if (!senderHistoryResponse.ok || !recipientHistoryResponse.ok) fail(step);
+  const senderHistory = (await senderHistoryResponse.json()) as {
+    messages: Array<{
+      clientMsgId: string;
+      direction: string;
+      payload: string;
+    }>;
+  };
+  const recipientHistory = (await recipientHistoryResponse.json()) as {
+    messages: Array<{
+      clientMsgId: string;
+      direction: string;
+      payload: string;
+    }>;
+  };
+  if (
+    !senderHistory.messages.some(
+      (entry) => entry.clientMsgId === clientMsgId && entry.direction === "out",
+    ) ||
+    !recipientHistory.messages.some(
+      (entry) => entry.clientMsgId === clientMsgId && entry.direction === "in",
+    )
+  )
+    fail(step);
+  const empty = await fetch(new URL("/contacts", baseUrl), {
+    headers: senderHeaders,
+  });
+  if (
+    !empty.ok ||
+    ((await empty.json()) as { version: string }).version !== "0"
+  )
+    fail(step);
+  const saved = await fetch(new URL("/contacts", baseUrl), {
+    method: "PUT",
+    headers: { ...senderHeaders, "content-type": "application/json" },
+    body: JSON.stringify({
+      baseVersion: "0",
+      blob: randomBytes(32).toString("base64"),
+    }),
+  });
+  if (
+    !saved.ok ||
+    ((await saved.json()) as { version: string }).version !== "1"
+  )
+    fail(step);
+  pass(step);
+
   step = "logout temporary sessions";
   for (const token of tokens) {
     const response = await fetch(new URL("/auth/logout", baseUrl), {

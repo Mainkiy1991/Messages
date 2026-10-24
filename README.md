@@ -67,6 +67,14 @@ API на `http://localhost:3000`: `GET /health`; `POST /auth/challenge` выда
 
 ### Формат шифрования
 
+### История и контакты (HTTP)
+
+Все новые маршруты требуют `Authorization: Bearer <token>`. `GET /conversations` возвращает до 500 собеседников `{ "conversations": [{ "peerId": "<hex>", "lastSeq": "<seq>", "lastCreatedAt": "<ISO timestamp>" }] }`, от новых сообщений к старым. `GET /history/:peerId?before=<seq>&limit=<1..100>` возвращает `{ "messages": [{ "id", "seq", "direction": "in|out", "clientMsgId", "payload", "createdAt", "deliveredAt" }], "hasMore": false }`; `before` исключается, `limit` по умолчанию 50, порядок внутри страницы — от старых к новым. Для входящих `payload` — ciphertext адресата, для исходящих — sender copy текущего пользователя. Неизвестный собеседник дает пустую страницу.
+
+`GET /contacts` возвращает `{ "version": "0", "blob": null }` до первой записи или текущую версию и зашифрованный base64 `blob`. `PUT /contacts` принимает `{ "baseVersion": "<version>", "blob": "<base64>" }` и возвращает `{ "version": "<next>" }`. Размер декодированного blob — 1..262144 байта. Несовпадение версии дает `409 { "error": "version_conflict", "version": "<current>", "blob": "<current-or-null>" }`; неверный ввод — 400, отсутствие/неверная сессия — 401, лимит PUT — 429. Сервер хранит только ciphertext.
+
+Контакт-лист шифруется на клиенте ключом HKDF-SHA256 от history key с info `messages/v1/contacts`; XChaCha20-Poly1305 использует случайный 24-байтовый nonce и ту же строку как AAD. Plaintext — UTF-8 JSON `{ "v": 1, "contacts": { "<64 lowercase hex userId>": "<name>" } }`. Контакты ограничены 1000 записями; имена после trim должны быть длиной 1..64 Unicode code points.
+
 `@messages/crypto` шифрует JSON `{v:1,text,sentAt}` как UTF-8 с XChaCha20-Poly1305. Ключ для сообщения получается через HKDF-SHA256 из общего X25519 секрета; AAD связывает шифртекст с `senderId` и `recipientId`. Base64-декодированный конверт: `0x01 || nonce(24) || ciphertext || tag(16)`. Копия отправителя для истории использует отдельный HKDF info и AAD с `clientMsgId` и `peerId`.
 
 Шифрование защищает содержимое и привязывает его к указанным отправителю и получателю. Сервер видит метаданные «кто кому и когда», длину сообщения, а forward secrecy в MVP нет: компрометация долговременного ключа шифрования может открыть сохранённые сообщения.
@@ -166,6 +174,14 @@ Send `{"type":"send","clientMsgId":"<32 hex>","to":"<64 hex>","ciphertext":"<bas
 After `auth_ok`, undelivered mailbox entries arrive in database sequence order, in batches of at most 200. The next batch is sent after the previous batch is acknowledged. A message can arrive more than once: immediately and later from the mailbox. Clients should deduplicate messages by `id` and always send `ack` for every received message, even when decryption fails; otherwise this connection's mailbox remains blocked at the unacknowledged message. Reuse the same `clientMsgId` when retrying a send; changing the recipient returns `client_msg_id_conflict`. Messages remain stored after delivery. Limits are 256 KiB per frame, five connections per user, 120 frames of any type per connection per 10 seconds, and 30 handshakes per IP per minute; ping runs every 30 seconds. The session is checked at connection time; an open connection remains active until logout or disconnect.
 
 ### Message encryption format
+
+### History and contacts (HTTP)
+
+All new routes require `Authorization: Bearer <token>`. `GET /conversations` returns up to 500 peers as `{ "conversations": [{ "peerId": "<hex>", "lastSeq": "<seq>", "lastCreatedAt": "<ISO timestamp>" }] }`, newest first. `GET /history/:peerId?before=<seq>&limit=<1..100>` returns `{ "messages": [{ "id", "seq", "direction": "in|out", "clientMsgId", "payload", "createdAt", "deliveredAt" }], "hasMore": false }`; `before` is exclusive, default limit is 50, and each page is ordered oldest first. Incoming payloads contain the recipient ciphertext; outgoing payloads contain only the current user's sender copy. Unknown peers return an empty page.
+
+`GET /contacts` returns `{ "version": "0", "blob": null }` before the first write, or the current version and encrypted base64 `blob`. `PUT /contacts` accepts `{ "baseVersion": "<version>", "blob": "<base64>" }` and returns `{ "version": "<next>" }`. Decoded blobs must be 1..262144 bytes. A stale version returns `409 { "error": "version_conflict", "version": "<current>", "blob": "<current-or-null>" }`; invalid input returns 400, missing/invalid sessions return 401, and PUT rate limits return 429. The server stores ciphertext only.
+
+Clients encrypt contact books with HKDF-SHA256 derived from the history key using info `messages/v1/contacts`; XChaCha20-Poly1305 uses a random 24-byte nonce and the same string as AAD. Plaintext is UTF-8 JSON `{ "v": 1, "contacts": { "<64 lowercase hex userId>": "<name>" } }`. Contact books allow at most 1000 entries; trimmed names must contain 1..64 Unicode code points.
 
 `@messages/crypto` encrypts JSON `{v:1,text,sentAt}` as UTF-8 with XChaCha20-Poly1305. The message key comes from HKDF-SHA256 over the shared X25519 secret; AAD binds the ciphertext to `senderId` and `recipientId`. The base64-decoded envelope is `0x01 || nonce(24) || ciphertext || tag(16)`. The sender's history copy uses a separate HKDF info string and AAD containing `clientMsgId` and `peerId`.
 

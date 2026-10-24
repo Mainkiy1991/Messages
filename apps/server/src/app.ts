@@ -34,6 +34,34 @@ const loginSchema = z.object({
   keyBindingSignature: z.string().regex(/^[0-9a-f]{128}$/u),
   signature: z.string().regex(/^[0-9a-f]{128}$/u),
 });
+const historyQuerySchema = z
+  .object({
+    before: z
+      .string()
+      .regex(/^\d{1,19}$/u)
+      .refine((value) => BigInt(value) <= 9223372036854775807n)
+      .optional(),
+    limit: z
+      .string()
+      .regex(/^\d+$/u)
+      .optional()
+      .transform((value) => (value === undefined ? 50 : Number(value)))
+      .refine((value) => value >= 1 && value <= 100),
+  })
+  .strict();
+const contactsSchema = z
+  .object({
+    baseVersion: z
+      .string()
+      .regex(/^\d{1,19}$/u)
+      .refine((value) => BigInt(value) <= 9223372036854775806n),
+    blob: z
+      .string()
+      .regex(
+        /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u,
+      ),
+  })
+  .strict();
 const challenges = new Map<string, { challenge: string; expiresAt: number }>();
 
 function hashToken(token: string): string {
@@ -266,6 +294,101 @@ export async function buildApp(options: {
     );
     return result.rows[0];
   });
+  app.get("/conversations", { preHandler: authenticate }, async (request) => {
+    const result = await pool.query(
+      `SELECT peer_id AS "peerId", last_seq::text AS "lastSeq", last_created_at AS "lastCreatedAt"
+       FROM (
+         SELECT CASE WHEN sender_id=$1 THEN recipient_id ELSE sender_id END AS peer_id,
+                max(seq) AS last_seq, (array_agg(created_at ORDER BY seq DESC))[1] AS last_created_at
+         FROM messages WHERE sender_id=$1 OR recipient_id=$1
+         GROUP BY CASE WHEN sender_id=$1 THEN recipient_id ELSE sender_id END
+       ) conversations ORDER BY last_seq DESC LIMIT 500`,
+      [request.userId],
+    );
+    return { conversations: result.rows };
+  });
+  app.get<{
+    Params: { peerId: string };
+    Querystring: { before?: string; limit?: string };
+  }>(
+    "/history/:peerId",
+    { preHandler: authenticate },
+    async (request, reply) => {
+      if (!/^[0-9a-f]{64}$/u.test(request.params.peerId))
+        return reply.code(400).send({ error: "invalid_request" });
+      const parsed = historyQuerySchema.safeParse(request.query);
+      if (!parsed.success)
+        return reply.code(400).send({ error: "invalid_request" });
+      const { before, limit } = parsed.data;
+      const rows = await pool.query(
+        `SELECT id, seq::text AS seq, sender_id, client_msg_id AS "clientMsgId",
+                CASE WHEN sender_id=$1 THEN sender_copy ELSE ciphertext END AS payload,
+                created_at AS "createdAt", delivered_at AS "deliveredAt"
+         FROM messages WHERE ((sender_id=$1 AND recipient_id=$2) OR (sender_id=$2 AND recipient_id=$1))
+           AND ($3::bigint IS NULL OR seq < $3::bigint)
+         ORDER BY seq DESC LIMIT $4`,
+        [request.userId, request.params.peerId, before ?? null, limit + 1],
+      );
+      const hasMore = rows.rows.length > limit;
+      const messages = rows.rows
+        .slice(0, limit)
+        .reverse()
+        .map((row) => ({
+          id: row.id,
+          seq: row.seq,
+          direction: row.sender_id === request.userId ? "out" : "in",
+          clientMsgId: row.clientMsgId,
+          payload: row.payload,
+          createdAt: row.createdAt,
+          deliveredAt: row.deliveredAt,
+        }));
+      return { messages, hasMore };
+    },
+  );
+  app.get("/contacts", { preHandler: authenticate }, async (request) => {
+    const result = await pool.query(
+      "SELECT version::text AS version, blob FROM contact_books WHERE user_id=$1",
+      [request.userId],
+    );
+    return result.rowCount ? result.rows[0] : { version: "0", blob: null };
+  });
+  app.put(
+    "/contacts",
+    {
+      preHandler: authenticate,
+      bodyLimit: 512 * 1024,
+      config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      const parsed = contactsSchema.safeParse(request.body);
+      if (!parsed.success)
+        return reply.code(400).send({ error: "invalid_request" });
+      const { baseVersion, blob } = parsed.data;
+      const decoded = Buffer.from(blob, "base64");
+      if (
+        decoded.toString("base64") !== blob ||
+        decoded.length < 1 ||
+        decoded.length > 256 * 1024
+      )
+        return reply.code(400).send({ error: "invalid_request" });
+      const updated = await pool.query(
+        `INSERT INTO contact_books(user_id, version, blob) VALUES($1, 1, $3)
+       ON CONFLICT(user_id) DO UPDATE SET version=contact_books.version+1, blob=EXCLUDED.blob, updated_at=now()
+       WHERE contact_books.version=$2::bigint RETURNING version::text AS version`,
+        [request.userId, baseVersion, blob],
+      );
+      if (updated.rowCount) return { version: updated.rows[0].version };
+      const current = await pool.query(
+        "SELECT version::text AS version, blob FROM contact_books WHERE user_id=$1",
+        [request.userId],
+      );
+      return reply.code(409).send({
+        error: "version_conflict",
+        version: current.rows[0]?.version ?? "0",
+        blob: current.rows[0]?.blob ?? null,
+      });
+    },
+  );
   app.get<{ Params: { userId: string } }>(
     "/users/:userId/keys",
     { preHandler: authenticate },

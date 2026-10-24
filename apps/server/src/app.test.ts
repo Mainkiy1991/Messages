@@ -6,7 +6,11 @@ import WebSocket from "ws";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   bytesToHex,
+  decryptHistoryEntry,
+  decryptTextMessage,
   deriveKeys,
+  encryptHistoryEntry,
+  encryptTextMessage,
   signAuth,
   signKeyBinding,
   generateMnemonic,
@@ -40,7 +44,7 @@ suite("server authentication (PostgreSQL)", () => {
 
   beforeAll(async () => {
     await pool!.query(
-      "DROP TABLE IF EXISTS messages, sessions, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS contact_books, messages, sessions, users, schema_migrations CASCADE",
     );
     await pool!.query(
       await readFile(
@@ -61,6 +65,17 @@ suite("server authentication (PostgreSQL)", () => {
           "..",
           "migrations",
           "003_message_sequence.sql",
+        ),
+        "utf8",
+      ),
+    );
+    await pool!.query(
+      await readFile(
+        join(
+          import.meta.dirname,
+          "..",
+          "migrations",
+          "004_history_contacts.sql",
         ),
         "utf8",
       ),
@@ -149,7 +164,11 @@ suite("server authentication (PostgreSQL)", () => {
       },
     });
     expect(response.statusCode).toBe(200);
-    return { userId: accountId, token: response.json().token as string };
+    return {
+      userId: accountId,
+      token: response.json().token as string,
+      keys: accountKeys,
+    };
   }
 
   async function listen() {
@@ -1007,5 +1026,193 @@ suite("server authentication (PostgreSQL)", () => {
     } finally {
       await rateLimitApp.close();
     }
+  });
+
+  it("lists conversations and serves isolated paginated history", async () => {
+    const a = await createAccount();
+    const b = await createAccount();
+    const c = await createAccount();
+    const rows = await pool!.query(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,$4,$5),($2,$1,$6,$7,$8),($1,$2,$9,$10,$11) RETURNING seq::text AS seq`,
+      [
+        a.userId,
+        b.userId,
+        randomBytes(16).toString("hex"),
+        "in-payload",
+        "a-copy",
+        randomBytes(16).toString("hex"),
+        "out-payload",
+        "b-copy",
+        randomBytes(16).toString("hex"),
+        "in2",
+        "a-copy2",
+      ],
+    );
+    const conversations = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(conversations.json().conversations).toHaveLength(1);
+    expect(conversations.json().conversations[0].peerId).toBe(b.userId);
+    const history = await app.inject({
+      method: "GET",
+      url: `/history/${b.userId}?limit=2`,
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(history.json()).toMatchObject({
+      hasMore: true,
+      messages: [
+        { seq: rows.rows[1].seq, direction: "in", payload: "in-payload" },
+        { seq: rows.rows[2].seq, direction: "out", payload: "a-copy2" },
+      ],
+    });
+    expect(JSON.stringify(history.json())).not.toContain("b-copy");
+    const isolated = await app.inject({
+      method: "GET",
+      url: `/history/${a.userId}`,
+      headers: { authorization: `Bearer ${c.token}` },
+    });
+    expect(isolated.json()).toEqual({ messages: [], hasMore: false });
+  });
+
+  it("validates history route inputs and requires authentication", async () => {
+    const id = "ab".repeat(32);
+    for (const url of [
+      `/history/nope`,
+      `/history/${id}?before=x`,
+      `/history/${id}?limit=101`,
+    ]) {
+      const response = await app.inject({
+        method: "GET",
+        url,
+        headers: { authorization: `Bearer ${"x".repeat(43)}` },
+      });
+      expect(response.statusCode).toBe(401);
+    }
+    for (const url of [
+      `/history/nope`,
+      `/history/${id}?before=x`,
+      `/history/${id}?limit=101`,
+    ]) {
+      const response = await app.inject({
+        method: "GET",
+        url,
+        headers: { authorization: `Bearer ${(await createAccount()).token}` },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    expect(
+      (await app.inject({ method: "GET", url: `/history/${id}?x=1` }))
+        .statusCode,
+    ).toBe(401);
+  });
+
+  it("stores contacts with optimistic locking, atomic conflicts, and user isolation", async () => {
+    const a = await createAccount();
+    const b = await createAccount();
+    const headers = { authorization: `Bearer ${a.token}` };
+    expect(
+      (await app.inject({ method: "GET", url: "/contacts", headers })).json(),
+    ).toEqual({ version: "0", blob: null });
+    const put = (baseVersion: string, blob: string, token = a.token) =>
+      app.inject({
+        method: "PUT",
+        url: "/contacts",
+        headers: { authorization: `Bearer ${token}` },
+        payload: { baseVersion, blob },
+      });
+    const concurrent = await Promise.all([put("0", "YQ=="), put("0", "Yg==")]);
+    expect(concurrent.map((response) => response.statusCode).sort()).toEqual([
+      200, 409,
+    ]);
+    const winner = concurrent.find((response) => response.statusCode === 200)!;
+    expect(winner.json()).toEqual({ version: "1" });
+    expect((await put("0", "Yw==")).json().error).toBe("version_conflict");
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/contacts",
+          headers: { authorization: `Bearer ${b.token}` },
+        })
+      ).json(),
+    ).toEqual({ version: "0", blob: null });
+    expect((await put("1", "%")).statusCode).toBe(400);
+    expect(
+      (await put("1", Buffer.alloc(256 * 1024 + 1).toString("base64")))
+        .statusCode,
+    ).toBe(400);
+    expect(
+      (await app.inject({ method: "GET", url: "/contacts" })).statusCode,
+    ).toBe(401);
+  });
+
+  it("serves WebSocket messages as decryptable sender history and recipient ciphertext", async () => {
+    const sender = await createAccount();
+    const recipient = await createAccount();
+    const clientMsgId = randomId();
+    const sentAt = 1_700_000_000_000;
+    const text = "Сквозное сообщение 🚀";
+    const ciphertext = encryptTextMessage({
+      senderEncryptionPrivateKey: sender.keys.encryption.privateKey,
+      recipientEncryptionPublicKey: recipient.keys.encryption.publicKey,
+      senderId: sender.userId,
+      recipientId: recipient.userId,
+      text,
+      sentAt,
+    });
+    const senderCopy = encryptHistoryEntry({
+      historyKey: sender.keys.historyKey,
+      clientMsgId,
+      peerId: recipient.userId,
+      text,
+      sentAt,
+    });
+    const url = await listen();
+    const socket = (await connectAuth(sender.token, url)).socket;
+    const sent = nextFrame(socket, (frame) => frame.type === "sent");
+    sendFrame(socket, {
+      type: "send",
+      clientMsgId,
+      to: recipient.userId,
+      ciphertext,
+      senderCopy,
+    });
+    await sent;
+    const out = await app.inject({
+      method: "GET",
+      url: `/history/${recipient.userId}`,
+      headers: { authorization: `Bearer ${sender.token}` },
+    });
+    const incoming = await app.inject({
+      method: "GET",
+      url: `/history/${sender.userId}`,
+      headers: { authorization: `Bearer ${recipient.token}` },
+    });
+    const senderMessage = out.json().messages[0] as {
+      payload: string;
+      clientMsgId: string;
+    };
+    const recipientMessage = incoming.json().messages[0] as { payload: string };
+    expect(
+      decryptHistoryEntry({
+        historyKey: sender.keys.historyKey,
+        clientMsgId: senderMessage.clientMsgId,
+        peerId: recipient.userId,
+        entry: senderMessage.payload,
+      }),
+    ).toEqual({ text, sentAt });
+    expect(
+      decryptTextMessage({
+        recipientEncryptionPrivateKey: recipient.keys.encryption.privateKey,
+        senderEncryptionPublicKey: sender.keys.encryption.publicKey,
+        senderId: sender.userId,
+        recipientId: recipient.userId,
+        ciphertext: recipientMessage.payload,
+      }),
+    ).toEqual({ text, sentAt });
+    socket.close();
   });
 });
