@@ -159,7 +159,11 @@ test.describe("real browser chat", () => {
       "Hello from Alice",
     );
     await send(b.page, "Hi Alice");
-    await expect(a.page.getByText("Hi Alice", { exact: true })).toBeVisible();
+    await expect(
+      a.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: "Hi Alice" }),
+    ).toBeVisible();
   });
 
   test("offline mailbox delivers exactly two queued messages after sign-in", async ({
