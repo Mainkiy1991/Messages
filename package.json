@@ -10,7 +10,7 @@
     "dev:server": "pnpm --filter @messages/crypto build && pnpm --filter @messages/server dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
-    "test:e2e": "playwright test --config apps/web/playwright.config.ts",
+    "test:e2e": "node apps/web/e2e/prepare.mjs && playwright test --config apps/web/playwright.config.ts",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write ."
   },
