@@ -209,7 +209,7 @@ function App() {
     event?.preventDefault();
     const text = draft;
     await controllerRef.current?.sendText(text);
-    setDraft("");
+    setDraft((current) => (current === text ? "" : current));
     const error = controllerRef.current?.getSnapshot().error;
     setChatError(error ? errorText(error) : "");
   }
