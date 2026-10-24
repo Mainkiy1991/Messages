@@ -36,6 +36,29 @@ describe("base64 and message ids", () => {
   });
 });
 
+describe("strict identifier casing", () => {
+  it("rejects uppercase user and client message identifiers", () => {
+    expect(() =>
+      encryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId: "A" + "0".repeat(31),
+        peerId: bobId,
+        text: "hello",
+        sentAt,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      encryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId: "0".repeat(32),
+        peerId: "A" + bobId.slice(1),
+        text: "hello",
+        sentAt,
+      }),
+    ).toThrow(TypeError);
+  });
+});
+
 describe("recipient messages", () => {
   function encrypt(text: string, recipient = bob, sent = sentAt) {
     return encryptTextMessage({

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   deriveKeys,
@@ -14,11 +14,20 @@ import {
   strings,
   type Language,
 } from "./i18n.js";
-import { clearSession, restoreSession, saveSession } from "./session.js";
+import {
+  clearSession,
+  restoreSession,
+  restoreServerSession,
+  saveSession,
+} from "./session.js";
+import {
+  ChatController,
+  type ChatControllerState,
+} from "./lib/chat-controller.js";
+import type { ChatMessage } from "./lib/chat-controller.js";
 import "./style.css";
 
 type Screen = "welcome" | "create" | "verify" | "login" | "home";
-
 function App() {
   const [language, setLanguage] = useState<Language>(() =>
     getInitialLanguage(localStorage, navigator.language),
@@ -33,9 +42,20 @@ function App() {
   const [hasError, setHasError] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showLogoutConfirmation, setShowLogoutConfirmation] = useState(false);
+  const [chatState, setChatState] = useState<ChatControllerState>({
+    chats: [],
+    activePeer: "",
+    connectionState: "offline",
+    error: "",
+  });
+  const [peerInput, setPeerInput] = useState("");
+  const [draft, setDraft] = useState("");
+  const [chatError, setChatError] = useState("");
+  const [mobileChat, setMobileChat] = useState(false);
+  const controllerRef = useRef<ChatController | null>(null);
 
   useEffect(() => {
-    void restoreSession().then((saved) => {
+    void restoreSession().then(async (saved) => {
       if (saved) {
         setKeys(saved);
         setScreen("home");
@@ -51,6 +71,12 @@ function App() {
     const derived = deriveKeys(normalizeMnemonic(mnemonic));
     await saveSession(derived);
     setKeys(derived);
+    setChatState({
+      chats: [],
+      activePeer: "",
+      connectionState: "offline",
+      error: "",
+    });
     setPhrase("");
     setScreen("home");
     setHasError(false);
@@ -99,14 +125,81 @@ function App() {
   }
 
   async function confirmLogout() {
+    await controllerRef.current?.logout();
+    controllerRef.current = null;
     await clearSession();
     setKeys(null);
+    setChatState({
+      chats: [],
+      activePeer: "",
+      connectionState: "offline",
+      error: "",
+    });
     setPhrase("");
     setShowLogoutConfirmation(false);
     setScreen("welcome");
   }
 
   const userId = keys ? userIdFromPublicKey(keys.identity.publicKey) : "";
+  const chats = chatState.chats;
+  const activePeer = chatState.activePeer;
+  const socketState = chatState.connectionState;
+  const errorText = (code: string) =>
+    code === "invalid_id"
+      ? t.invalidId
+      : code === "self_chat"
+        ? t.selfChat
+        : code === "user_not_found"
+          ? t.userNotFound
+          : code === "server_unavailable"
+            ? t.serverUnavailable
+            : code === "invalid_text"
+              ? t.invalidText
+              : code === "send_failed"
+                ? t.sendFailed
+                : t.badPeerKey;
+  useEffect(() => {
+    if (!keys || screen !== "home") return;
+    let cancelled = false;
+    void restoreServerSession().then((session) => {
+      if (cancelled) return;
+      const controller = new ChatController(keys, userId, session, {
+        onChange: setChatState,
+      });
+      controllerRef.current = controller;
+      controller.start();
+    });
+    return () => {
+      cancelled = true;
+      controllerRef.current?.stop();
+      controllerRef.current = null;
+    };
+  }, [keys, screen, userId]);
+
+  async function openChat(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await controllerRef.current?.openChat(peerInput);
+    const next = controllerRef.current?.getSnapshot();
+    setChatError(next?.error ? errorText(next.error) : "");
+    if (next?.activePeer) {
+      setPeerInput("");
+      setMobileChat(true);
+    }
+  }
+
+  async function sendMessage(event?: React.FormEvent) {
+    event?.preventDefault();
+    const text = draft;
+    await controllerRef.current?.sendText(text);
+    setDraft("");
+    const error = controllerRef.current?.getSnapshot().error;
+    setChatError(error ? errorText(error) : "");
+  }
+
+  function retryMessage(message: ChatMessage) {
+    if (!message.clientMsgId || !activePeer) return;
+    controllerRef.current?.retryMessage(activePeer, message.clientMsgId);
+  }
   return (
     <main className="shell">
       <header>
@@ -227,7 +320,14 @@ function App() {
         {screen === "home" && (
           <>
             <h1>{t.title}</h1>
-            <p className="muted">{t.chats}</p>
+            <p className="muted">
+              {t.chats} ·{" "}
+              {socketState === "connected"
+                ? t.connected
+                : socketState === "connecting"
+                  ? t.connecting
+                  : t.offline}
+            </p>
             <div className="id-box">
               <label>{t.userId}</label>
               <code>{userId}</code>
@@ -243,6 +343,140 @@ function App() {
                 {copied ? t.copied : t.copy}
               </button>
             </div>
+            <section className={`messenger ${mobileChat ? "show-chat" : ""}`}>
+              <aside className="chat-sidebar">
+                <form
+                  onSubmit={(event) => void openChat(event)}
+                  className="new-chat"
+                >
+                  <input
+                    aria-label={t.peerId}
+                    value={peerInput}
+                    onChange={(event) => setPeerInput(event.target.value)}
+                    placeholder={t.peerId}
+                  />
+                  <button className="secondary">{t.newChat}</button>
+                </form>
+                {chatError && <p className="error">{chatError}</p>}
+                {chats
+                  .slice()
+                  .sort((a, b) =>
+                    (b.messages.at(-1)?.createdAt ?? "").localeCompare(
+                      a.messages.at(-1)?.createdAt ?? "",
+                    ),
+                  )
+                  .map((chat) => (
+                    <button
+                      className={`chat-list-item ${chat.peerId === activePeer ? "selected" : ""}`}
+                      key={chat.peerId}
+                      onClick={() => {
+                        controllerRef.current?.selectChat(chat.peerId);
+                        setMobileChat(true);
+                      }}
+                    >
+                      <strong>{chat.peerId.slice(-10)}</strong>
+                      <span>{chat.messages.at(-1)?.text ?? t.noMessages}</span>
+                      {chat.unreadCount > 0 && (
+                        <b className="unread-count">{chat.unreadCount}</b>
+                      )}
+                      {chat.messages.at(-1) && (
+                        <small>
+                          {new Date(
+                            chat.messages.at(-1)!.createdAt,
+                          ).toLocaleTimeString(
+                            language === "ru" ? "ru-RU" : "en-US",
+                            { hour: "2-digit", minute: "2-digit" },
+                          )}
+                        </small>
+                      )}
+                    </button>
+                  ))}
+              </aside>
+              <section className="conversation">
+                {activePeer ? (
+                  <>
+                    <div className="conversation-head">
+                      <button
+                        className="text-button mobile-back"
+                        onClick={() => {
+                          controllerRef.current?.closeActiveChat();
+                          setMobileChat(false);
+                        }}
+                      >
+                        {t.back}
+                      </button>
+                      <strong>{activePeer.slice(-10)}</strong>
+                    </div>
+                    <div className="message-list">
+                      {(
+                        chats.find((chat) => chat.peerId === activePeer)
+                          ?.messages ?? []
+                      ).map((message) => (
+                        <article
+                          className={`message ${message.direction}`}
+                          key={message.id}
+                        >
+                          <div className="message-text">
+                            {message.decryptFailed
+                              ? t.decryptFailed
+                              : message.text}
+                          </div>
+                          <small>
+                            {new Date(message.createdAt).toLocaleTimeString(
+                              language === "ru" ? "ru-RU" : "en-US",
+                              { hour: "2-digit", minute: "2-digit" },
+                            )}{" "}
+                            {message.direction === "out" &&
+                              (message.status === "delivered"
+                                ? t.delivered
+                                : message.status === "sent"
+                                  ? t.sent
+                                  : message.status === "error"
+                                    ? t.failed
+                                    : t.sending)}
+                          </small>
+                          {message.status === "error" && (
+                            <>
+                              <span className="error">
+                                {errorText(message.error ?? "send_failed")}
+                              </span>
+                              <button
+                                className="text-button"
+                                onClick={() => retryMessage(message)}
+                              >
+                                {t.retry}
+                              </button>
+                            </>
+                          )}
+                        </article>
+                      ))}
+                    </div>
+                    <form
+                      className="composer"
+                      onSubmit={(event) => void sendMessage(event)}
+                    >
+                      <textarea
+                        value={draft}
+                        maxLength={4000}
+                        onChange={(event) => setDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && !event.shiftKey) {
+                            event.preventDefault();
+                            void sendMessage();
+                          }
+                        }}
+                        placeholder={t.messagePlaceholder}
+                      />
+                      <button className="primary" disabled={!draft.trim()}>
+                        {t.send}
+                      </button>
+                    </form>
+                  </>
+                ) : (
+                  <p className="muted empty-chat">{t.selectChat}</p>
+                )}
+              </section>
+            </section>
             <button
               className="danger"
               onClick={() => setShowLogoutConfirmation(true)}
