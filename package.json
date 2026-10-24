@@ -10,11 +10,13 @@
     "dev:server": "pnpm --filter @messages/crypto build && pnpm --filter @messages/server dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
+    "test:e2e": "node apps/web/e2e/prepare.mjs && playwright test --config apps/web/playwright.config.ts",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write ."
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",
+    "@playwright/test": "^1.64.1",
     "@types/node": "^22.19.0",
     "concurrently": "^9.2.1",
     "eslint": "^9.39.0",

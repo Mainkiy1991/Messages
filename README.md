@@ -30,7 +30,6 @@ $EDITOR apps/server/.env
 
 Команды сервера, миграции и smoke загружают `apps/server/.env` относительно расположения исходного файла; переменные, уже заданные в окружении, имеют приоритет. Например, после копирования файла команда migrate сама найдёт `DATABASE_URL`.
 
-<<<<<<< HEAD
 Для веб-клиента скопируйте `apps/web/.env.example` в `apps/web/.env` (по умолчанию API уже настроен на `http://localhost:3000`). Чтобы запустить API и веб-клиент вместе, выполните из корня:
 
 ```powershell
@@ -52,18 +51,6 @@ pnpm dev
 Откройте `http://localhost:5173`. Для проверки обмена создайте/войдите в аккаунт в обычном окне браузера, скопируйте свой ID, затем откройте второй браузерный профиль или приватное окно и войдите/создайте там второй аккаунт. В первом окне создайте чат по ID второго и отправьте сообщение; ответьте из второго окна. Vite использует порт 5173 без автоматического переключения порта, так как сервер сверяет Origin с `WEB_ORIGIN`.
 
 Известные ограничения: история не загружается после перезагрузки страницы, а список чатов и сообщения хранятся только в памяти. Имена контактов не сохраняются; в списке отображаются последние 10 символов ID.
-=======
-
-После миграции запустите сайт и API вместе из корня командой `pnpm dev`. Сервер автоматически перезапускается при изменении файлов. Для отдельных терминалов используйте `pnpm dev:web` и `pnpm dev:server`. Если запуск через `concurrently` на вашей системе не подходит, откройте два терминала в корне и выполните эти две команды отдельно. Сервер по умолчанию слушает `127.0.0.1:3000`; готовность видна по строке `Server listening. Сервер запущен: http://127.0.0.1:3000`, а `http://localhost:3000/health` возвращает `{"status":"ok"}`. Таймаут подключения к PostgreSQL — 10 секунд; при ошибке сервер сообщает `Не удалось подключиться к базе данных`.
-
-> > > > > > > origin/main
-
-```sh
-pnpm install
-pnpm --filter @messages/server migrate
-pnpm dev
-```
-
 `.env` содержит пароль: никогда не коммитьте его и не показывайте другим. `HOST=127.0.0.1` и `TRUST_PROXY=false` используются по умолчанию. На Render установите `HOST=0.0.0.0`, чтобы сервер принимал внешние подключения, и `TRUST_PROXY=true`, чтобы rate limit учитывал клиентский IP из заголовков доверенного прокси.
 
 API на `http://localhost:3000`: `GET /health`; `POST /auth/challenge` выдаёт одноразовый challenge; `POST /auth/login` проверяет Ed25519-подписи и выдаёт Bearer-токен; `POST /auth/logout` удаляет сессию; `GET /me` возвращает ваши публичные ключи; `GET /users/:userId/keys` возвращает публичный ключ пользователя. Для защищённых запросов используйте `Authorization: Bearer <token>`.
@@ -95,6 +82,19 @@ pnpm test
 ```
 
 Серверные интеграционные тесты требуют `TEST_DATABASE_URL`. CI автоматически запускает их на PostgreSQL 16; локально без переменной тесты сервера пропускаются с сообщением.
+
+### Браузерные e2e-проверки
+
+Для локального запуска нужна отдельная пустая PostgreSQL база, например отдельная база `messages_e2e` в локальном PostgreSQL. Не задавайте здесь рабочую базу с реальными данными: проверки создают аккаунты и оставляют тестовые записи.
+
+```powershell
+$env:E2E_DATABASE_URL = "postgresql://messages:messages@localhost:5432/messages_e2e"
+pnpm install
+pnpm exec playwright install chromium
+pnpm test:e2e
+```
+
+Тесты сами соберут приложения, применят миграции, поднимут настоящий сервер и сайт на портах 3000 и 5173. Отчёт HTML находится в `apps/web/playwright-report`; открыть его можно командой `pnpm exec playwright show-report apps/web/playwright-report`. При падении тестов Playwright сохраняет трассировки и скриншоты в `apps/web/test-results`.
 
 ### Структура
 
@@ -130,7 +130,6 @@ $EDITOR apps/server/.env
 
 The server, migration, and smoke entrypoints load `apps/server/.env` relative to their source file. Variables already present in the environment take precedence, so migrate finds `DATABASE_URL` after the file is copied.
 
-<<<<<<< HEAD
 Copy `apps/web/.env.example` to `apps/web/.env` for the web client (the default API URL is `http://localhost:3000`). To run the API and web client together, from the repository root:
 
 ```powershell
@@ -152,18 +151,6 @@ pnpm dev
 Open `http://localhost:5173`. To verify messaging, create or sign in to one account in a normal browser window, copy its ID, then use a second browser profile or private window for another account. Create a chat by entering the second ID, send a message, and reply from the second window. Vite keeps port 5173 fixed because the server checks the `WEB_ORIGIN` value.
 
 Known limitations: message history is not restored after reload; chats and messages exist only in memory. Contact names are not saved, so the chat list shows the last 10 characters of each ID.
-=======
-
-After migrating, start the website and API together from the repository root with `pnpm dev`. The server restarts automatically when files change. For separate terminals, run `pnpm dev:web` and `pnpm dev:server`. If `concurrently` does not work on your system, open two terminals at the repository root and run these commands separately. By default, the server listens on `127.0.0.1:3000`; look for `Server listening. Сервер запущен: http://127.0.0.1:3000`, and `http://localhost:3000/health` returns `{"status":"ok"}`. The PostgreSQL connection timeout is 10 seconds; on failure, the server reports `Не удалось подключиться к базе данных`.
-
-> > > > > > > origin/main
-
-```sh
-pnpm install
-pnpm --filter @messages/server migrate
-pnpm dev
-```
-
 `.env` contains your database password. Never commit or share it. `HOST=127.0.0.1` and `TRUST_PROXY=false` are the defaults. On Render, set `HOST=0.0.0.0` so the server accepts external connections, and set `TRUST_PROXY=true` so rate limits use each client's forwarded IP.
 
 API at `http://localhost:3000`: `GET /health`; `POST /auth/challenge` creates a one-use challenge; `POST /auth/login` verifies Ed25519 signatures and returns a Bearer token; `POST /auth/logout` removes the session; `GET /me` returns your public keys; `GET /users/:userId/keys` returns a user's public key. Send `Authorization: Bearer <token>` for protected requests.
@@ -195,6 +182,19 @@ pnpm test
 ```
 
 Server integration tests require `TEST_DATABASE_URL`. CI runs them against PostgreSQL 16; locally, server tests are skipped with a message when the variable is not set.
+
+### Browser e2e checks
+
+Use a separate, empty PostgreSQL database for local e2e runs (for example, a dedicated local `messages_e2e` database). Never point `E2E_DATABASE_URL` at a production or other database with real data: the tests create accounts and leave test records behind.
+
+```sh
+export E2E_DATABASE_URL=postgresql://messages:messages@localhost:5432/messages_e2e
+pnpm install
+pnpm exec playwright install chromium
+pnpm test:e2e
+```
+
+The command builds the apps, applies migrations, and starts the real server and site on ports 3000 and 5173. The HTML report is in `apps/web/playwright-report`; open it with `pnpm exec playwright show-report apps/web/playwright-report`. Failure traces and screenshots are saved in `apps/web/test-results`.
 
 ### Repository structure
 
