@@ -46,8 +46,11 @@ async function openUser(browser: Browser): Promise<User> {
       /^WebSocket connection to 'ws:\/\/localhost:3000\/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED$/u.test(
         message.text(),
       );
+    const expectedApiRefusal =
+      user.expectedDisconnect &&
+      /localhost:3000|ERR_CONNECTION_REFUSED/u.test(message.text());
     // Chromium emits this network diagnostic during the deliberately stopped-server window.
-    if (!expectedSocketRefusal)
+    if (!expectedSocketRefusal && !expectedApiRefusal)
       user.errors.push(`console.error: ${message.text()}`);
   });
   await page.goto("/");
@@ -263,6 +266,19 @@ test.describe("real browser chat", () => {
       { timeout: 20_000 },
     );
     await send(b.page, "During outage");
+    await b.page.reload();
+    await expect(b.page.getByTestId("user-id")).toBeVisible();
+    await expect(b.page.getByTestId("connection-status")).toHaveAttribute(
+      "data-state",
+      "offline",
+      { timeout: 20_000 },
+    );
+    const restoredChat = chatWith(b.page, alice.id);
+    await expect(restoredChat).toBeVisible();
+    await restoredChat.click();
+    await expect(
+      b.page.locator('[data-testid="message"][data-status="sending"]'),
+    ).toContainText("During outage");
     await serverControl.start();
 
     await expect(a.page.getByTestId("connection-status")).toHaveAttribute(

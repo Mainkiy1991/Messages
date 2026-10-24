@@ -116,6 +116,9 @@ export class ChatController {
   private arrivalOrder = 0;
   private contactsVersion = "0";
   private accountDataLoaded = false;
+  private outboxLoaded = false;
+  private accountDataLoading: Promise<void> | null = null;
+  private accountDataRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private historyRequests = new Set<string>();
   private state: ChatControllerState = {
     chats: [],
@@ -136,7 +139,11 @@ export class ChatController {
       keys,
       session,
       {
-        onState: (connectionState) => this.update({ connectionState }),
+        onState: (connectionState) => {
+          this.update({ connectionState });
+          if (connectionState === "connected" && typeof window !== "undefined")
+            void this.loadAccountData();
+        },
         onFrame: (frame) => this.handleFrame(frame),
         onSend: (clientMsgId) =>
           this.updateMessage(clientMsgId, (message) => ({
@@ -181,76 +188,97 @@ export class ChatController {
   }
 
   private async loadAccountData(): Promise<void> {
-    if (this.accountDataLoaded) return;
-    this.accountDataLoaded = true;
-    try {
-      const session = await this.connection.ensureSession();
-      const [conversations, book, queued] = await Promise.all([
-        (
-          this.deps.getConversations ??
-          ((token) => getConversations(token, this.deps.fetcher))
-        )(session.token),
-        (
-          this.deps.getContacts ??
-          ((token) => getContacts(token, this.deps.fetcher))
-        )(session.token),
-        (this.deps.outbox ?? indexedDbOutbox).list(this.userId),
-      ]);
-      this.contactsVersion = book.version;
-      let contacts: Record<string, string> = {};
-      let contactsError = false;
-      if (book.blob) {
+    if (this.accountDataLoading) return this.accountDataLoading;
+    this.accountDataLoading = (async () => {
+      if (!this.outboxLoaded) {
         try {
-          contacts = decryptContactBook({
-            historyKey: this.keys.historyKey,
-            blob: book.blob,
-          });
+          const queued = await (this.deps.outbox ?? indexedDbOutbox).list(
+            this.userId,
+          );
+          for (const frame of queued) {
+            let text = "";
+            let decryptFailed = false;
+            try {
+              text = decryptHistoryEntry({
+                historyKey: this.keys.historyKey,
+                clientMsgId: frame.clientMsgId,
+                peerId: frame.to,
+                entry: frame.senderCopy,
+              }).text;
+            } catch {
+              decryptFailed = true;
+            }
+            this.upsertMessage(frame.to, {
+              id: frame.clientMsgId,
+              clientMsgId: frame.clientMsgId,
+              text,
+              createdAt: new Date().toISOString(),
+              direction: "out",
+              status: "sending",
+              frame,
+              ...(decryptFailed ? { decryptFailed: true } : {}),
+              arrivalOrder: this.arrivalOrder++,
+            });
+            this.connection.send(frame);
+          }
+          this.outboxLoaded = true;
         } catch {
-          contactsError = true;
+          this.update({ error: "server_unavailable" });
         }
       }
-      const chats = conversations.conversations.map((item) => ({
-        peerId: item.peerId,
-        messages: [],
-        unreadCount: 0,
-        hasMore: true,
-        lastCreatedAt: item.lastCreatedAt,
-      }));
-      this.update({
-        chats: mergeChats(this.state.chats, chats),
-        contacts,
-        contactsError,
-      });
-      for (const frame of queued) {
-        let text = "";
-        let decryptFailed = false;
-        try {
-          text = decryptHistoryEntry({
-            historyKey: this.keys.historyKey,
-            clientMsgId: frame.clientMsgId,
-            peerId: frame.to,
-            entry: frame.senderCopy,
-          }).text;
-        } catch {
-          decryptFailed = true;
+      if (this.accountDataLoaded) return;
+      try {
+        const session = await this.connection.ensureSession();
+        const [conversations, book] = await Promise.all([
+          (
+            this.deps.getConversations ??
+            ((token) => getConversations(token, this.deps.fetcher))
+          )(session.token),
+          (
+            this.deps.getContacts ??
+            ((token) => getContacts(token, this.deps.fetcher))
+          )(session.token),
+        ]);
+        this.contactsVersion = book.version;
+        let contacts: Record<string, string> = {};
+        let contactsError = false;
+        if (book.blob) {
+          try {
+            contacts = decryptContactBook({
+              historyKey: this.keys.historyKey,
+              blob: book.blob,
+            });
+          } catch {
+            contactsError = true;
+          }
         }
-        this.upsertMessage(frame.to, {
-          id: frame.clientMsgId,
-          clientMsgId: frame.clientMsgId,
-          text,
-          createdAt: new Date().toISOString(),
-          direction: "out",
-          status: "sending",
-          frame,
-          ...(decryptFailed ? { decryptFailed: true } : {}),
-          arrivalOrder: this.arrivalOrder++,
+        const chats = conversations.conversations.map((item) => ({
+          peerId: item.peerId,
+          messages: [],
+          unreadCount: 0,
+          hasMore: true,
+          lastCreatedAt: item.lastCreatedAt,
+        }));
+        this.update({
+          chats: mergeChats(this.state.chats, chats),
+          contacts,
+          contactsError,
         });
-        this.connection.send(frame);
+        this.accountDataLoaded = true;
+      } catch {
+        this.update({ error: "server_unavailable" });
+        if (!this.accountDataRetryTimer) {
+          this.accountDataRetryTimer = setTimeout(() => {
+            this.accountDataRetryTimer = null;
+            if (this.state.connectionState === "connected")
+              void this.loadAccountData();
+          }, 2_000);
+        }
       }
-    } catch {
-      this.accountDataLoaded = false;
-      this.update({ error: "server_unavailable" });
-    }
+    })().finally(() => {
+      this.accountDataLoading = null;
+    });
+    return this.accountDataLoading;
   }
 
   async loadHistory(peerId = this.state.activePeer): Promise<void> {
@@ -408,6 +436,8 @@ export class ChatController {
   }
 
   stop(): void {
+    if (this.accountDataRetryTimer) clearTimeout(this.accountDataRetryTimer);
+    this.accountDataRetryTimer = null;
     this.connection.stop();
   }
 

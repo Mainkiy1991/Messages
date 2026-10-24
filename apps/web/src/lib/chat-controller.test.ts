@@ -4,6 +4,7 @@ import {
   decryptContactBook,
   deriveKeys,
   encryptContactBook,
+  encryptHistoryEntry,
   encryptTextMessage,
   signKeyBinding,
 } from "@messages/crypto";
@@ -131,7 +132,10 @@ async function authenticate(socket: TestSocket) {
 }
 
 describe("ChatController", () => {
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
   it("preserves sending → sent → delivered and never downgrades on late sent", async () => {
     const f = makeController({ initialSession: session("token-a") });
@@ -569,6 +573,46 @@ describe("ChatController", () => {
     });
     expect(await controller.saveContactName(bobId, "Name")).toBe(false);
     expect(writes).toBe(3);
+  });
+
+  it("restores an encrypted queued frame even while account HTTP endpoints are unavailable", async () => {
+    vi.stubGlobal("window", {});
+    const frame = {
+      type: "send" as const,
+      clientMsgId: "00000000000000000000000000000002",
+      to: bobId,
+      ciphertext: "encrypted-message",
+      senderCopy: encryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId: "00000000000000000000000000000002",
+        peerId: bobId,
+        text: "unsent text",
+        sentAt: Date.now(),
+      }),
+    };
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      outbox: {
+        list: async () => [frame],
+        put: async () => undefined,
+        remove: async () => undefined,
+        clear: async () => undefined,
+      },
+      getConversations: async () => {
+        throw new Error("offline");
+      },
+      getContacts: async () => {
+        throw new Error("offline");
+      },
+    });
+    controller.start();
+    await waitFor(() =>
+      controller.getSnapshot().chats.some((chat) => chat.peerId === bobId),
+    );
+    const message = controller.getSnapshot().chats[0]?.messages[0];
+    expect(message?.clientMsgId).toBe(frame.clientMsgId);
+    expect(message?.text).toBe("unsent text");
+    expect(message?.frame).toEqual(frame);
+    controller.stop();
   });
 
   it("displays a history placeholder and continues after a broken payload", async () => {
