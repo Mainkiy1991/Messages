@@ -3,11 +3,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   bytesToHex,
   deriveKeys,
+  signKeyBinding,
   verifyAuth,
   verifyKeyBinding,
 } from "@messages/crypto";
 import { clearSession, restoreServerSession } from "../session.js";
-import { loginToServer } from "./api.js";
+import { loginToServer, verifyUserKeys } from "./api.js";
 
 const keys = deriveKeys(
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
@@ -60,5 +61,27 @@ describe("server API login", () => {
       "http://localhost:3000/auth/login",
     ]);
     expect(await restoreServerSession()).toEqual(session);
+  });
+});
+
+describe("peer key verification", () => {
+  it("refuses a key whose identity binding signature is invalid", () => {
+    const peerId = bytesToHex(keys.identity.publicKey);
+    const peerKeys = {
+      userId: peerId,
+      encryptionPublicKey: bytesToHex(keys.encryption.publicKey),
+      keyBindingSignature: "00".repeat(64),
+    };
+    expect(() => verifyUserKeys(peerId, peerKeys)).toThrow(
+      "key_binding_invalid",
+    );
+    expect(
+      verifyUserKeys(peerId, {
+        ...peerKeys,
+        keyBindingSignature: bytesToHex(
+          signKeyBinding(keys.identity.privateKey, keys.encryption.publicKey),
+        ),
+      }),
+    ).toEqual(keys.encryption.publicKey);
   });
 });

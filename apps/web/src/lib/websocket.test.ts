@@ -88,4 +88,39 @@ describe("websocket chat connection", () => {
     expect(acks).toEqual([frame.id, frame.id]);
     connection.stop();
   });
+
+  it("splits acknowledgement batches at 200 IDs", async () => {
+    const socket = new FakeSocket();
+    const connection = new ChatConnection(
+      deriveKeys(
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      ),
+      {
+        token: "a".repeat(43),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: "0".repeat(64),
+      },
+      { onState: vi.fn(), onFrame: vi.fn() },
+      { socketFactory: () => socket as never },
+    );
+    connection.start();
+    socket.open();
+    socket.frame({ type: "auth_ok" });
+    for (let index = 0; index < 205; index++) {
+      socket.frame({
+        type: "message",
+        id: `00000000-0000-4000-8000-${index.toString().padStart(12, "0")}`,
+        from: "1".repeat(64),
+        ciphertext: "x",
+        createdAt: new Date().toISOString(),
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    const batches = socket.sent
+      .filter((value) => JSON.parse(value).type === "ack")
+      .map((value) => JSON.parse(value).ids as string[]);
+    expect(batches.map((ids) => ids.length)).toEqual([200, 5]);
+    expect(batches.every((ids) => ids.length <= 200)).toBe(true);
+    connection.stop();
+  });
 });
