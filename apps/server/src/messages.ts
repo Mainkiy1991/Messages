@@ -70,12 +70,14 @@ export function createMessageHub(pool: Pool, batchSize = 200): MessageHub {
       await nextBatch(socket, userId);
     },
     async acknowledge(socket, ids, userId) {
-      const unacked = (pending.get(socket) ?? []).filter(
-        (id) => !ids.includes(id),
-      );
+      const batch = pending.get(socket);
+      if (!batch) return;
+      const unacked = batch.filter((id) => !ids.includes(id));
       if (unacked.length) pending.set(socket, unacked);
-      else pending.delete(socket);
-      await nextBatch(socket, userId);
+      else {
+        pending.delete(socket);
+        await nextBatch(socket, userId);
+      }
     },
   };
 }

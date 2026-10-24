@@ -7,7 +7,9 @@ import {
   signAuth,
   signKeyBinding,
 } from "@messages/crypto";
+import { loadServerEnv } from "./env.js";
 
+await loadServerEnv();
 const baseUrl = process.env.SMOKE_URL ?? "http://localhost:3000";
 const wsUrl = new URL("/ws", baseUrl);
 wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";

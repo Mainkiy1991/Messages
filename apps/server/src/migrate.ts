@@ -3,8 +3,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { loadConfig } from "./config.js";
+import { loadServerEnv } from "./env.js";
 
 const { Pool } = pg;
+await loadServerEnv();
 const pool = new Pool({ connectionString: loadConfig().DATABASE_URL });
 const directory = join(
   dirname(fileURLToPath(import.meta.url)),
