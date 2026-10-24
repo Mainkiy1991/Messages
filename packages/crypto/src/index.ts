@@ -240,8 +240,8 @@ export function encryptHistoryEntry(input: {
   sentAt: number;
 }): string {
   checkKey(input.historyKey);
-  checkId(input.clientMsgId, 32, /^[0-9a-f]{32}$/iu);
-  checkId(input.peerId, 64, /^[0-9a-f]{64}$/iu);
+  checkId(input.clientMsgId, 32, /^[0-9a-f]{32}$/u);
+  checkId(input.peerId, 64, /^[0-9a-f]{64}$/u);
   checkText(input.text);
   checkSentAt(input.sentAt);
   const key = hkdf(sha256, input.historyKey, HKDF_SALT, HISTORY_INFO, 32);
@@ -269,8 +269,8 @@ export function decryptHistoryEntry(input: {
 }): { text: string; sentAt: number } {
   try {
     checkKey(input.historyKey);
-    checkId(input.clientMsgId, 32, /^[0-9a-f]{32}$/iu);
-    checkId(input.peerId, 64, /^[0-9a-f]{64}$/iu);
+    checkId(input.clientMsgId, 32, /^[0-9a-f]{32}$/u);
+    checkId(input.peerId, 64, /^[0-9a-f]{64}$/u);
     const packed = base64ToBytes(input.entry);
     const decoded = decodeEnvelope(packed);
     const key = hkdf(sha256, input.historyKey, HKDF_SALT, HISTORY_INFO, 32);
@@ -316,8 +316,8 @@ function checkId(value: string, length: number, pattern: RegExp): void {
 }
 
 function checkIds(senderId: string, recipientId: string): void {
-  checkId(senderId, 64, /^[0-9a-f]{64}$/iu);
-  checkId(recipientId, 64, /^[0-9a-f]{64}$/iu);
+  checkId(senderId, 64, /^[0-9a-f]{64}$/u);
+  checkId(recipientId, 64, /^[0-9a-f]{64}$/u);
 }
 
 function checkText(text: string): void {
