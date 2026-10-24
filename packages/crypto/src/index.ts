@@ -1,11 +1,11 @@
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
-import { generateMnemonic as bip39GenerateMnemonic } from "@scure/bip39";
-import { hkdf } from "@noble/hashes/hkdf.js";
-import { sha256 } from "@noble/hashes/sha2.js";
 import {
+  generateMnemonic as bip39GenerateMnemonic,
   mnemonicToSeedSync,
   validateMnemonic as validateBip39Mnemonic,
 } from "@scure/bip39";
+import { hkdf } from "@noble/hashes/hkdf.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
 export type KeyPair = { publicKey: Uint8Array; privateKey: Uint8Array };

@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+import WebSocket from "ws";
 import {
   bytesToHex,
   deriveKeys,
@@ -7,48 +9,40 @@ import {
 } from "@messages/crypto";
 
 const baseUrl = process.env.SMOKE_URL ?? "http://localhost:3000";
-let step = "mnemonic and keys";
+const wsUrl = new URL("/ws", baseUrl);
+wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
+let step = "temporary accounts";
+const sockets: WebSocket[] = [];
+const tokens: string[] = [];
 
 function pass(name: string): void {
   console.log(`PASS ${name}`);
 }
 
-async function expectStatus(
-  response: Response,
-  expected: number,
-  name: string,
-): Promise<void> {
-  if (response.status !== expected) {
-    throw new Error(`${name} returned status ${response.status}`);
-  }
-  pass(name);
+function fail(name: string): never {
+  throw new Error(name);
 }
 
-try {
+async function createAccount() {
   const keys = deriveKeys(generateMnemonic(12));
   const identityPublicKey = bytesToHex(keys.identity.publicKey);
-  const encryptionPublicKey = bytesToHex(keys.encryption.publicKey);
-
-  step = "challenge";
   const challengeResponse = await fetch(new URL("/auth/challenge", baseUrl), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: "{}",
   });
-  await expectStatus(challengeResponse, 200, step);
+  if (!challengeResponse.ok) fail("challenge");
   const challenge = (await challengeResponse.json()) as {
     challengeId: string;
     challenge: string;
   };
-
-  step = "login";
   const loginResponse = await fetch(new URL("/auth/login", baseUrl), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       challengeId: challenge.challengeId,
       identityPublicKey,
-      encryptionPublicKey,
+      encryptionPublicKey: bytesToHex(keys.encryption.publicKey),
       keyBindingSignature: bytesToHex(
         signKeyBinding(keys.identity.privateKey, keys.encryption.publicKey),
       ),
@@ -61,41 +55,105 @@ try {
       ),
     }),
   });
-  await expectStatus(loginResponse, 200, step);
+  if (!loginResponse.ok) fail("login");
   const login = (await loginResponse.json()) as {
-    token: string;
     userId: string;
+    token: string;
   };
+  tokens.push(login.token);
+  return login;
+}
 
-  step = "/me";
-  const meResponse = await fetch(new URL("/me", baseUrl), {
-    headers: { authorization: `Bearer ${login.token}` },
+function waitForFrame(
+  socket: WebSocket,
+  type: string,
+): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(type)), 10_000);
+    const listener = (data: WebSocket.RawData) => {
+      let frame: Record<string, unknown>;
+      try {
+        frame = JSON.parse(data.toString()) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      if (frame.type !== type) return;
+      clearTimeout(timer);
+      socket.off("message", listener);
+      resolve(frame);
+    };
+    socket.on("message", listener);
   });
-  await expectStatus(meResponse, 200, step);
-  const me = (await meResponse.json()) as { userId: string };
-  if (me.userId !== login.userId)
-    throw new Error("/me user does not match login");
+}
 
-  step = "/users/:userId/keys";
-  const keysResponse = await fetch(
-    new URL(`/users/${encodeURIComponent(login.userId)}/keys`, baseUrl),
-    { headers: { authorization: `Bearer ${login.token}` } },
+async function connect(token: string, expectMailbox = false) {
+  const socket = new WebSocket(wsUrl);
+  sockets.push(socket);
+  await new Promise<void>((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  const mailbox = expectMailbox ? waitForFrame(socket, "message") : undefined;
+  const auth = waitForFrame(socket, "auth_ok");
+  socket.send(JSON.stringify({ type: "auth", token }));
+  await auth;
+  return { socket, mailbox };
+}
+
+try {
+  const sender = await createAccount();
+  const recipient = await createAccount();
+  pass("created two temporary users");
+
+  step = "sender WebSocket auth";
+  const { socket: senderSocket } = await connect(sender.token);
+  pass(step);
+
+  step = "send offline ciphertext";
+  const clientMsgId = randomBytes(16).toString("hex");
+  const sentPromise = waitForFrame(senderSocket, "sent");
+  senderSocket.send(
+    JSON.stringify({
+      type: "send",
+      clientMsgId,
+      to: recipient.userId,
+      ciphertext: randomBytes(32).toString("base64"),
+      senderCopy: randomBytes(32).toString("base64"),
+    }),
   );
-  await expectStatus(keysResponse, 200, step);
+  const sent = await sentPromise;
+  if (sent.clientMsgId !== clientMsgId) fail(step);
+  pass(step);
 
-  step = "logout";
-  const logoutResponse = await fetch(new URL("/auth/logout", baseUrl), {
-    method: "POST",
-    headers: { authorization: `Bearer ${login.token}` },
-  });
-  await expectStatus(logoutResponse, 204, step);
+  step = "recipient mailbox delivery";
+  const { socket: recipientSocket, mailbox } = await connect(
+    recipient.token,
+    true,
+  );
+  const message = await mailbox!;
+  if (message.from !== sender.userId || typeof message.id !== "string")
+    fail(step);
+  pass(step);
 
-  step = "/me after logout";
-  const afterLogoutResponse = await fetch(new URL("/me", baseUrl), {
-    headers: { authorization: `Bearer ${login.token}` },
-  });
-  await expectStatus(afterLogoutResponse, 401, step);
+  step = "recipient ack";
+  recipientSocket.send(JSON.stringify({ type: "ack", ids: [message.id] }));
+  const delivered = await waitForFrame(senderSocket, "delivered");
+  if (delivered.id !== message.id || delivered.clientMsgId !== clientMsgId)
+    fail(step);
+  pass(step);
+
+  step = "logout temporary sessions";
+  for (const token of tokens) {
+    const response = await fetch(new URL("/auth/logout", baseUrl), {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (response.status !== 204) fail(step);
+  }
+  pass(step);
 } catch {
   console.error(`FAIL ${step}`);
   process.exitCode = 1;
+} finally {
+  for (const socket of sockets) socket.terminate();
 }
