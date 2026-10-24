@@ -131,7 +131,16 @@ export async function buildApp(options: {
               : "request_error";
     return reply.code(statusCode).send({ error: errorCode });
   });
-  await app.register(cors, { origin: config.WEB_ORIGIN });
+  await app.register(cors, {
+    origin: (requestOrigin, callback) => {
+      callback(
+        null,
+        requestOrigin === config.WEB_ORIGIN ? config.WEB_ORIGIN : false,
+      );
+    },
+    methods: ["GET", "HEAD", "POST", "PUT"],
+    allowedHeaders: ["Authorization", "Content-Type"],
+  });
   await app.register(rateLimit, { global: false });
 
   async function authenticate(
