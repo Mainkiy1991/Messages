@@ -50,7 +50,7 @@ pnpm dev
 
 Откройте `http://localhost:5173`. Для проверки обмена создайте/войдите в аккаунт в обычном окне браузера, скопируйте свой ID, затем откройте второй браузерный профиль или приватное окно и войдите/создайте там второй аккаунт. В первом окне создайте чат по ID второго и отправьте сообщение; ответьте из второго окна. Vite использует порт 5173 без автоматического переключения порта, так как сервер сверяет Origin с `WEB_ORIGIN`.
 
-Известные ограничения: история не загружается после перезагрузки страницы, а список чатов и сообщения хранятся только в памяти. Имена контактов не сохраняются; в списке отображаются последние 10 символов ID.
+Клиент загружает список чатов и постраничную историю после входа; имена хранятся в зашифрованной контакт-книге. Неотправленные зашифрованные кадры сохраняются в IndexedDB до подтверждения сервера и отправляются повторно после восстановления соединения или входа. Расшифрованная история и текст очереди существуют только в памяти страницы.
 `.env` содержит пароль: никогда не коммитьте его и не показывайте другим. `HOST=127.0.0.1` и `TRUST_PROXY=false` используются по умолчанию. На Render установите `HOST=0.0.0.0`, чтобы сервер принимал внешние подключения, и `TRUST_PROXY=true`, чтобы rate limit учитывал клиентский IP из заголовков доверенного прокси.
 
 API на `http://localhost:3000`: `GET /health`; `POST /auth/challenge` выдаёт одноразовый challenge; `POST /auth/login` проверяет Ed25519-подписи и выдаёт Bearer-токен; `POST /auth/logout` удаляет сессию; `GET /me` возвращает ваши публичные ключи; `GET /users/:userId/keys` возвращает публичный ключ пользователя. Для защищённых запросов используйте `Authorization: Bearer <token>`.
@@ -158,7 +158,7 @@ pnpm dev
 
 Open `http://localhost:5173`. To verify messaging, create or sign in to one account in a normal browser window, copy its ID, then use a second browser profile or private window for another account. Create a chat by entering the second ID, send a message, and reply from the second window. Vite keeps port 5173 fixed because the server checks the `WEB_ORIGIN` value.
 
-Known limitations: message history is not restored after reload; chats and messages exist only in memory. Contact names are not saved, so the chat list shows the last 10 characters of each ID.
+The client loads the conversation list and paginated message history after sign-in; contact names are stored in an encrypted contact book. Encrypted frames waiting to send are kept in IndexedDB until server confirmation and retried after reconnect or sign-in. Decrypted history and queued message text stay in page memory only.
 `.env` contains your database password. Never commit or share it. `HOST=127.0.0.1` and `TRUST_PROXY=false` are the defaults. On Render, set `HOST=0.0.0.0` so the server accepts external connections, and set `TRUST_PROXY=true` so rate limits use each client's forwarded IP.
 
 API at `http://localhost:3000`: `GET /health`; `POST /auth/challenge` creates a one-use challenge; `POST /auth/login` verifies Ed25519 signatures and returns a Bearer token; `POST /auth/logout` removes the session; `GET /me` returns your public keys; `GET /users/:userId/keys` returns a user's public key. Send `Authorization: Bearer <token>` for protected requests.

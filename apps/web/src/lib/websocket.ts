@@ -43,6 +43,7 @@ export class ChatConnection {
       onState(state: SocketState): void;
       onFrame(frame: IncomingFrame): void | Promise<void>;
       onSend?(clientMsgId: string): void;
+      onSent?(clientMsgId: string): void;
       onSendTimeout?(clientMsgId: string): void;
     },
     private readonly deps: {
@@ -229,6 +230,7 @@ export class ChatConnection {
         frame.type === "error") &&
       typeof frame.clientMsgId === "string"
     ) {
+      if (frame.type === "sent") this.handlers.onSent?.(frame.clientMsgId);
       const pending = this.outbox.get(frame.clientMsgId);
       if (pending) {
         this.clearPendingTimer(pending);

@@ -21,7 +21,7 @@ export const strings = {
     phrase: "Сид-фраза",
     signIn: "Войти",
     invalid: "Неверная сид-фраза. Проверьте слова и попробуйте снова.",
-    chats: "Чаты появятся на следующих этапах",
+    chats: "Чаты",
     userId: "ID пользователя",
     copy: "Копировать",
     copied: "Скопировано",
@@ -54,6 +54,13 @@ export const strings = {
     messagePlaceholder: "Сообщение",
     noMessages: "Нет сообщений",
     selectChat: "Выберите чат или создайте новый.",
+    contactName: "Имя контакта (необязательно)",
+    saveName: "Сохранить имя",
+    contactSaveFailed: "Не удалось сохранить имя",
+    contactsDecryptError:
+      "Не удалось расшифровать книгу контактов. Изменения не загружены.",
+    loadMore: "Загрузить ещё",
+    loading: "Загрузка…",
   },
   en: {
     title: "Messages",
@@ -75,7 +82,7 @@ export const strings = {
     phrase: "Seed phrase",
     signIn: "Sign in",
     invalid: "Invalid seed phrase. Check the words and try again.",
-    chats: "Chats will appear in a later stage",
+    chats: "Chats",
     userId: "User ID",
     copy: "Copy",
     copied: "Copied",
@@ -108,6 +115,13 @@ export const strings = {
     messagePlaceholder: "Message",
     noMessages: "No messages",
     selectChat: "Select a chat or start a new one.",
+    contactName: "Contact name (optional)",
+    saveName: "Save name",
+    contactSaveFailed: "Could not save contact name",
+    contactsDecryptError:
+      "Could not decrypt the contact book. Changes were not loaded.",
+    loadMore: "Load more",
+    loading: "Loading…",
   },
 } as const;
 

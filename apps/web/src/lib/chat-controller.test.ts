@@ -1,12 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   bytesToHex,
+  decryptContactBook,
   deriveKeys,
+  encryptContactBook,
   encryptTextMessage,
   signKeyBinding,
 } from "@messages/crypto";
-import { ApiError, type UserKeys } from "./api.js";
-import { ChatController } from "./chat-controller.js";
+import { ApiError, type ContactBookResponse, type UserKeys } from "./api.js";
+import {
+  ChatController,
+  contactLabel,
+  mergeMessages,
+  type ChatMessage,
+} from "./chat-controller.js";
 import type { ServerSession } from "../session.js";
 
 const alice = deriveKeys(
@@ -490,6 +497,103 @@ describe("ChatController", () => {
     });
     await controller.logout();
     expect(logoutTokens).toEqual(["expired", "fresh"]);
+  });
+
+  it("merges history and live frames by id or clientMsgId without duplicates", () => {
+    const base: ChatMessage = {
+      id: "client",
+      clientMsgId: "same",
+      text: "pending",
+      createdAt: "2025-01-01T00:00:00.000Z",
+      direction: "out",
+      status: "sending",
+      arrivalOrder: 0,
+    };
+    const history: ChatMessage = {
+      ...base,
+      id: "server-id",
+      text: "saved",
+      seq: "4",
+      status: undefined,
+      arrivalOrder: 1,
+    };
+    const result = mergeMessages([base], [history]);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      id: "server-id",
+      clientMsgId: "same",
+      text: "saved",
+      status: "sending",
+    });
+  });
+
+  it("uses the final ten ID characters when a contact name is missing", () => {
+    expect(contactLabel(bobId, {})).toBe(bobId.slice(-10));
+    expect(contactLabel(bobId, { [bobId]: "Bob" })).toBe("Bob");
+  });
+
+  it("retries contact save on version conflict and overlays the local name", async () => {
+    const latest: ContactBookResponse = {
+      version: "2",
+      blob: encryptContactBook({
+        historyKey: alice.historyKey,
+        contacts: { [bobId]: "Remote" },
+      }),
+    };
+    let writes = 0;
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => latest,
+      putContacts: async (_token, version, blob) => {
+        writes++;
+        if (writes === 1) throw new ApiError(409, "version_conflict");
+        expect(version).toBe("2");
+        expect(
+          decryptContactBook({ historyKey: alice.historyKey, blob }),
+        ).toEqual({ [bobId]: "Local" });
+        return { version: "3" };
+      },
+    });
+    expect(await controller.saveContactName(bobId, "  Local  ")).toBe(true);
+    expect(writes).toBe(2);
+    expect(controller.getSnapshot().contacts[bobId]).toBe("Local");
+  });
+
+  it("stops contact conflict retries after three writes", async () => {
+    let writes = 0;
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => ({ version: String(writes + 1), blob: null }),
+      putContacts: async () => {
+        writes++;
+        throw new ApiError(409, "version_conflict");
+      },
+    });
+    expect(await controller.saveContactName(bobId, "Name")).toBe(false);
+    expect(writes).toBe(3);
+  });
+
+  it("displays a history placeholder and continues after a broken payload", async () => {
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      fetchPeerKeys: async () => userKeys(bob),
+      getHistory: async () => ({
+        hasMore: false,
+        messages: [
+          {
+            id: "ok",
+            seq: "1",
+            direction: "out",
+            clientMsgId: "00000000000000000000000000000001",
+            payload: "broken",
+            createdAt: "2025-01-01T00:00:00.000Z",
+            deliveredAt: null,
+          },
+        ],
+      }),
+    });
+    await controller.openChat(bobId);
+    await waitFor(() => controller.getSnapshot().chats[0]?.hasMore === false);
+    expect(controller.getSnapshot().chats[0]?.messages[0]?.decryptFailed).toBe(
+      true,
+    );
   });
 
   it("resends an unconfirmed frame after reconnect with the same payload and clientMsgId", async () => {

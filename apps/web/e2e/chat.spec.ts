@@ -117,9 +117,7 @@ async function send(page: Page, message: string): Promise<void> {
 }
 
 function chatWith(page: Page, peerId: string) {
-  return page
-    .locator('[data-testid="chat-item"]')
-    .filter({ has: page.locator(`text=${peerId.slice(-10)}`) });
+  return page.locator(`[data-testid="chat-item"][data-peer-id="${peerId}"]`);
 }
 
 test.describe("real browser chat", () => {
@@ -186,6 +184,53 @@ test.describe("real browser chat", () => {
       "Queued one",
       "Queued two",
     ]);
+  });
+
+  test("restores conversations and encrypted contacts in a clean browser context", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(a.page, bob.id);
+    await logout(b.page);
+    await send(a.page, "History survives a reload");
+    await expect(
+      a.page
+        .locator('[data-testid="message"]')
+        .filter({ hasText: "History survives a reload" }),
+    ).toBeVisible();
+    await a.page
+      .locator(".conversation-head")
+      .getByLabel("Contact name (optional)")
+      .fill("Bob Contact");
+    await a.page.getByRole("button", { name: "Save name" }).click();
+    await expect(a.page.locator(".conversation-head")).toContainText(
+      "Bob Contact",
+    );
+    await a.page.reload();
+    await expect(chatWith(a.page, bob.id)).toContainText("Bob Contact");
+    await chatWith(a.page, bob.id).click();
+    await expect(a.page.locator(".message-list .message-text")).toContainText(
+      "History survives a reload",
+    );
+
+    expect(await signIn(b.page, bob.phrase)).toBe(bob.id);
+    const bobChat = chatWith(b.page, alice.id);
+    await expect(bobChat).toBeVisible();
+    await bobChat.click();
+    await expect(b.page.locator(".message-list .message-text")).toContainText(
+      "History survives a reload",
+    );
+
+    const clean = await openUser(browser);
+    expect(await signIn(clean.page, alice.phrase)).toBe(alice.id);
+    await expect(
+      clean.page
+        .locator('[data-testid="chat-item"]')
+        .filter({ hasText: "Bob Contact" }),
+    ).toBeVisible();
   });
 
   test("both clients reconnect after the server restarts without reloading", async ({
