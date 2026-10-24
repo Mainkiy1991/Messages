@@ -159,7 +159,7 @@ test.describe("real browser chat", () => {
       "Hello from Alice",
     );
     await send(b.page, "Hi Alice");
-    await expect(a.page.getByTestId("message")).toContainText("Hi Alice");
+    await expect(a.page.getByText("Hi Alice", { exact: true })).toBeVisible();
   });
 
   test("offline mailbox delivers exactly two queued messages after sign-in", async ({
@@ -229,15 +229,21 @@ test.describe("real browser chat", () => {
     a.expectedDisconnect = false;
     b.expectedDisconnect = false;
     await expect(
-      a.page.getByText("During outage", { exact: true }),
+      a.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: "During outage" }),
     ).toBeVisible({
       timeout: 45_000,
     });
     await expect(
-      a.page.getByText("Before outage", { exact: true }),
+      a.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: "Before outage" }),
     ).toBeVisible();
     await expect(
-      b.page.getByText("Before outage", { exact: true }),
+      b.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: "Before outage" }),
     ).toBeVisible();
   });
 
