@@ -167,6 +167,131 @@ button {
   background: #fffafa;
   line-height: 1.5;
 }
+.messenger {
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr);
+  min-height: 390px;
+  height: min(58vh, 620px);
+  border: 1px solid #e4e6ee;
+  border-radius: 14px;
+  overflow: hidden;
+  margin: 20px 0;
+}
+.chat-sidebar {
+  background: #f8f9fc;
+  border-right: 1px solid #e4e6ee;
+  padding: 12px;
+  overflow-y: auto;
+}
+.new-chat {
+  display: grid;
+  gap: 8px;
+}
+.chat-list-item {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  padding: 12px 8px;
+  margin-top: 4px;
+}
+.chat-list-item.selected,
+.chat-list-item:hover {
+  background: #efeffa;
+}
+.chat-list-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #70778a;
+  font-size: 0.85rem;
+}
+.chat-list-item small {
+  color: #73798a;
+  text-align: right;
+  font-size: 0.75rem;
+}
+.unread-count {
+  justify-self: end;
+  min-width: 20px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #5145cd;
+  color: white;
+  font-size: 0.72rem;
+  text-align: center;
+}
+.conversation {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.conversation-head {
+  padding: 12px 16px;
+  border-bottom: 1px solid #e4e6ee;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.message-list {
+  padding: 16px;
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.message {
+  max-width: 85%;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: #f0f1f6;
+  align-self: flex-start;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.message.out {
+  background: #eeedff;
+  align-self: flex-end;
+}
+.message small {
+  display: block;
+  color: #73798a;
+  margin-top: 5px;
+  text-align: right;
+}
+.message-text {
+  overflow-wrap: anywhere;
+}
+.composer {
+  display: flex;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid #e4e6ee;
+  align-items: end;
+}
+.composer textarea {
+  resize: vertical;
+  min-height: 44px;
+  max-height: 150px;
+}
+.composer .primary {
+  width: auto;
+  margin: 0;
+}
+.empty-chat {
+  margin: auto;
+}
+.mobile-back {
+  display: none;
+  margin: 0;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 @media (max-width: 520px) {
   .shell {
     padding: 16px;
@@ -180,5 +305,26 @@ button {
   .seed-list {
     grid-template-columns: repeat(2, 1fr);
     gap: 6px 14px;
+  }
+  .messenger {
+    display: block;
+    height: 58vh;
+    min-height: 350px;
+  }
+  .chat-sidebar,
+  .conversation {
+    height: 100%;
+  }
+  .conversation {
+    display: none;
+  }
+  .messenger.show-chat .chat-sidebar {
+    display: none;
+  }
+  .messenger.show-chat .conversation {
+    display: flex;
+  }
+  .mobile-back {
+    display: inline-block;
   }
 }

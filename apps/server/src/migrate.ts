@@ -15,6 +15,7 @@ const directory = join(
 );
 
 try {
+  let appliedCount = 0;
   await pool.query(
     "CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())",
   );
@@ -35,7 +36,7 @@ try {
         name,
       ]);
       await client.query("COMMIT");
-      console.log(`Applied migration ${name}`);
+      appliedCount++;
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -43,6 +44,11 @@ try {
       client.release();
     }
   }
+  console.log(
+    appliedCount > 0
+      ? `Применено миграций: ${appliedCount}`
+      : "Все миграции уже применены",
+  );
 } catch (error) {
   console.error(
     "Migration failed",

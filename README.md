@@ -6,6 +6,8 @@
 
 Messages — открытый мессенджер с входом по сид-фразе и шифрованием на клиенте. Приватные данные не покидают устройство.
 
+Пример формата строки подключения PostgreSQL: `DATABASE_URL=postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=verify-full`.
+
 **Статус:** ранняя разработка; проект не проходил аудит безопасности.
 
 ### Запуск сервера
@@ -27,6 +29,28 @@ $EDITOR apps/server/.env
 ```
 
 Команды сервера, миграции и smoke загружают `apps/server/.env` относительно расположения исходного файла; переменные, уже заданные в окружении, имеют приоритет. Например, после копирования файла команда migrate сама найдёт `DATABASE_URL`.
+
+Для веб-клиента скопируйте `apps/web/.env.example` в `apps/web/.env` (по умолчанию API уже настроен на `http://localhost:3000`). Чтобы запустить API и веб-клиент вместе, выполните из корня:
+
+```powershell
+Copy-Item apps/web/.env.example apps/web/.env
+pnpm install
+pnpm --filter @messages/server migrate
+pnpm dev
+```
+
+Linux/macOS:
+
+```sh
+cp apps/web/.env.example apps/web/.env
+pnpm install
+pnpm --filter @messages/server migrate
+pnpm dev
+```
+
+Откройте `http://localhost:5173`. Для проверки обмена создайте/войдите в аккаунт в обычном окне браузера, скопируйте свой ID, затем откройте второй браузерный профиль или приватное окно и войдите/создайте там второй аккаунт. В первом окне создайте чат по ID второго и отправьте сообщение; ответьте из второго окна. Vite использует порт 5173 без автоматического переключения порта, так как сервер сверяет Origin с `WEB_ORIGIN`.
+
+Известные ограничения: история не загружается после перезагрузки страницы, а список чатов и сообщения хранятся только в памяти. Имена контактов не сохраняются; в списке отображаются последние 10 символов ID.
 
 ```sh
 pnpm install
@@ -76,6 +100,8 @@ pnpm test
 
 Messages is an open-source messenger with seed-phrase sign-in and client-side encryption. Private data stays on the user's device.
 
+Example PostgreSQL connection string: `DATABASE_URL=postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=verify-full`.
+
 **Status:** early development; the project has not undergone a security audit.
 
 ### Run the server
@@ -97,6 +123,28 @@ $EDITOR apps/server/.env
 ```
 
 The server, migration, and smoke entrypoints load `apps/server/.env` relative to their source file. Variables already present in the environment take precedence, so migrate finds `DATABASE_URL` after the file is copied.
+
+Copy `apps/web/.env.example` to `apps/web/.env` for the web client (the default API URL is `http://localhost:3000`). To run the API and web client together, from the repository root:
+
+```powershell
+Copy-Item apps/web/.env.example apps/web/.env
+pnpm install
+pnpm --filter @messages/server migrate
+pnpm dev
+```
+
+Linux/macOS:
+
+```sh
+cp apps/web/.env.example apps/web/.env
+pnpm install
+pnpm --filter @messages/server migrate
+pnpm dev
+```
+
+Open `http://localhost:5173`. To verify messaging, create or sign in to one account in a normal browser window, copy its ID, then use a second browser profile or private window for another account. Create a chat by entering the second ID, send a message, and reply from the second window. Vite keeps port 5173 fixed because the server checks the `WEB_ORIGIN` value.
+
+Known limitations: message history is not restored after reload; chats and messages exist only in memory. Contact names are not saved, so the chat list shows the last 10 characters of each ID.
 
 ```sh
 pnpm install
