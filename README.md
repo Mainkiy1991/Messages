@@ -12,6 +12,22 @@ Messages — открытый мессенджер с входом по сид-�
 
 Требуются Node.js 22 и pnpm 11. Создайте бесплатную БД на [Neon](https://neon.tech/): зарегистрируйтесь, создайте проект, выберите регион и скопируйте строку подключения в разделе **Connect**. Скопируйте `apps/server/.env.example` в `apps/server/.env`, вставьте строку как `DATABASE_URL`.
 
+Windows PowerShell:
+
+```powershell
+Copy-Item apps/server/.env.example apps/server/.env
+notepad apps/server/.env
+```
+
+Linux/macOS:
+
+```sh
+cp apps/server/.env.example apps/server/.env
+$EDITOR apps/server/.env
+```
+
+Команды сервера, миграции и smoke загружают `apps/server/.env` относительно расположения исходного файла; переменные, уже заданные в окружении, имеют приоритет. Например, после копирования файла команда migrate сама найдёт `DATABASE_URL`.
+
 ```sh
 pnpm install
 pnpm --filter @messages/server migrate
@@ -32,6 +48,12 @@ API на `http://localhost:3000`: `GET /health`; `POST /auth/challenge` выда
 
 После `auth_ok` сервер передаёт недоставленные сообщения по порядку последовательности БД, группами до 200. Следующая группа приходит после подтверждения предыдущей. Сообщение может прийти повторно — сразу при доставке и позднее из ящика; клиенту нужно дедуплицировать сообщения по `id`. Клиент должен всегда отправлять `ack` на каждое полученное сообщение, даже если расшифровать его не удалось: иначе ящик этого соединения остановится на неподтверждённом сообщении. При повторной отправке используйте тот же `clientMsgId`; если получатель изменился, сервер вернёт `client_msg_id_conflict`. Сообщения сохраняются после доставки. Максимальный кадр — 256 KiB; максимум 5 соединений на пользователя, 120 кадров любого типа за 10 секунд на соединение и 30 рукопожатий в минуту с одного IP; ping отправляется каждые 30 секунд. Сессия проверяется при подключении: уже открытое соединение остаётся активным до logout или разрыва.
 
+### Формат шифрования
+
+`@messages/crypto` шифрует JSON `{v:1,text,sentAt}` как UTF-8 с XChaCha20-Poly1305. Ключ для сообщения получается через HKDF-SHA256 из общего X25519 секрета; AAD связывает шифртекст с `senderId` и `recipientId`. Base64-декодированный конверт: `0x01 || nonce(24) || ciphertext || tag(16)`. Копия отправителя для истории использует отдельный HKDF info и AAD с `clientMsgId` и `peerId`.
+
+Шифрование защищает содержимое и привязывает его к указанным отправителю и получателю. Сервер видит метаданные «кто кому и когда», длину сообщения, а forward secrecy в MVP нет: компрометация долговременного ключа шифрования может открыть сохранённые сообщения.
+
 Коды кадра `error`: `invalid_frame` (JSON, тип, схема или размер поля), `recipient_not_found`, `client_msg_id_conflict` и `internal_error`. Ошибки авторизации закрывают соединение кодом 4401; превышение лимита кадров закрывает его с кодом 4429; несовпадающий `Origin` отклоняется при рукопожатии. Smoke создаёт двух пользователей, отправляет случайные байты офлайн-получателю, проверяет доставку из ящика, ack и статус `delivered`.
 
 ### Проверки
@@ -48,7 +70,7 @@ pnpm test
 
 - `apps/web` — React, Vite и TypeScript.
 - `apps/server` — Fastify API, PostgreSQL, миграции, challenge-response и сессии.
-- `packages/crypto` — BIP-39, Ed25519, X25519 и функции подписи.
+- `packages/crypto` — BIP-39, Ed25519, X25519, функции подписи и шифрование сообщений.
 
 ## English
 
@@ -59,6 +81,22 @@ Messages is an open-source messenger with seed-phrase sign-in and client-side en
 ### Run the server
 
 Requires Node.js 22 and pnpm 11. Create a free database at [Neon](https://neon.tech/): sign up, create a project, choose a region, and copy the connection string from **Connect**. Copy `apps/server/.env.example` to `apps/server/.env` and set `DATABASE_URL` to that string.
+
+Windows PowerShell:
+
+```powershell
+Copy-Item apps/server/.env.example apps/server/.env
+notepad apps/server/.env
+```
+
+Linux/macOS:
+
+```sh
+cp apps/server/.env.example apps/server/.env
+$EDITOR apps/server/.env
+```
+
+The server, migration, and smoke entrypoints load `apps/server/.env` relative to their source file. Variables already present in the environment take precedence, so migrate finds `DATABASE_URL` after the file is copied.
 
 ```sh
 pnpm install
@@ -80,6 +118,12 @@ Send `{"type":"send","clientMsgId":"<32 hex>","to":"<64 hex>","ciphertext":"<bas
 
 After `auth_ok`, undelivered mailbox entries arrive in database sequence order, in batches of at most 200. The next batch is sent after the previous batch is acknowledged. A message can arrive more than once: immediately and later from the mailbox. Clients should deduplicate messages by `id` and always send `ack` for every received message, even when decryption fails; otherwise this connection's mailbox remains blocked at the unacknowledged message. Reuse the same `clientMsgId` when retrying a send; changing the recipient returns `client_msg_id_conflict`. Messages remain stored after delivery. Limits are 256 KiB per frame, five connections per user, 120 frames of any type per connection per 10 seconds, and 30 handshakes per IP per minute; ping runs every 30 seconds. The session is checked at connection time; an open connection remains active until logout or disconnect.
 
+### Message encryption format
+
+`@messages/crypto` encrypts JSON `{v:1,text,sentAt}` as UTF-8 with XChaCha20-Poly1305. The message key comes from HKDF-SHA256 over the shared X25519 secret; AAD binds the ciphertext to `senderId` and `recipientId`. The base64-decoded envelope is `0x01 || nonce(24) || ciphertext || tag(16)`. The sender's history copy uses a separate HKDF info string and AAD containing `clientMsgId` and `peerId`.
+
+Encryption protects message contents and binds them to the stated sender and recipient. The server can see who messaged whom and when, as well as message length. The MVP has no forward secrecy: compromise of a long-term encryption key may expose stored messages.
+
 Frame error codes are `invalid_frame`, `recipient_not_found`, `client_msg_id_conflict`, and `internal_error`. Authentication failures close with code 4401; exceeding the frame limit closes with code 4429; a disallowed `Origin` is rejected during the handshake. The smoke test creates two users, sends random bytes while the recipient is offline, then checks mailbox delivery, ack, and the sender's `delivered` status.
 
 ### Checks
@@ -96,4 +140,4 @@ Server integration tests require `TEST_DATABASE_URL`. CI runs them against Postg
 
 - `apps/web` — React, Vite, and TypeScript.
 - `apps/server` — Fastify API, PostgreSQL, migrations, challenge-response, and sessions.
-- `packages/crypto` — BIP-39, Ed25519, X25519, and signing functions.
+- `packages/crypto` — BIP-39, Ed25519, X25519, signing functions, and message encryption.

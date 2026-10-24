@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import pg from "pg";
 import WebSocket from "ws";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   bytesToHex,
   deriveKeys,
@@ -737,6 +737,35 @@ suite("server authentication (PostgreSQL)", () => {
     ).toBe(1);
     a.close();
     b.close();
+  });
+
+  it("does not fetch a mailbox batch after acking a live message", async () => {
+    const sender = await createAccount();
+    const recipient = await createAccount();
+    const url = await listen();
+    const senderSocket = (await connectAuth(sender.token, url)).socket;
+    const recipientSocket = (await connectAuth(recipient.token, url)).socket;
+    const received: Record<string, unknown>[] = [];
+    recipientSocket.on("message", (data) => {
+      const frame = JSON.parse(data.toString()) as Record<string, unknown>;
+      if (frame.type === "message") received.push(frame);
+    });
+
+    for (let index = 0; index < 2; index += 1) {
+      const sent = nextFrame(senderSocket, (frame) => frame.type === "sent");
+      sendFrame(senderSocket, payload(recipient.userId));
+      await sent;
+    }
+    await vi.waitFor(() => expect(received).toHaveLength(2));
+    sendFrame(recipientSocket, { type: "ack", ids: [received[0].id] });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(received.map((frame) => frame.id)).toHaveLength(2);
+    expect(received.map((frame) => frame.id)).toEqual([
+      expect.any(String),
+      expect.any(String),
+    ]);
+    senderSocket.close();
+    recipientSocket.close();
   });
 
   it("returns client_msg_id_conflict when a retry changes recipient", async () => {
