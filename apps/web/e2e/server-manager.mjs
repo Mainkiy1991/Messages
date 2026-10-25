@@ -49,7 +49,7 @@ async function startServer() {
       HOST: "127.0.0.1",
       PORT: "3000",
       WEB_ORIGIN: "http://localhost:5173",
-      TRUST_PROXY: "true",
+      TRUST_PROXY: "false",
     },
     stdio: "inherit",
   });

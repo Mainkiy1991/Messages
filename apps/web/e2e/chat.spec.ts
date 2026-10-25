@@ -29,7 +29,6 @@ const test = base.extend<Fixtures>({
   },
 });
 let activeUsers: User[] = [];
-let nextUserIp = 1;
 
 async function openUser(browser: Browser): Promise<User> {
   const context = await browser.newContext();
@@ -37,9 +36,6 @@ async function openUser(browser: Browser): Promise<User> {
     localStorage.setItem("messages-language", "en");
   });
   const page = await context.newPage();
-  await page.setExtraHTTPHeaders({
-    "x-forwarded-for": `198.51.100.${nextUserIp++}`,
-  });
   const user: User = {
     context,
     page,
@@ -155,8 +151,10 @@ function chatWith(page: Page, peerId: string) {
 }
 
 test.describe("real browser chat", () => {
-  test.beforeEach(() => {
+  test.beforeEach(async ({ serverControl }) => {
     activeUsers = [];
+    await serverControl.stop();
+    await serverControl.start();
   });
 
   test("shows live and persisted read receipts", async ({ browser }) => {
