@@ -57,7 +57,6 @@ function App() {
   const [contactNameDraft, setContactNameDraft] = useState("");
   const [draft, setDraft] = useState("");
   const [chatError, setChatError] = useState("");
-  const [mobileChat, setMobileChat] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [idExpanded, setIdExpanded] = useState(false);
   const [newChatOpen, setNewChatOpen] = useState(false);
@@ -248,7 +247,6 @@ function App() {
       setNewContactName("");
       setNewChatOpen(false);
       setContactNameDraft(chatState.contacts[next.activePeer] ?? "");
-      setMobileChat(true);
     }
   }
 
@@ -317,13 +315,28 @@ function App() {
                 data-testid="profile"
                 className="profile-button"
                 aria-label={t.profile}
+                title={t.profile}
                 aria-expanded={profileOpen}
                 onClick={() => {
                   if (profileOpen) setIdExpanded(false);
                   setProfileOpen(!profileOpen);
                 }}
               >
-                {userId.slice(-1).toUpperCase()}
+                <svg
+                  aria-hidden="true"
+                  focusable="false"
+                  viewBox="0 0 24 24"
+                  width="20"
+                  height="20"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <circle cx="12" cy="8" r="4" />
+                  <path d="M5 21v-2a7 7 0 0 1 14 0v2" />
+                </svg>
               </button>
               {profileOpen && (
                 <div className="profile-panel">
@@ -464,7 +477,7 @@ function App() {
         )}
         {screen === "home" && (
           <>
-            <section className={`messenger ${mobileChat ? "show-chat" : ""}`}>
+            <section className={`messenger ${activePeer ? "show-chat" : ""}`}>
               <aside className="chat-sidebar">
                 <button
                   className="secondary new-chat-toggle"
@@ -530,7 +543,6 @@ function App() {
                         setContactNameDraft(
                           chatState.contacts[chat.peerId] ?? "",
                         );
-                        setMobileChat(true);
                       }}
                     >
                       <span className="chat-item-copy">
@@ -569,7 +581,6 @@ function App() {
                         aria-label={t.back}
                         onClick={() => {
                           controllerRef.current?.closeActiveChat();
-                          setMobileChat(false);
                         }}
                       >
                         ← {t.back}

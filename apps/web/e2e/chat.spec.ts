@@ -484,6 +484,23 @@ test.describe("real browser chat", () => {
     const b = await openUser(browser);
     const alice = await createAccount(a.page);
     const bob = await createAccount(b.page);
+    await openChat(a.page, bob.id);
+    await logout(a.page);
+    await a.page.setViewportSize({ width: 360, height: 640 });
+    expect(await signIn(a.page, alice.phrase)).toBe(alice.id);
+    await expect(a.page.getByTestId("chat-list")).toBeVisible();
+    await expect(
+      a.page.getByRole("button", { name: /New chat/u }),
+    ).toBeVisible();
+    await expect(
+      a.page.getByText("Select a chat or start a new one."),
+    ).toBeHidden();
+
+    await a.page.setViewportSize({ width: 1280, height: 720 });
+    await expect(a.page.getByTestId("chat-list")).toBeVisible();
+    await expect(
+      a.page.getByText("Select a chat or start a new one."),
+    ).toBeVisible();
     await expect(a.page.getByTestId("connection-status")).toHaveAttribute(
       "aria-label",
       "connected",
@@ -536,8 +553,31 @@ test.describe("real browser chat", () => {
     await a.page.getByRole("button", { name: "Back" }).click();
     await expect(a.page.locator(".chat-sidebar")).toBeVisible();
     await expect(a.page.locator(".conversation")).toBeHidden();
+    await expect(a.page.getByTestId("chat-list")).toBeVisible();
+    await expect(
+      a.page.getByRole("button", { name: /New chat/u }),
+    ).toBeVisible();
 
     await a.page.getByTestId("profile").click();
+    await expect(a.page.getByTestId("profile")).toHaveAttribute(
+      "aria-label",
+      "Profile",
+    );
+    await expect(a.page.getByTestId("profile")).toHaveAttribute(
+      "title",
+      "Profile",
+    );
+    expect(await a.page.getByTestId("profile").innerText()).toBe("");
+    await a.page.getByRole("button", { name: "RU" }).click();
+    await expect(a.page.getByTestId("profile")).toHaveAttribute(
+      "aria-label",
+      "Профиль",
+    );
+    await expect(a.page.getByTestId("profile")).toHaveAttribute(
+      "title",
+      "Профиль",
+    );
+    await a.page.getByRole("button", { name: "EN" }).click();
     await expect(a.page.getByTestId("user-id")).toHaveCount(0);
     await a.page.getByRole("button", { name: "User ID" }).click();
     await expect(a.page.getByTestId("user-id")).toBeVisible();
