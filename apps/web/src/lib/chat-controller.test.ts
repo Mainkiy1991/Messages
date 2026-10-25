@@ -599,6 +599,29 @@ describe("ChatController", () => {
     controller.stop();
   });
 
+  it("refreshes an expired session once for account data and retries the request", async () => {
+    const seenTokens: string[] = [];
+    let logins = 0;
+    const controller = new ChatController(alice, aliceId, session("expired"), {
+      login: async () => {
+        logins++;
+        return session("fresh");
+      },
+      getConversations: async (token) => {
+        seenTokens.push(token);
+        if (token === "expired") throw new ApiError(401, "unauthorized");
+        return { conversations: [] };
+      },
+      getContacts: async () => ({ version: "0", blob: null }),
+    });
+    await (
+      controller as unknown as { loadAccountData(): Promise<void> }
+    ).loadAccountData();
+    expect(seenTokens).toEqual(["expired", "fresh"]);
+    expect(logins).toBe(1);
+    controller.stop();
+  });
+
   it("retries contact save on version conflict and overlays the local name", async () => {
     const latest: ContactBookResponse = {
       version: "2",
@@ -706,7 +729,16 @@ describe("ChatController", () => {
   it("sets outgoing history status from deliveredAt and does not downgrade it", async () => {
     const idSent = "00000000000000000000000000000011";
     const idDelivered = "00000000000000000000000000000012";
+    const removed: string[] = [];
     const controller = new ChatController(alice, aliceId, session("token"), {
+      outbox: {
+        list: async () => [],
+        put: async () => undefined,
+        remove: async (_userId, id) => {
+          removed.push(id);
+        },
+        clear: async () => undefined,
+      },
       fetchPeerKeys: async () => userKeys(bob),
       getHistory: async () => ({
         hasMore: false,
@@ -746,11 +778,13 @@ describe("ChatController", () => {
     });
     await controller.openChat(bobId);
     await waitFor(() => controller.getSnapshot().chats[0]?.hasMore === false);
+    await waitFor(() => removed.length === 2);
     const messages = controller.getSnapshot().chats[0]!.messages;
     expect(messages.map((message) => message.status)).toEqual([
       "sent",
       "delivered",
     ]);
+    expect(removed).toEqual([idSent, idDelivered]);
     expect(
       mergeMessages(
         [{ ...messages[1]!, status: "delivered" }],
