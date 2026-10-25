@@ -589,6 +589,7 @@ test.describe("real browser chat", () => {
       "Профиль",
     );
     await a.page.getByRole("button", { name: "EN" }).click();
+    await a.page.getByTestId("profile").click();
     await expect(a.page.getByTestId("user-id")).toHaveCount(0);
     await a.page.getByRole("button", { name: "User ID" }).click();
     await expect(a.page.getByTestId("user-id")).toBeVisible();
