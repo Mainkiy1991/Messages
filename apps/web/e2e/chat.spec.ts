@@ -236,6 +236,44 @@ test.describe("real browser chat", () => {
     ).toBeVisible();
   });
 
+  test("shows chats and sent history when contacts return 500 after reload", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(a.page, bob.id);
+    await logout(b.page);
+    await send(a.page, "Persisted outgoing history");
+    await expect(
+      a.page.locator('[data-testid="message"][data-status="sent"]'),
+    ).toContainText("Persisted outgoing history");
+
+    await a.page.route("**/contacts", (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: "{}",
+      }),
+    );
+    await a.page.reload();
+    const restoredChat = chatWith(a.page, bob.id);
+    await expect(restoredChat).toBeVisible();
+    await restoredChat.click();
+    const restoredMessage = a.page
+      .locator('[data-testid="message"]')
+      .filter({ hasText: "Persisted outgoing history" });
+    await expect(restoredMessage).toBeVisible();
+    await expect(restoredMessage).toHaveAttribute(
+      "data-status",
+      /^(sent|delivered)$/u,
+    );
+    await expect(
+      a.page.getByText("Could not load contacts. Chats are shown with IDs."),
+    ).toBeVisible();
+  });
+
   test("both clients reconnect after the server restarts without reloading", async ({
     browser,
     serverControl,

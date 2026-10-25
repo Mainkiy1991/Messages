@@ -115,10 +115,19 @@ export class ChatController {
   private readonly peerKeyRequests = new Map<string, Promise<Uint8Array>>();
   private arrivalOrder = 0;
   private contactsVersion = "0";
-  private accountDataLoaded = false;
+  private conversationsLoaded = false;
+  private contactsLoaded = false;
   private outboxLoaded = false;
   private accountDataLoading: Promise<void> | null = null;
-  private accountDataRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly accountDataRetryTimers = new Map<
+    "conversations" | "contacts",
+    ReturnType<typeof setTimeout>
+  >();
+  private readonly accountDataRetryAttempts = new Map<
+    "conversations" | "contacts",
+    number
+  >();
+  private stopped = false;
   private historyRequests = new Set<string>();
   private state: ChatControllerState = {
     chats: [],
@@ -154,21 +163,18 @@ export class ChatController {
         onSend: (clientMsgId) =>
           this.updateMessage(clientMsgId, (message) => ({
             ...message,
-            status: message.status === "delivered" ? "delivered" : "sending",
+            status: mergeStatus(message.status, "sending"),
             error: undefined,
           })),
         onSendTimeout: (clientMsgId) =>
           this.updateMessage(clientMsgId, (message) => ({
             ...message,
-            status: message.status === "delivered" ? "delivered" : "error",
-            error: message.status === "delivered" ? undefined : "send_failed",
+            status: mergeStatus(message.status, "error"),
+            error:
+              message.status === "delivered" || message.status === "sent"
+                ? undefined
+                : "send_failed",
           })),
-        onSent: (clientMsgId) => {
-          void (this.deps.outbox ?? indexedDbOutbox).remove(
-            this.userId,
-            clientMsgId,
-          );
-        },
       },
       {
         fetcher: deps.fetcher,
@@ -189,6 +195,7 @@ export class ChatController {
     return this.connection.currentToken();
   }
   start(): void {
+    this.stopped = false;
     if (typeof window !== "undefined") void this.loadAccountData();
     this.connection.start();
   }
@@ -232,59 +239,124 @@ export class ChatController {
           this.update({ error: "server_unavailable" });
         }
       }
-      if (this.accountDataLoaded) return;
+      if (this.conversationsLoaded && this.contactsLoaded) return;
+      let session: ServerSession;
       try {
-        const session = await this.connection.ensureSession();
-        const [conversations, book] = await Promise.all([
-          (
-            this.deps.getConversations ??
-            ((token) => getConversations(token, this.deps.fetcher))
-          )(session.token),
-          (
-            this.deps.getContacts ??
-            ((token) => getContacts(token, this.deps.fetcher))
-          )(session.token),
-        ]);
-        this.contactsVersion = book.version;
-        let contacts: Record<string, string> = {};
-        let contactsError = false;
-        if (book.blob) {
-          try {
-            contacts = decryptContactBook({
-              historyKey: this.keys.historyKey,
-              blob: book.blob,
-            });
-          } catch {
-            contactsError = true;
-          }
+        session = await this.connection.ensureSession();
+      } catch (error) {
+        if (this.isRetryableAccountError(error)) {
+          if (!this.conversationsLoaded)
+            this.scheduleAccountRetry("conversations");
+          if (!this.contactsLoaded) this.scheduleAccountRetry("contacts");
         }
-        const chats = conversations.conversations.map((item) => ({
-          peerId: item.peerId,
-          messages: [],
-          unreadCount: 0,
-          hasMore: true,
-          lastCreatedAt: item.lastCreatedAt,
-        }));
-        this.update({
-          chats: mergeChats(this.state.chats, chats),
-          contacts,
-          contactsError,
-        });
-        this.accountDataLoaded = true;
-      } catch {
-        this.update({ error: "server_unavailable" });
-        if (!this.accountDataRetryTimer) {
-          this.accountDataRetryTimer = setTimeout(() => {
-            this.accountDataRetryTimer = null;
-            if (this.state.connectionState === "connected")
-              void this.loadAccountData();
-          }, 2_000);
-        }
+        return;
       }
+      const tasks: Promise<void>[] = [];
+      if (!this.conversationsLoaded)
+        tasks.push(this.loadConversations(session.token));
+      if (!this.contactsLoaded) tasks.push(this.loadContacts(session.token));
+      await Promise.allSettled(tasks);
     })().finally(() => {
       this.accountDataLoading = null;
     });
     return this.accountDataLoading;
+  }
+
+  private async loadConversations(token: string): Promise<void> {
+    const get =
+      this.deps.getConversations ??
+      ((value: string) => getConversations(value, this.deps.fetcher));
+    try {
+      const result = await this.withFreshSession(token, get);
+      if (this.stopped) return;
+      const chats = result.conversations.map((item) => ({
+        peerId: item.peerId,
+        messages: [],
+        unreadCount: 0,
+        hasMore: true,
+        lastCreatedAt: item.lastCreatedAt,
+      }));
+      this.update({
+        chats: mergeChats(this.state.chats, chats).sort(
+          (a, b) =>
+            Date.parse(b.lastCreatedAt ?? "") -
+            Date.parse(a.lastCreatedAt ?? ""),
+        ),
+      });
+      this.conversationsLoaded = true;
+      this.resetAccountRetry("conversations");
+    } catch (error) {
+      if (this.isRetryableAccountError(error))
+        this.scheduleAccountRetry("conversations");
+      else this.update({ error: "server_unavailable" });
+    }
+  }
+
+  private async loadContacts(token: string): Promise<void> {
+    const get =
+      this.deps.getContacts ??
+      ((value: string) => getContacts(value, this.deps.fetcher));
+    try {
+      const book = await this.withFreshSession(token, get);
+      if (this.stopped) return;
+      let contacts: Record<string, string> = {};
+      if (book.blob) {
+        contacts = decryptContactBook({
+          historyKey: this.keys.historyKey,
+          blob: book.blob,
+        });
+      }
+      this.contactsVersion = book.version;
+      this.update({ contacts, contactsError: false });
+      this.contactsLoaded = true;
+      this.resetAccountRetry("contacts");
+    } catch (error) {
+      if (this.stopped) return;
+      this.update({ contactsError: true });
+      if (this.isRetryableAccountError(error))
+        this.scheduleAccountRetry("contacts");
+      else this.contactsLoaded = true;
+    }
+  }
+
+  private async withFreshSession<T>(
+    token: string,
+    request: (token: string) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await request(token);
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 401) throw error;
+      const session = await this.connection.refreshSession();
+      return request(session.token);
+    }
+  }
+
+  private isRetryableAccountError(error: unknown): boolean {
+    if (error instanceof ApiError)
+      return error.status === 0 || error.status >= 500;
+    return error instanceof TypeError;
+  }
+
+  private scheduleAccountRetry(resource: "conversations" | "contacts"): void {
+    if (this.stopped || this.accountDataRetryTimers.has(resource)) return;
+    const attempt = this.accountDataRetryAttempts.get(resource) ?? 0;
+    const delay = Math.min(60_000, 2_000 * 2 ** attempt);
+    this.accountDataRetryAttempts.set(resource, attempt + 1);
+    const setTimer = this.deps.setTimer ?? globalThis.setTimeout;
+    const timer = setTimer(() => {
+      this.accountDataRetryTimers.delete(resource);
+      if (this.stopped) return;
+      void this.loadAccountData();
+    }, delay);
+    this.accountDataRetryTimers.set(resource, timer);
+  }
+
+  private resetAccountRetry(resource: "conversations" | "contacts"): void {
+    const timer = this.accountDataRetryTimers.get(resource);
+    if (timer) (this.deps.clearTimer ?? globalThis.clearTimeout)(timer);
+    this.accountDataRetryTimers.delete(resource);
+    this.accountDataRetryAttempts.delete(resource);
   }
 
   async loadHistory(peerId = this.state.activePeer): Promise<void> {
@@ -340,6 +412,9 @@ export class ChatController {
               text,
               createdAt: entry.createdAt,
               direction: entry.direction,
+              ...(entry.direction === "out"
+                ? { status: entry.deliveredAt ? "delivered" : "sent" }
+                : {}),
               arrivalOrder: this.arrivalOrder++,
             } as ChatMessage;
           } catch {
@@ -350,6 +425,9 @@ export class ChatController {
               text: "",
               createdAt: entry.createdAt,
               direction: entry.direction,
+              ...(entry.direction === "out"
+                ? { status: entry.deliveredAt ? "delivered" : "sent" }
+                : {}),
               decryptFailed: true,
               arrivalOrder: this.arrivalOrder++,
             } as ChatMessage;
@@ -368,6 +446,16 @@ export class ChatController {
             : item,
         ),
       });
+      await Promise.all(
+        page.messages
+          .filter((entry) => entry.direction === "out")
+          .map((entry) =>
+            (this.deps.outbox ?? indexedDbOutbox).remove(
+              this.userId,
+              entry.clientMsgId,
+            ),
+          ),
+      );
     } catch {
       this.update({
         chats: this.state.chats.map((item) =>
@@ -442,14 +530,17 @@ export class ChatController {
   }
 
   stop(): void {
-    if (this.accountDataRetryTimer) clearTimeout(this.accountDataRetryTimer);
-    this.accountDataRetryTimer = null;
+    this.stopped = true;
+    for (const timer of this.accountDataRetryTimers.values())
+      (this.deps.clearTimer ?? globalThis.clearTimeout)(timer);
+    this.accountDataRetryTimers.clear();
     this.connection.stop();
   }
 
   async logout(): Promise<void> {
     const token = this.connection.currentToken();
     this.connection.stop();
+    this.stop();
     if (!token) return;
     const logout = this.deps.logout ?? logoutFromServer;
     try {
@@ -670,10 +761,10 @@ export class ChatController {
           typeof frame.createdAt === "string"
             ? frame.createdAt
             : message.createdAt,
-        status: message.status === "delivered" ? "delivered" : "sent",
+        status: mergeStatus(message.status, "sent"),
         error: undefined,
       }));
-      void (this.deps.outbox ?? indexedDbOutbox).remove(
+      await (this.deps.outbox ?? indexedDbOutbox).remove(
         this.userId,
         frame.clientMsgId,
       );
@@ -788,11 +879,28 @@ export function mergeMessages(
       result[index] = {
         ...result[index]!,
         ...message,
-        status: message.status ?? result[index]!.status,
+        status: mergeStatus(result[index]!.status, message.status),
         frame: message.frame ?? result[index]!.frame,
       };
   }
   return result.sort(compareMessages);
+}
+
+function mergeStatus(
+  current: SendStatus | undefined,
+  incoming: SendStatus | undefined,
+): SendStatus | undefined {
+  if (!incoming) return current;
+  if (!current) return incoming;
+  if (incoming === "error")
+    return current === "sent" || current === "delivered" ? current : "error";
+  if (current === "error") return incoming;
+  const rank: Record<Exclude<SendStatus, "error">, number> = {
+    sending: 0,
+    sent: 1,
+    delivered: 2,
+  };
+  return rank[incoming] > rank[current] ? incoming : current;
 }
 
 export function contactLabel(

@@ -48,6 +48,16 @@ pnpm --filter @messages/server migrate
 pnpm dev
 ```
 
+### Обновление базы данных
+
+После получения новой версии кода примените миграции к базе из `apps/server/.env`:
+
+```powershell
+pnpm --filter @messages/server migrate
+```
+
+Если миграции не применить, сервер может вернуть 500 на запросах к новым таблицам.
+
 Откройте `http://localhost:5173`. Для проверки обмена создайте/войдите в аккаунт в обычном окне браузера, скопируйте свой ID, затем откройте второй браузерный профиль или приватное окно и войдите/создайте там второй аккаунт. В первом окне создайте чат по ID второго и отправьте сообщение; ответьте из второго окна. Vite использует порт 5173 без автоматического переключения порта, так как сервер сверяет Origin с `WEB_ORIGIN`.
 
 Клиент загружает список чатов и постраничную историю после входа; имена хранятся в зашифрованной контакт-книге. Неотправленные зашифрованные кадры сохраняются в IndexedDB до подтверждения сервера и отправляются повторно после восстановления соединения или входа. Расшифрованная история и текст очереди существуют только в памяти страницы.
@@ -155,6 +165,16 @@ pnpm install
 pnpm --filter @messages/server migrate
 pnpm dev
 ```
+
+### Database updates
+
+After getting a new version of the code, apply migrations to the database in `apps/server/.env`:
+
+```powershell
+pnpm --filter @messages/server migrate
+```
+
+If you do not apply migrations, the server may return 500 for requests that use new tables.
 
 Open `http://localhost:5173`. To verify messaging, create or sign in to one account in a normal browser window, copy its ID, then use a second browser profile or private window for another account. Create a chat by entering the second ID, send a message, and reply from the second window. Vite keeps port 5173 fixed because the server checks the `WEB_ORIGIN` value.
 

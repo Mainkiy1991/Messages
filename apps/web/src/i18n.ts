@@ -58,7 +58,7 @@ export const strings = {
     saveName: "Сохранить имя",
     contactSaveFailed: "Не удалось сохранить имя",
     contactsDecryptError:
-      "Не удалось расшифровать книгу контактов. Изменения не загружены.",
+      "Не удалось загрузить контакты. Для чатов показаны ID.",
     loadMore: "Загрузить ещё",
     loading: "Загрузка…",
   },
@@ -118,8 +118,7 @@ export const strings = {
     contactName: "Contact name (optional)",
     saveName: "Save name",
     contactSaveFailed: "Could not save contact name",
-    contactsDecryptError:
-      "Could not decrypt the contact book. Changes were not loaded.",
+    contactsDecryptError: "Could not load contacts. Chats are shown with IDs.",
     loadMore: "Load more",
     loading: "Loading…",
   },
