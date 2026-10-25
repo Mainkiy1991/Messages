@@ -1100,6 +1100,50 @@ suite("server authentication (PostgreSQL)", () => {
     });
   });
 
+  it("returns the newest history page first and paginates every message exactly once", async () => {
+    const a = await createAccount();
+    const b = await createAccount();
+    await pool!.query(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       SELECT CASE WHEN n % 2 = 0 THEN $1 ELSE $2 END,
+              CASE WHEN n % 2 = 0 THEN $2 ELSE $1 END,
+              md5(random()::text || n::text), 'cipher', 'copy'
+       FROM generate_series(1,55) AS n`,
+      [a.userId, b.userId],
+    );
+    const expected = await pool!.query<{ seq: string }>(
+      `SELECT seq::text AS seq FROM messages
+       WHERE (sender_id=$1 AND recipient_id=$2) OR (sender_id=$2 AND recipient_id=$1)
+       ORDER BY seq ASC`,
+      [a.userId, b.userId],
+    );
+
+    const actual: string[] = [];
+    let before: string | undefined;
+    let hasMore = true;
+    while (hasMore) {
+      const url = new URL(`/history/${b.userId}`, "http://localhost");
+      url.searchParams.set("limit", "7");
+      if (before) url.searchParams.set("before", before);
+      const response = await app.inject({
+        method: "GET",
+        url: `${url.pathname}${url.search}`,
+        headers: { authorization: `Bearer ${a.token}` },
+      });
+      expect(response.statusCode).toBe(200);
+      const page = response.json() as {
+        messages: Array<{ seq: string }>;
+        hasMore: boolean;
+      };
+      expect(page.messages.length).toBeGreaterThan(0);
+      actual.push(...page.messages.map((message) => message.seq));
+      before = page.messages[0]!.seq;
+      hasMore = page.hasMore;
+    }
+
+    expect(actual).toEqual(expected.rows.map((row) => row.seq));
+  });
+
   it("stores monotonic read markers, clamps to real messages, forwards them, and exposes history", async () => {
     const sender = await createAccount();
     const reader = await createAccount();
