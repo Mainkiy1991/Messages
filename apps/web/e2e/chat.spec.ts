@@ -234,7 +234,10 @@ test.describe("real browser chat", () => {
     const preview = chatWith(a.page, bob.id);
     await expect(preview).toContainText("Long history message 15");
     await expect(a.page.locator(".conversation-head")).toHaveCount(0);
-    await expect(preview.locator("span")).toHaveCSS("white-space", "nowrap");
+    await expect(preview.locator(".chat-item-copy > span")).toHaveCSS(
+      "white-space",
+      "nowrap",
+    );
   });
 
   test("offline mailbox delivers exactly two queued messages after sign-in", async ({

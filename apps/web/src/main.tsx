@@ -72,11 +72,16 @@ function App() {
   useEffect(() => {
     if (!profileOpen) return;
     const outside = (event: PointerEvent) => {
-      if (!profileRef.current?.contains(event.target as Node))
+      if (!profileRef.current?.contains(event.target as Node)) {
+        setIdExpanded(false);
         setProfileOpen(false);
+      }
     };
     const escape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setProfileOpen(false);
+      if (event.key === "Escape") {
+        setIdExpanded(false);
+        setProfileOpen(false);
+      }
     };
     document.addEventListener("pointerdown", outside);
     document.addEventListener("keydown", escape);
@@ -313,7 +318,10 @@ function App() {
                 className="profile-button"
                 aria-label={t.profile}
                 aria-expanded={profileOpen}
-                onClick={() => setProfileOpen(!profileOpen)}
+                onClick={() => {
+                  if (profileOpen) setIdExpanded(false);
+                  setProfileOpen(!profileOpen);
+                }}
               >
                 {userId.slice(-1).toUpperCase()}
               </button>
