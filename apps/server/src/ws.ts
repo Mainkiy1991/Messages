@@ -124,7 +124,10 @@ export async function registerWebSocket(
     hub.unregister(connection.socket, connection.userId);
     const userSockets = perUser.get(connection.userId);
     userSockets?.delete(connection);
-    if (userSockets?.size === 0) perUser.delete(connection.userId);
+    if (userSockets?.size === 0) {
+      perUser.delete(connection.userId);
+      readWindows.delete(connection.userId);
+    }
     const tokenSockets = perToken.get(connection.tokenHash);
     tokenSockets?.delete(connection);
     if (tokenSockets?.size === 0) perToken.delete(connection.tokenHash);
