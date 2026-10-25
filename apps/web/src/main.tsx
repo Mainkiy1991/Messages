@@ -566,12 +566,13 @@ function App() {
                     <div className="conversation-head">
                       <button
                         className="text-button mobile-back"
+                        aria-label={t.back}
                         onClick={() => {
                           controllerRef.current?.closeActiveChat();
                           setMobileChat(false);
                         }}
                       >
-                        {t.back}
+                        ← {t.back}
                       </button>
                       {!editingName ? (
                         <button
@@ -612,6 +613,14 @@ function App() {
                             onChange={(event) =>
                               setContactNameDraft(event.target.value)
                             }
+                            onKeyDown={(event) => {
+                              if (event.key === "Escape") {
+                                setContactNameDraft(
+                                  chatState.contacts[activePeer] ?? "",
+                                );
+                                setEditingName(false);
+                              }
+                            }}
                             placeholder={
                               chatState.contacts[activePeer] ||
                               activePeer.slice(-10)
