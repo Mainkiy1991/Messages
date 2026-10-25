@@ -226,6 +226,11 @@ test.describe("real browser chat", () => {
     expect(
       await messageList.evaluate((list) => list.scrollTop),
     ).toBeGreaterThan(0);
+    await expect(
+      a.page
+        .locator('[data-testid="message"][data-direction="out"]')
+        .filter({ hasText: "Long history message 15" }),
+    ).toHaveAttribute("data-status", /^(sent|delivered)$/u);
 
     await a.page.setViewportSize({ width: 1440, height: 900 });
     await expect(input).toBeInViewport();
@@ -488,7 +493,8 @@ test.describe("real browser chat", () => {
     await logout(a.page);
     await a.page.setViewportSize({ width: 360, height: 640 });
     expect(await signIn(a.page, alice.phrase)).toBe(alice.id);
-    await expect(a.page.getByTestId("chat-list")).toBeVisible();
+    await expect(a.page.locator(".chat-sidebar")).toBeVisible();
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
     await expect(
       a.page.getByRole("button", { name: /New chat/u }),
     ).toBeVisible();
@@ -497,7 +503,7 @@ test.describe("real browser chat", () => {
     ).toBeHidden();
 
     await a.page.setViewportSize({ width: 1280, height: 720 });
-    await expect(a.page.getByTestId("chat-list")).toBeVisible();
+    await expect(a.page.locator(".chat-sidebar")).toBeVisible();
     await expect(
       a.page.getByText("Select a chat or start a new one."),
     ).toBeVisible();
@@ -553,7 +559,6 @@ test.describe("real browser chat", () => {
     await a.page.getByRole("button", { name: "Back" }).click();
     await expect(a.page.locator(".chat-sidebar")).toBeVisible();
     await expect(a.page.locator(".conversation")).toBeHidden();
-    await expect(a.page.getByTestId("chat-list")).toBeVisible();
     await expect(
       a.page.getByRole("button", { name: /New chat/u }),
     ).toBeVisible();
