@@ -96,33 +96,44 @@ async function createAccount(
   }
   await page.getByLabel("I have saved the phrase").check();
   await page.getByRole("button", { name: "Finish account setup" }).click();
-  await expect(page.getByTestId("user-id")).toBeVisible();
+  await expect(page.getByTestId("profile")).toBeVisible();
   await expect(page.getByTestId("connection-status")).toHaveAttribute(
     "data-state",
     "connected",
   );
-  return { phrase, id: (await page.getByTestId("user-id").innerText()).trim() };
+  const id = await revealUserId(page);
+  return { phrase, id };
+}
+
+async function revealUserId(page: Page): Promise<string> {
+  await page.getByTestId("profile").click();
+  await page.getByRole("button", { name: "User ID" }).click();
+  const id = (await page.getByTestId("user-id").innerText()).trim();
+  await page.getByTestId("profile").click();
+  return id;
 }
 
 async function signIn(page: Page, phrase: string): Promise<string> {
   await page.getByTestId("open-login").click();
   await page.getByLabel("Seed phrase").fill(phrase);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await expect(page.getByTestId("user-id")).toBeVisible();
+  await expect(page.getByTestId("profile")).toBeVisible();
   await expect(page.getByTestId("connection-status")).toHaveAttribute(
     "data-state",
     "connected",
   );
-  return (await page.getByTestId("user-id").innerText()).trim();
+  return revealUserId(page);
 }
 
 async function logout(page: Page): Promise<void> {
+  await page.getByTestId("profile").click();
   await page.getByTestId("logout").click();
   await page.getByTestId("confirm-logout").click();
   await expect(page.getByTestId("open-login")).toBeVisible();
 }
 
 async function openChat(page: Page, peerId: string): Promise<void> {
+  await page.getByRole("button", { name: /New chat/u }).click();
   await page.getByTestId("peer-id-input").fill(peerId);
   await page.getByTestId("new-chat").click();
   await expect(page.locator(".conversation-head")).toContainText(
@@ -265,6 +276,10 @@ test.describe("real browser chat", () => {
     ).toBeVisible();
     await a.page
       .locator(".conversation-head")
+      .getByRole("button", { name: /Bob/u })
+      .click();
+    await a.page
+      .locator(".conversation-head")
       .getByLabel("Contact name (optional)")
       .fill("Bob Contact");
     await a.page.getByRole("button", { name: "Save name" }).click();
@@ -368,7 +383,7 @@ test.describe("real browser chat", () => {
     ).toContainText("During outage");
     await b.page.reload();
     try {
-      await expect(b.page.getByTestId("user-id")).toBeVisible();
+      await expect(b.page.getByTestId("profile")).toBeVisible();
       await expect(b.page.getByTestId("connection-status")).toHaveAttribute(
         "data-state",
         "offline",
@@ -425,8 +440,10 @@ test.describe("real browser chat", () => {
     const bob = await createAccount(b.page);
     const charlie = await createAccount(c.page);
     await openChat(a.page, bob.id);
+    await b.page.getByRole("button", { name: /New chat/u }).click();
     await b.page.getByTestId("peer-id-input").fill(alice.id);
     await b.page.getByTestId("new-chat").click();
+    await c.page.getByRole("button", { name: /New chat/u }).click();
     await c.page.getByTestId("peer-id-input").fill(alice.id);
     await c.page.getByTestId("new-chat").click();
     await send(c.page, "Hello Alice from Charlie");
@@ -455,5 +472,76 @@ test.describe("real browser chat", () => {
     );
     expect(sessionDatabases).toEqual([]);
     expect(await signIn(user.page, account.phrase)).toBe(account.id);
+  });
+
+  test("chat layout, compact forms, profile controls and responsive navigation", async ({
+    browser,
+  }, testInfo) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await expect(a.page.getByTestId("connection-status")).toHaveAttribute(
+      "aria-label",
+      "connected",
+    );
+    await expect(a.page.getByTestId("new-chat-form")).toHaveCount(0);
+    await a.page.getByRole("button", { name: /New chat/u }).click();
+    await expect(a.page.getByTestId("new-chat-form")).toBeVisible();
+    await a.page.getByTestId("peer-id-input").fill(bob.id);
+    await a.page.getByTestId("new-chat").click();
+    await expect(a.page.getByTestId("new-chat-form")).toHaveCount(0);
+    await expect(a.page.locator(".conversation-head")).toContainText(
+      bob.id.slice(-10),
+    );
+
+    const nameButton = a.page.locator(".contact-name-trigger");
+    await expect(a.page.getByRole("button", { name: "Save name" })).toHaveCount(
+      0,
+    );
+    await nameButton.click();
+    await a.page.getByLabel("Contact name (optional)").fill("Bob named");
+    await expect(
+      a.page.getByRole("button", { name: "Save name" }),
+    ).toBeVisible();
+
+    await a.page.setViewportSize({ width: 1280, height: 720 });
+    await expect(a.page.getByTestId("message-input")).toBeInViewport();
+    await expect(a.page.getByTestId("send-message")).toBeInViewport();
+    expect(
+      await a.page
+        .locator(".chat-sidebar")
+        .evaluate((el) => el.getBoundingClientRect().height),
+    ).toBeGreaterThanOrEqual(504);
+    expect(
+      await a.page
+        .locator(".conversation")
+        .evaluate((el) => el.getBoundingClientRect().height),
+    ).toBeGreaterThanOrEqual(504);
+    await a.page.screenshot({
+      path: testInfo.outputPath("chat-desktop.png"),
+      fullPage: true,
+    });
+
+    await a.page.setViewportSize({ width: 360, height: 640 });
+    await expect(a.page.locator(".chat-sidebar")).toBeHidden();
+    await expect(a.page.getByTestId("message-input")).toBeInViewport();
+    await a.page.screenshot({
+      path: testInfo.outputPath("chat-mobile.png"),
+      fullPage: true,
+    });
+    await a.page.getByRole("button", { name: "Back" }).click();
+    await expect(a.page.locator(".chat-sidebar")).toBeVisible();
+    await expect(a.page.locator(".conversation")).toBeHidden();
+
+    await a.page.getByTestId("profile").click();
+    await expect(a.page.getByTestId("user-id")).toHaveCount(0);
+    await a.page.getByRole("button", { name: "User ID" }).click();
+    await expect(a.page.getByTestId("user-id")).toBeVisible();
+    await a.page.getByTestId("logout").click();
+    await expect(a.page.getByRole("alertdialog")).toBeVisible();
+    await a.page.getByRole("button", { name: "Cancel" }).click();
+    await expect(a.page.getByTestId("profile")).toBeVisible();
+    expect(alice.id).toHaveLength(64);
   });
 });
