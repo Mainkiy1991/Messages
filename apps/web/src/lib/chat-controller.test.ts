@@ -94,6 +94,7 @@ function makeController(
     getConversations?: ChatControllerDependencies["getConversations"];
     getContacts?: ChatControllerDependencies["getContacts"];
     getHistory?: ChatControllerDependencies["getHistory"];
+    isVisible?: () => boolean;
   } = {},
 ) {
   const sockets: TestSocket[] = [];
@@ -128,6 +129,7 @@ function makeController(
       getConversations: options.getConversations,
       getContacts: options.getContacts,
       getHistory: options.getHistory,
+      isVisible: options.isVisible,
     },
   );
   return { controller, sockets, tokens, getLoginCount: () => loginCount };
@@ -970,7 +972,145 @@ describe("ChatController", () => {
         [{ ...messages[0]!, status: "sending" }],
       )[0]!.status,
     ).toBe("sent");
+    expect(
+      mergeMessages(
+        [{ ...messages[1]!, status: "read" }],
+        [{ ...messages[1]!, status: "delivered" }],
+      )[0]!.status,
+    ).toBe("read");
     controller.stop();
+  });
+
+  it("applies peer read markers from history and live frames", async () => {
+    const id = "00000000000000000000000000000021";
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      fetchPeerKeys: async () => userKeys(bob),
+      getHistory: async () => ({
+        hasMore: false,
+        peerReadUpToSeq: "7",
+        messages: [
+          {
+            id: "history-read",
+            seq: "7",
+            direction: "out",
+            clientMsgId: id,
+            payload: encryptHistoryEntry({
+              historyKey: alice.historyKey,
+              clientMsgId: id,
+              peerId: bobId,
+              text: "read",
+              sentAt: Date.now(),
+            }),
+            createdAt: new Date().toISOString(),
+            deliveredAt: null,
+          },
+        ],
+      }),
+    });
+    await controller.openChat(bobId);
+    await waitFor(() => controller.getSnapshot().chats[0]?.hasMore === false);
+    expect(controller.getSnapshot().chats[0]?.messages[0]?.status).toBe("read");
+    controller.stop();
+  });
+
+  it("marks outgoing messages read through the live receipt frame", async () => {
+    const f = makeController({
+      initialSession: session("token"),
+      getHistory: async () => ({ messages: [], hasMore: false }),
+    });
+    f.controller.start();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await authenticate(f.sockets[0]!);
+    await f.controller.openChat(bobId);
+    await f.controller.sendText("outgoing");
+    const sent = f.sockets[0]!.decoded().find((frame) => frame.type === "send");
+    f.sockets[0]!.frame({
+      type: "sent",
+      clientMsgId: sent!.clientMsgId,
+      id: "server-message-id",
+      seq: "12",
+      createdAt: new Date().toISOString(),
+    });
+    await waitFor(
+      () => f.controller.getSnapshot().chats[0]?.messages[0]?.seq === "12",
+    );
+    f.sockets[0]!.frame({
+      type: "read",
+      from: bobId,
+      upToSeq: "12",
+      readAt: new Date().toISOString(),
+    });
+    await waitFor(
+      () => f.controller.getSnapshot().chats[0]?.messages[0]?.status === "read",
+    );
+    f.controller.stop();
+  });
+
+  it("sends one debounced read marker only while the tab is visible", async () => {
+    const f = makeController({
+      initialSession: session("token"),
+      isVisible: () => true,
+      getHistory: async () => ({ messages: [], hasMore: false }),
+    });
+    f.controller.start();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await authenticate(f.sockets[0]!);
+    await f.controller.openChat(bobId);
+    f.sockets[0]!.frame({
+      type: "message",
+      id: "incoming-duplicate",
+      from: bobId,
+      seq: "9",
+      createdAt: new Date().toISOString(),
+      ciphertext: "invalid",
+    });
+    await waitFor(() =>
+      f.controller
+        .getSnapshot()
+        .chats.some(
+          (chat) => chat.peerId === bobId && chat.messages.length > 0,
+        ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(
+      f.sockets[0]!.decoded().filter((frame) => frame.type === "read"),
+    ).toEqual([{ type: "read", peerId: bobId, upToSeq: "9" }]);
+    f.sockets[0]!.frame({
+      type: "message",
+      id: "incoming",
+      from: bobId,
+      seq: "9",
+      createdAt: new Date().toISOString(),
+      ciphertext: "invalid",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(
+      f.sockets[0]!.decoded().filter((frame) => frame.type === "read"),
+    ).toHaveLength(1);
+    f.controller.stop();
+
+    const hidden = makeController({
+      initialSession: session("token"),
+      isVisible: () => false,
+      getHistory: async () => ({ messages: [], hasMore: false }),
+    });
+    hidden.controller.start();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await authenticate(hidden.sockets[0]!);
+    await hidden.controller.openChat(bobId);
+    hidden.sockets[0]!.frame({
+      type: "message",
+      id: "hidden",
+      from: bobId,
+      seq: "10",
+      createdAt: new Date().toISOString(),
+      ciphertext: "invalid",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(
+      hidden.sockets[0]!.decoded().filter((frame) => frame.type === "read"),
+    ).toHaveLength(0);
+    hidden.controller.stop();
   });
 
   it("resends an unconfirmed frame after reconnect with the same payload and clientMsgId", async () => {

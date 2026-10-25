@@ -3,6 +3,7 @@ import type WebSocket from "ws";
 
 export type MessageRow = {
   id: string;
+  seq: string;
   sender_id: string;
   recipient_id: string;
   client_msg_id: string;
@@ -31,7 +32,7 @@ export function createMessageHub(pool: Pool, batchSize = 200): MessageHub {
   async function nextBatch(socket: WebSocket, userId: string) {
     if (pending.has(socket)) return;
     const result = await pool.query<MessageRow>(
-      `SELECT id, sender_id, recipient_id, client_msg_id, ciphertext,
+      `SELECT id, seq::text AS seq, sender_id, recipient_id, client_msg_id, ciphertext,
               sender_copy, created_at, delivered_at
        FROM messages WHERE recipient_id=$1 AND delivered_at IS NULL
        ORDER BY seq ASC LIMIT $2`,
@@ -44,6 +45,7 @@ export function createMessageHub(pool: Pool, batchSize = 200): MessageHub {
       send(socket, {
         type: "message",
         id: row.id,
+        seq: row.seq,
         from: row.sender_id,
         ciphertext: row.ciphertext,
         createdAt: row.created_at.toISOString(),

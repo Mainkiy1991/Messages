@@ -30,6 +30,22 @@ const ackSchema = z
     ids: z.array(z.string().uuid()).max(200),
   })
   .strict();
+const readSchema = z
+  .object({
+    type: z.literal("read"),
+    peerId: z.string().regex(/^[0-9a-f]{64}$/u),
+    upToSeq: z
+      .string()
+      .regex(/^\d{1,19}$/u)
+      .refine((value) => {
+        try {
+          return BigInt(value) <= 9223372036854775807n;
+        } catch {
+          return false;
+        }
+      }),
+  })
+  .strict();
 
 type Connection = {
   socket: WebSocket;
@@ -101,13 +117,17 @@ export async function registerWebSocket(
   const connections = new Set<Connection>();
   const perUser = new Map<string, Set<Connection>>();
   const perToken = new Map<string, Set<Connection>>();
+  const readWindows = new Map<string, number[]>();
 
   function remove(connection: Connection) {
     connections.delete(connection);
     hub.unregister(connection.socket, connection.userId);
     const userSockets = perUser.get(connection.userId);
     userSockets?.delete(connection);
-    if (userSockets?.size === 0) perUser.delete(connection.userId);
+    if (userSockets?.size === 0) {
+      perUser.delete(connection.userId);
+      readWindows.delete(connection.userId);
+    }
     const tokenSockets = perToken.get(connection.tokenHash);
     tokenSockets?.delete(connection);
     if (tokenSockets?.size === 0) perToken.delete(connection.tokenHash);
@@ -268,6 +288,49 @@ export async function registerWebSocket(
           }
 
           const type = (frame as { type: string }).type;
+          if (type === "read") {
+            const parsed = readSchema.safeParse(frame);
+            if (!parsed.success) {
+              errorFrame(socket, "invalid_frame");
+              return;
+            }
+            const time = Date.now();
+            const recent = (readWindows.get(connection!.userId) ?? []).filter(
+              (at) => time - at < 60_000,
+            );
+            if (recent.length >= 30) {
+              readWindows.set(connection!.userId, recent);
+              return;
+            }
+            recent.push(time);
+            readWindows.set(connection!.userId, recent);
+            const maximum = await pool.query<{ seq: string }>(
+              `SELECT max(seq)::text AS seq FROM messages WHERE sender_id=$1 AND recipient_id=$2`,
+              [parsed.data.peerId, connection!.userId],
+            );
+            if (!maximum.rows[0]?.seq) return;
+            const clamped =
+              BigInt(parsed.data.upToSeq) > BigInt(maximum.rows[0].seq)
+                ? maximum.rows[0].seq
+                : parsed.data.upToSeq;
+            const updated = await pool.query<{ read_up_to_seq: string }>(
+              `INSERT INTO read_markers(reader_id, peer_id, read_up_to_seq)
+               VALUES($1,$2,$3::bigint)
+               ON CONFLICT(reader_id, peer_id) DO UPDATE
+                 SET read_up_to_seq=GREATEST(read_markers.read_up_to_seq, EXCLUDED.read_up_to_seq), updated_at=now()
+                 WHERE read_markers.read_up_to_seq < EXCLUDED.read_up_to_seq
+               RETURNING read_up_to_seq::text`,
+              [connection!.userId, parsed.data.peerId, clamped],
+            );
+            if (updated.rowCount)
+              hub.sendToUser(parsed.data.peerId, {
+                type: "read",
+                from: connection!.userId,
+                upToSeq: updated.rows[0]!.read_up_to_seq,
+                readAt: new Date(time).toISOString(),
+              });
+            return;
+          }
           if (type === "send") {
             const parsed = sendSchema.safeParse(frame);
             const clientMsgId = clientMsgIdFromFrame(frame);
@@ -295,7 +358,7 @@ export async function registerWebSocket(
               `INSERT INTO messages(sender_id, recipient_id, client_msg_id, ciphertext, sender_copy)
                VALUES($1,$2,$3,$4,$5)
                ON CONFLICT(sender_id, client_msg_id) DO NOTHING
-               RETURNING id, sender_id, recipient_id, client_msg_id, ciphertext, sender_copy, created_at, delivered_at`,
+               RETURNING id, seq::text AS seq, sender_id, recipient_id, client_msg_id, ciphertext, sender_copy, created_at, delivered_at`,
               [
                 connection!.userId,
                 input.to,
@@ -309,7 +372,7 @@ export async function registerWebSocket(
             if (!row) {
               const existing = await pool.query<MessageRow>(
                 `SELECT id, sender_id, recipient_id, client_msg_id, ciphertext,
-                        sender_copy, created_at, delivered_at
+                        sender_copy, created_at, delivered_at, seq::text AS seq
                  FROM messages WHERE sender_id=$1 AND client_msg_id=$2`,
                 [connection!.userId, input.clientMsgId],
               );
@@ -328,6 +391,7 @@ export async function registerWebSocket(
               clientMsgId: row.client_msg_id,
               id: row.id,
               createdAt,
+              seq: row.seq,
             });
             if (isNew) {
               hub.sendToUser(row.recipient_id, {
@@ -336,6 +400,7 @@ export async function registerWebSocket(
                 from: row.sender_id,
                 ciphertext: row.ciphertext,
                 createdAt,
+                seq: row.seq,
               });
             }
             return;

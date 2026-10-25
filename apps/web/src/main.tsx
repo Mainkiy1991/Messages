@@ -91,6 +91,13 @@ function App() {
   }, [profileOpen]);
 
   useEffect(() => {
+    const updateVisibility = () => controllerRef.current?.visibilityChanged();
+    document.addEventListener("visibilitychange", updateVisibility);
+    return () =>
+      document.removeEventListener("visibilitychange", updateVisibility);
+  }, []);
+
+  useEffect(() => {
     void restoreSession().then(async (saved) => {
       if (saved) {
         setKeys(saved);
@@ -708,13 +715,15 @@ function App() {
                               { hour: "2-digit", minute: "2-digit" },
                             )}{" "}
                             {message.direction === "out" &&
-                              (message.status === "delivered"
-                                ? t.delivered
-                                : message.status === "sent"
-                                  ? t.sent
-                                  : message.status === "error"
-                                    ? t.failed
-                                    : t.sending)}
+                              (message.status === "read"
+                                ? t.read
+                                : message.status === "delivered"
+                                  ? t.delivered
+                                  : message.status === "sent"
+                                    ? t.sent
+                                    : message.status === "error"
+                                      ? t.failed
+                                      : t.sending)}
                           </small>
                           {message.status === "error" && (
                             <>

@@ -120,6 +120,11 @@ export class ChatConnection {
       this.sendPending(this.outbox.get(frame.clientMsgId)!);
   }
 
+  sendRead(peerId: string, upToSeq: string): void {
+    if (this.authenticated && this.socket && this.active)
+      this.socket.send(JSON.stringify({ type: "read", peerId, upToSeq }));
+  }
+
   retryMessage(frame: OutgoingFrame): void {
     const pending = this.outbox.get(frame.clientMsgId) ?? {
       frame,

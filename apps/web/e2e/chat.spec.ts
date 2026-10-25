@@ -155,6 +155,46 @@ test.describe("real browser chat", () => {
     activeUsers = [];
   });
 
+  test("shows live and persisted read receipts", async ({ browser }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+
+    await openChat(a.page, bob.id);
+    await send(a.page, "Read this while online");
+    await openChat(b.page, alice.id);
+    await expect(
+      a.page.locator('[data-testid="message"][data-direction="out"]'),
+    ).toHaveAttribute("data-status", "read");
+    await expect(
+      a.page.getByTestId("message-status").filter({ hasText: "Read" }),
+    ).toBeVisible();
+
+    await logout(b.page);
+    await send(a.page, "Read this after reconnecting");
+    await expect(
+      a.page.locator(
+        '[data-testid="message"][data-direction="out"][data-status="sent"]',
+      ),
+    ).toContainText("Read this after reconnecting");
+    await logout(a.page);
+    expect(await signIn(b.page, bob.phrase)).toBe(bob.id);
+    await chatWith(b.page, alice.id).click();
+    await expect(
+      b.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: "Read this after reconnecting" }),
+    ).toBeVisible();
+    expect(await signIn(a.page, alice.phrase)).toBe(alice.id);
+    await chatWith(a.page, bob.id).click();
+    await expect(
+      a.page
+        .locator('[data-testid="message"][data-direction="out"]')
+        .filter({ hasText: "Read this after reconnecting" }),
+    ).toHaveAttribute("data-status", "read");
+  });
+
   test.afterEach(async () => {
     const errors = activeUsers.flatMap((user, index) =>
       user.errors.map((error) => `user ${index + 1}: ${error}`),

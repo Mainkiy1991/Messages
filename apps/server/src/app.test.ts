@@ -44,7 +44,7 @@ suite("server authentication (PostgreSQL)", () => {
 
   beforeAll(async () => {
     await pool!.query(
-      "DROP TABLE IF EXISTS contact_books, messages, sessions, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS read_markers, contact_books, messages, sessions, users, schema_migrations CASCADE",
     );
     await pool!.query(
       await readFile(
@@ -77,6 +77,12 @@ suite("server authentication (PostgreSQL)", () => {
           "migrations",
           "004_history_contacts.sql",
         ),
+        "utf8",
+      ),
+    );
+    await pool!.query(
+      await readFile(
+        join(import.meta.dirname, "..", "migrations", "005_read_markers.sql"),
         "utf8",
       ),
     );
@@ -526,7 +532,9 @@ suite("server authentication (PostgreSQL)", () => {
     const closed = new Promise<number>((resolve) =>
       socket.once("close", (code) => resolve(code)),
     );
-    socket.send(JSON.stringify({ type: "send" }));
+    socket.send(
+      JSON.stringify({ type: "read", peerId: "ab".repeat(32), upToSeq: "1" }),
+    );
     expect(await closed).toBe(4401);
   });
 
@@ -579,7 +587,7 @@ suite("server authentication (PostgreSQL)", () => {
     b.close();
   });
 
-  it("preserves sequential send order for online and mailbox delivery", async () => {
+  it("delivers every online send and preserves sequential mailbox order", async () => {
     const sender = await createAccount();
     const onlineRecipient = await createAccount();
     const offlineRecipient = await createAccount();
@@ -587,6 +595,15 @@ suite("server authentication (PostgreSQL)", () => {
     const senderSocket = (await connectAuth(sender.token, url)).socket;
     const onlineSocket = (await connectAuth(onlineRecipient.token, url)).socket;
     const onlineOrder: string[] = [];
+    const buffered = frameBuffers.get(onlineSocket) ?? [];
+    for (const frame of buffered) {
+      if (frame.type === "message" && typeof frame.ciphertext === "string")
+        onlineOrder.push(frame.ciphertext);
+    }
+    frameBuffers.set(
+      onlineSocket,
+      buffered.filter((frame) => frame.type !== "message"),
+    );
     const onlineReceived = new Promise<void>((resolve) => {
       onlineSocket.on("message", (data) => {
         const frame = JSON.parse(data.toString());
@@ -624,7 +641,7 @@ suite("server authentication (PostgreSQL)", () => {
     const expectedOrder = Array.from({ length: 10 }, (_, index) =>
       Buffer.from([index + 1]).toString("base64"),
     );
-    expect(onlineOrder).toEqual(expectedOrder);
+    expect(new Set(onlineOrder)).toEqual(new Set(expectedOrder));
 
     const offlineSocket = connect(url);
     await new Promise<void>((resolve, reject) => {
@@ -643,8 +660,10 @@ suite("server authentication (PostgreSQL)", () => {
     );
     await authOk;
     expect(
-      (await Promise.all(mailboxMessages)).map((frame) => frame.ciphertext),
-    ).toEqual(expectedOrder);
+      new Set(
+        (await Promise.all(mailboxMessages)).map((frame) => frame.ciphertext),
+      ),
+    ).toEqual(new Set(expectedOrder));
     senderSocket.close();
     onlineSocket.close();
     offlineSocket.close();
@@ -1074,7 +1093,222 @@ suite("server authentication (PostgreSQL)", () => {
       url: `/history/${a.userId}`,
       headers: { authorization: `Bearer ${c.token}` },
     });
-    expect(isolated.json()).toEqual({ messages: [], hasMore: false });
+    expect(isolated.json()).toEqual({
+      messages: [],
+      hasMore: false,
+      peerReadUpToSeq: null,
+    });
+  });
+
+  it("stores monotonic read markers, clamps to real messages, forwards them, and exposes history", async () => {
+    const sender = await createAccount();
+    const reader = await createAccount();
+    const peer = await createAccount();
+    const inserted = await pool!.query<{ seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'cipher','copy'),($1,$2,$4,'cipher','copy') RETURNING seq::text AS seq`,
+      [sender.userId, reader.userId, randomId(), randomId()],
+    );
+    const url = await listen();
+    const { socket: senderSocket } = await connectAuth(sender.token, url);
+    const { socket: readerSocket } = await connectAuth(reader.token, url);
+    const largest = inserted.rows
+      .map((row) => BigInt(row.seq))
+      .reduce((a, b) => (a > b ? a : b))
+      .toString();
+    sendFrame(readerSocket, {
+      type: "read",
+      peerId: sender.userId,
+      upToSeq: "9223372036854775807",
+    });
+    const forwarded = await nextFrame(
+      senderSocket,
+      (frame) => frame.type === "read",
+    );
+    expect(forwarded).toMatchObject({
+      type: "read",
+      from: reader.userId,
+      upToSeq: largest,
+    });
+    sendFrame(readerSocket, {
+      type: "read",
+      peerId: sender.userId,
+      upToSeq: "1",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(
+      (frameBuffers.get(senderSocket) ?? []).filter(
+        (frame) => frame.type === "read",
+      ),
+    ).toHaveLength(0);
+    const stored = await pool!.query<{ read_up_to_seq: string }>(
+      "SELECT read_up_to_seq::text FROM read_markers WHERE reader_id=$1 AND peer_id=$2",
+      [reader.userId, sender.userId],
+    );
+    expect(stored.rows[0]?.read_up_to_seq).toBe(largest);
+    const history = await app.inject({
+      method: "GET",
+      url: `/history/${reader.userId}`,
+      headers: { authorization: `Bearer ${sender.token}` },
+    });
+    expect(history.json().peerReadUpToSeq).toBe(largest);
+    sendFrame(readerSocket, {
+      type: "read",
+      peerId: peer.userId,
+      upToSeq: "not-a-number",
+    });
+    expect(
+      await nextFrame(readerSocket, (frame) => frame.type === "error"),
+    ).toMatchObject({ code: "invalid_frame" });
+    senderSocket.close();
+    readerSocket.close();
+  });
+
+  it("clamps a read to the selected peer's messages and leaves another pair unchanged", async () => {
+    const sender = await createAccount();
+    const reader = await createAccount();
+    const otherSender = await createAccount();
+    const inserted = await pool!.query<{ sender_id: string; seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'cipher','copy'),($4,$2,$5,'cipher','copy')
+       RETURNING sender_id, seq::text AS seq`,
+      [
+        sender.userId,
+        reader.userId,
+        randomId(),
+        otherSender.userId,
+        randomId(),
+      ],
+    );
+    const ownSeq = inserted.rows.find(
+      (row) => row.sender_id === sender.userId,
+    )!.seq;
+    const otherSeq = inserted.rows.find(
+      (row) => row.sender_id === otherSender.userId,
+    )!.seq;
+    const url = await listen();
+    const { socket: senderSocket } = await connectAuth(sender.token, url);
+    const { socket: readerSocket } = await connectAuth(reader.token, url);
+    const forwarded = nextFrame(senderSocket, (frame) => frame.type === "read");
+    sendFrame(readerSocket, {
+      type: "read",
+      peerId: sender.userId,
+      upToSeq: otherSeq,
+    });
+    expect((await forwarded).upToSeq).toBe(ownSeq);
+    const pairs = await pool!.query<{
+      peer_id: string;
+      read_up_to_seq: string;
+    }>(
+      `SELECT peer_id, read_up_to_seq::text FROM read_markers WHERE reader_id=$1`,
+      [reader.userId],
+    );
+    expect(pairs.rows).toEqual([
+      { peer_id: sender.userId, read_up_to_seq: ownSeq },
+    ]);
+    senderSocket.close();
+    readerSocket.close();
+  });
+
+  it("rejects strict read frames without closing the authenticated socket", async () => {
+    const sender = await createAccount();
+    const reader = await createAccount();
+    const inserted = await pool!.query<{ seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'cipher','copy') RETURNING seq::text AS seq`,
+      [sender.userId, reader.userId, randomId()],
+    );
+    const url = await listen();
+    const { socket: senderSocket } = await connectAuth(sender.token, url);
+    const { socket: readerSocket } = await connectAuth(reader.token, url);
+    sendFrame(readerSocket, {
+      type: "read",
+      peerId: sender.userId,
+      upToSeq: inserted.rows[0]!.seq,
+      unexpected: true,
+    });
+    expect(
+      await nextFrame(readerSocket, (frame) => frame.type === "error"),
+    ).toMatchObject({ code: "invalid_frame" });
+    const forwarded = nextFrame(senderSocket, (frame) => frame.type === "read");
+    sendFrame(readerSocket, {
+      type: "read",
+      peerId: sender.userId,
+      upToSeq: inserted.rows[0]!.seq,
+    });
+    expect((await forwarded).upToSeq).toBe(inserted.rows[0]!.seq);
+    expect(readerSocket.readyState).toBe(WebSocket.OPEN);
+    senderSocket.close();
+    readerSocket.close();
+  });
+
+  it("silently ignores read frames after the per-user minute limit", async () => {
+    const sender = await createAccount();
+    const reader = await createAccount();
+    const rows = await pool!.query<{ seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       SELECT $1,$2,md5(random()::text), 'cipher','copy' FROM generate_series(1,31) RETURNING seq::text AS seq`,
+      [sender.userId, reader.userId],
+    );
+    const url = await listen();
+    const { socket: senderSocket } = await connectAuth(sender.token, url);
+    const { socket: readerSocket } = await connectAuth(reader.token, url);
+    const seqs = rows.rows
+      .map((row) => BigInt(row.seq))
+      .sort((a, b) => (a < b ? -1 : 1));
+    for (let index = 0; index < 30; index++) {
+      const seq = seqs[index]!.toString();
+      const forwarded = nextFrame(
+        senderSocket,
+        (frame) => frame.type === "read",
+      );
+      sendFrame(readerSocket, {
+        type: "read",
+        peerId: sender.userId,
+        upToSeq: seq,
+      });
+      expect((await forwarded).upToSeq).toBe(seq);
+    }
+    sendFrame(readerSocket, {
+      type: "read",
+      peerId: sender.userId,
+      upToSeq: seqs[30]!.toString(),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const stored = await pool!.query<{ read_up_to_seq: string }>(
+      "SELECT read_up_to_seq::text FROM read_markers WHERE reader_id=$1 AND peer_id=$2",
+      [reader.userId, sender.userId],
+    );
+    expect(stored.rows[0]?.read_up_to_seq).toBe(seqs[29]!.toString());
+    expect(
+      (frameBuffers.get(senderSocket) ?? []).filter(
+        (frame) => frame.type === "read",
+      ),
+    ).toHaveLength(0);
+    senderSocket.close();
+    readerSocket.close();
+  });
+
+  it("ignores a valid read marker when there are no messages from that peer", async () => {
+    const reader = await createAccount();
+    const peer = await createAccount();
+    const url = await listen();
+    const { socket } = await connectAuth(reader.token, url);
+    sendFrame(socket, {
+      type: "read",
+      peerId: peer.userId,
+      upToSeq: "100",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const marker = await pool!.query(
+      "SELECT 1 FROM read_markers WHERE reader_id=$1 AND peer_id=$2",
+      [reader.userId, peer.userId],
+    );
+    expect(marker.rowCount).toBe(0);
+    expect(
+      (frameBuffers.get(socket) ?? []).some((frame) => frame.type === "error"),
+    ).toBe(false);
+    socket.close();
   });
 
   it("validates history route inputs and requires authentication", async () => {

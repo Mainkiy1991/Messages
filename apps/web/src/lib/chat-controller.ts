@@ -34,7 +34,7 @@ import {
   type SocketState,
 } from "./websocket.js";
 
-export type SendStatus = "sending" | "sent" | "delivered" | "error";
+export type SendStatus = "sending" | "sent" | "delivered" | "read" | "error";
 export type ChatMessage = {
   id: string;
   clientMsgId?: string;
@@ -90,6 +90,7 @@ export type ChatControllerDependencies = {
   setTimer?: typeof setTimeout;
   clearTimer?: typeof clearTimeout;
   sendTimeoutMs?: number;
+  isVisible?: () => boolean;
   now?: () => number;
   makeClientMsgId?: () => string;
   onChange?: (state: ChatControllerState) => void;
@@ -100,7 +101,11 @@ export type ChatControllerDependencies = {
     peerId: string,
     token: string,
     before?: string,
-  ) => Promise<{ messages: HistoryMessage[]; hasMore: boolean }>;
+  ) => Promise<{
+    messages: HistoryMessage[];
+    hasMore: boolean;
+    peerReadUpToSeq?: string | null;
+  }>;
   getContacts?: (token: string) => Promise<ContactBookResponse>;
   putContacts?: (
     token: string,
@@ -129,6 +134,9 @@ export class ChatController {
     number
   >();
   private stopped = false;
+  private readonly sentReadMarkers = new Map<string, string>();
+  private readonly peerReadMarkers = new Map<string, string>();
+  private readTimer: ReturnType<typeof setTimeout> | null = null;
   private historyRequests = new Map<string, Promise<boolean>>();
   private state: ChatControllerState = {
     chats: [],
@@ -172,7 +180,9 @@ export class ChatController {
             ...message,
             status: mergeStatus(message.status, "error"),
             error:
-              message.status === "delivered" || message.status === "sent"
+              message.status === "delivered" ||
+              message.status === "read" ||
+              message.status === "sent"
                 ? undefined
                 : "send_failed",
           })),
@@ -424,6 +434,29 @@ export class ChatController {
         ((id, token, before) =>
           getHistory(id, token, before, this.deps.fetcher))
       )(peerId, session.token, oldest);
+      if (page.peerReadUpToSeq) {
+        const marker = page.peerReadUpToSeq;
+        this.peerReadMarkers.set(peerId, marker);
+        this.update({
+          chats: this.state.chats.map((item) =>
+            item.peerId === peerId
+              ? {
+                  ...item,
+                  messages: item.messages.map((message) =>
+                    message.direction === "out" &&
+                    message.seq &&
+                    BigInt(message.seq) <= BigInt(marker)
+                      ? {
+                          ...message,
+                          status: mergeStatus(message.status, "read"),
+                        }
+                      : message,
+                  ),
+                }
+              : item,
+          ),
+        });
+      }
       const messages = await Promise.all(
         page.messages.map(async (entry) => {
           try {
@@ -452,7 +485,15 @@ export class ChatController {
               createdAt: entry.createdAt,
               direction: entry.direction,
               ...(entry.direction === "out"
-                ? { status: entry.deliveredAt ? "delivered" : "sent" }
+                ? {
+                    status:
+                      page.peerReadUpToSeq &&
+                      BigInt(entry.seq) <= BigInt(page.peerReadUpToSeq)
+                        ? "read"
+                        : entry.deliveredAt
+                          ? "delivered"
+                          : "sent",
+                  }
                 : {}),
               arrivalOrder: this.arrivalOrder++,
             } as ChatMessage;
@@ -465,7 +506,15 @@ export class ChatController {
               createdAt: entry.createdAt,
               direction: entry.direction,
               ...(entry.direction === "out"
-                ? { status: entry.deliveredAt ? "delivered" : "sent" }
+                ? {
+                    status:
+                      page.peerReadUpToSeq &&
+                      BigInt(entry.seq) <= BigInt(page.peerReadUpToSeq)
+                        ? "read"
+                        : entry.deliveredAt
+                          ? "delivered"
+                          : "sent",
+                  }
                 : {}),
               decryptFailed: true,
               arrivalOrder: this.arrivalOrder++,
@@ -498,6 +547,7 @@ export class ChatController {
             ),
           ),
       );
+      if (this.state.activePeer === peerId) this.scheduleRead(peerId);
       return true;
     } catch {
       this.update({
@@ -635,6 +685,7 @@ export class ChatController {
       this.update({ chats: sortChats(chats), activePeer: peerId, error: "" });
       this.resetUnread(peerId);
       void this.loadHistory(peerId);
+      this.scheduleRead(peerId);
     } catch {
       this.setError("server_unavailable");
     }
@@ -645,6 +696,20 @@ export class ChatController {
     this.update({ activePeer: peerId, error: "" });
     this.resetUnread(peerId);
     void this.loadHistory(peerId);
+    this.scheduleRead(peerId);
+  }
+
+  visibilityChanged(): void {
+    if (this.isVisible() && this.state.activePeer)
+      this.scheduleRead(this.state.activePeer);
+  }
+
+  private isVisible(): boolean {
+    return (
+      this.deps.isVisible?.() ??
+      (typeof document !== "undefined" &&
+        document.visibilityState === "visible")
+    );
   }
 
   closeActiveChat(): void {
@@ -790,6 +855,9 @@ export class ChatController {
         text,
         createdAt: frame.createdAt,
         direction: "in",
+        ...(typeof frame.seq === "string" && /^\d+$/u.test(frame.seq)
+          ? { seq: frame.seq }
+          : {}),
         ...(decryptFailed ? { decryptFailed: true } : {}),
         arrivalOrder: this.arrivalOrder++,
       };
@@ -804,6 +872,7 @@ export class ChatController {
       const unreadCount =
         this.state.activePeer === frame.from ? 0 : chat.unreadCount + 1;
       this.upsertMessage(frame.from, message, unreadCount);
+      if (this.state.activePeer === frame.from) this.scheduleRead(frame.from);
       return;
     }
     if (frame.type === "sent" && typeof frame.clientMsgId === "string") {
@@ -814,6 +883,10 @@ export class ChatController {
           typeof frame.createdAt === "string"
             ? frame.createdAt
             : message.createdAt,
+        seq:
+          typeof frame.seq === "string" && /^\d+$/u.test(frame.seq)
+            ? frame.seq
+            : message.seq,
         status: mergeStatus(message.status, "sent"),
         error: undefined,
       }));
@@ -831,14 +904,50 @@ export class ChatController {
       }));
       return;
     }
+    if (
+      frame.type === "read" &&
+      typeof frame.from === "string" &&
+      typeof frame.upToSeq === "string" &&
+      /^\d+$/u.test(frame.upToSeq)
+    ) {
+      const marker = frame.upToSeq;
+      this.peerReadMarkers.set(frame.from, marker);
+      this.update({
+        chats: this.state.chats.map((chat) =>
+          chat.peerId === frame.from
+            ? {
+                ...chat,
+                messages: chat.messages.map((message) =>
+                  message.direction === "out" &&
+                  message.seq &&
+                  BigInt(message.seq) <= BigInt(marker)
+                    ? {
+                        ...message,
+                        status: mergeStatus(message.status, "read"),
+                        error: undefined,
+                      }
+                    : message,
+                ),
+              }
+            : chat,
+        ),
+      });
+      return;
+    }
     if (frame.type === "error") {
       const messageError =
         frame.code === "recipient_not_found" ? "user_not_found" : "send_failed";
       if (typeof frame.clientMsgId === "string")
         this.updateMessage(frame.clientMsgId, (message) => ({
           ...message,
-          status: message.status === "delivered" ? "delivered" : "error",
-          error: message.status === "delivered" ? undefined : messageError,
+          status:
+            message.status === "read" || message.status === "delivered"
+              ? message.status
+              : "error",
+          error:
+            message.status === "read" || message.status === "delivered"
+              ? undefined
+              : messageError,
         }));
       else
         for (const chat of this.state.chats)
@@ -846,10 +955,41 @@ export class ChatController {
             if (message.status === "sending" && message.clientMsgId)
               this.updateMessage(message.clientMsgId, (current) => ({
                 ...current,
-                status: current.status === "delivered" ? "delivered" : "error",
+                status:
+                  current.status === "read" || current.status === "delivered"
+                    ? current.status
+                    : "error",
                 error: messageError,
               }));
     }
+  }
+
+  private scheduleRead(peerId: string): void {
+    if (this.stopped || this.state.activePeer !== peerId || !this.isVisible())
+      return;
+    const incoming =
+      this.state.chats
+        .find((chat) => chat.peerId === peerId)
+        ?.messages.filter(
+          (message) => message.direction === "in" && message.seq,
+        )
+        .map((message) => message.seq!) ?? [];
+    if (!incoming.length) return;
+    const target = incoming.reduce((a, b) => (BigInt(a) > BigInt(b) ? a : b));
+    const previous = this.sentReadMarkers.get(peerId);
+    if (previous && BigInt(target) <= BigInt(previous)) return;
+    if (this.readTimer)
+      (this.deps.clearTimer ?? globalThis.clearTimeout)(this.readTimer);
+    this.readTimer = (this.deps.setTimer ?? globalThis.setTimeout)(() => {
+      this.readTimer = null;
+      if (this.state.activePeer === peerId && this.isVisible()) {
+        const prior = this.sentReadMarkers.get(peerId);
+        if (!prior || BigInt(target) > BigInt(prior)) {
+          this.sentReadMarkers.set(peerId, target);
+          this.connection.sendRead(peerId, target);
+        }
+      }
+    }, 300);
   }
 
   private updateMessage(
@@ -972,12 +1112,15 @@ function mergeStatus(
   if (!incoming) return current;
   if (!current) return incoming;
   if (incoming === "error")
-    return current === "sent" || current === "delivered" ? current : "error";
+    return current === "sent" || current === "delivered" || current === "read"
+      ? current
+      : "error";
   if (current === "error") return incoming;
   const rank: Record<Exclude<SendStatus, "error">, number> = {
     sending: 0,
     sent: 1,
     delivered: 2,
+    read: 3,
   };
   return rank[incoming] > rank[current] ? incoming : current;
 }
