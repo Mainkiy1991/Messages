@@ -305,6 +305,11 @@ test.describe("real browser chat", () => {
       await expect(
         sender.locator(".message-list .message-text").filter({ hasText: text }),
       ).toBeVisible();
+      await expect(
+        sender
+          .locator('[data-testid="message"][data-direction="out"]')
+          .filter({ hasText: text }),
+      ).toHaveAttribute("data-status", /^(sent|delivered|read)$/u);
       expected.push(text);
     }
 
