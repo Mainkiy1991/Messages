@@ -333,7 +333,7 @@ test.describe("real browser chat", () => {
       await chatWith(user.page, peerId).click();
       const messageTexts = user.page.locator(".message-list .message-text");
       while ((await messageTexts.count()) < expected.length) {
-        const loadMore = user.page.getByRole("button", { name: /load more/i });
+        const loadMore = user.page.locator(".message-list .load-more");
         await expect(loadMore).toBeVisible();
         await loadMore.click();
       }
