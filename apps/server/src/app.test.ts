@@ -1200,6 +1200,7 @@ suite("server authentication (PostgreSQL)", () => {
         messages: Array<{ seq: string }>;
         hasMore: boolean;
       };
+      expect(page.messages.length).toBeGreaterThan(0);
       pages.push({
         seqs: page.messages.map((message) => message.seq),
         hasMore: page.hasMore,
