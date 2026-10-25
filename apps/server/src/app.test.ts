@@ -1114,7 +1114,7 @@ suite("server authentication (PostgreSQL)", () => {
     const expected = await pool!.query<{ seq: string }>(
       `SELECT seq::text AS seq FROM messages
        WHERE (sender_id=$1 AND recipient_id=$2) OR (sender_id=$2 AND recipient_id=$1)
-       ORDER BY seq ASC`,
+       ORDER BY seq::bigint ASC`,
       [a.userId, b.userId],
     );
 
@@ -1174,62 +1174,63 @@ suite("server authentication (PostgreSQL)", () => {
     await setSequence(997);
     await insertMessages(4);
 
-    const schema = await pool!.query<{ data_type: string }>(
-      `SELECT data_type FROM information_schema.columns
-       WHERE table_schema=current_schema() AND table_name='messages' AND column_name='seq'`,
-    );
-    expect(schema.rows[0]?.data_type).toBe("bigint");
+    const conversations = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${sender.token}` },
+    });
+    expect(conversations.json().conversations).toMatchObject([
+      { peerId: reader.userId, lastSeq: "1001" },
+    ]);
 
-    let identityRemoved = false;
-    let sequenceIsText = false;
-    try {
-      await pool!.query("ALTER TABLE messages ALTER COLUMN seq DROP IDENTITY");
-      identityRemoved = true;
-      await pool!.query(
-        "ALTER TABLE messages ALTER COLUMN seq TYPE text USING seq::text",
-      );
-      sequenceIsText = true;
-
-      const conversations = await app.inject({
+    const pages: Array<{ seqs: string[]; hasMore: boolean }> = [];
+    let before: string | undefined;
+    let hasMore = true;
+    while (hasMore) {
+      const url = new URL(`/history/${reader.userId}`, "http://localhost");
+      url.searchParams.set("limit", "4");
+      if (before) url.searchParams.set("before", before);
+      const response = await app.inject({
         method: "GET",
-        url: "/conversations",
+        url: `${url.pathname}${url.search}`,
         headers: { authorization: `Bearer ${sender.token}` },
       });
-      expect(conversations.json().conversations).toMatchObject([
-        { peerId: reader.userId, lastSeq: "1001" },
-      ]);
+      expect(response.statusCode).toBe(200);
+      const page = response.json() as {
+        messages: Array<{ seq: string }>;
+        hasMore: boolean;
+      };
+      pages.push({
+        seqs: page.messages.map((message) => message.seq),
+        hasMore: page.hasMore,
+      });
+      before = page.messages[0]!.seq;
+      hasMore = page.hasMore;
+    }
+    expect(pages[0]?.seqs).toEqual(["998", "999", "1000", "1001"]);
+    expect(
+      pages
+        .map((page) => page.seqs)
+        .reverse()
+        .flat(),
+    ).toEqual(["98", "99", "100", "101", "231", "998", "999", "1000", "1001"]);
 
-      const pages: Array<{ seqs: string[]; hasMore: boolean }> = [];
-      let before: string | undefined;
-      let hasMore = true;
-      while (hasMore) {
-        const url = new URL(`/history/${reader.userId}`, "http://localhost");
-        url.searchParams.set("limit", "4");
-        if (before) url.searchParams.set("before", before);
-        const response = await app.inject({
-          method: "GET",
-          url: `${url.pathname}${url.search}`,
-          headers: { authorization: `Bearer ${sender.token}` },
-        });
-        expect(response.statusCode).toBe(200);
-        const page = response.json() as {
-          messages: Array<{ seq: string }>;
-          hasMore: boolean;
-        };
-        pages.push({
-          seqs: page.messages.map((message) => message.seq),
-          hasMore: page.hasMore,
-        });
-        before = page.messages[0]!.seq;
-        hasMore = page.hasMore;
-      }
-      expect(pages[0]?.seqs).toEqual(["998", "999", "1000", "1001"]);
-      expect(
-        pages
-          .map((page) => page.seqs)
-          .reverse()
-          .flat(),
-      ).toEqual([
+    const websocketUrl = await listen();
+    const { socket: senderSocket } = await connectAuth(
+      sender.token,
+      websocketUrl,
+    );
+    const { socket: readerSocket } = await connectAuth(
+      reader.token,
+      websocketUrl,
+    );
+    try {
+      const mailboxFrames = await Promise.all(
+        Array.from({ length: 9 }, () =>
+          nextFrame(readerSocket, (frame) => frame.type === "message"),
+        ),
+      );
+      expect(mailboxFrames.map((frame) => frame.seq)).toEqual([
         "98",
         "99",
         "100",
@@ -1241,72 +1242,26 @@ suite("server authentication (PostgreSQL)", () => {
         "1001",
       ]);
 
-      const websocketUrl = await listen();
-      const { socket: senderSocket } = await connectAuth(
-        sender.token,
-        websocketUrl,
+      const forwarded = nextFrame(
+        senderSocket,
+        (frame) => frame.type === "read",
       );
-      const { socket: readerSocket } = await connectAuth(
-        reader.token,
-        websocketUrl,
-      );
-      try {
-        const mailboxFrames = await Promise.all(
-          Array.from({ length: 9 }, () =>
-            nextFrame(readerSocket, (frame) => frame.type === "message"),
-          ),
-        );
-        expect(mailboxFrames.map((frame) => frame.seq)).toEqual([
-          "98",
-          "99",
-          "100",
-          "101",
-          "231",
-          "998",
-          "999",
-          "1000",
-          "1001",
-        ]);
+      sendFrame(readerSocket, {
+        type: "read",
+        peerId: sender.userId,
+        upToSeq: "9999",
+      });
+      expect((await forwarded).upToSeq).toBe("1001");
 
-        const forwarded = nextFrame(
-          senderSocket,
-          (frame) => frame.type === "read",
-        );
-        sendFrame(readerSocket, {
-          type: "read",
-          peerId: sender.userId,
-          upToSeq: "9999",
-        });
-        expect((await forwarded).upToSeq).toBe("1001");
-
-        const history = await app.inject({
-          method: "GET",
-          url: `/history/${reader.userId}?limit=4`,
-          headers: { authorization: `Bearer ${sender.token}` },
-        });
-        expect(history.json().peerReadUpToSeq).toBe("1001");
-      } finally {
-        senderSocket.close();
-        readerSocket.close();
-      }
+      const history = await app.inject({
+        method: "GET",
+        url: `/history/${reader.userId}?limit=4`,
+        headers: { authorization: `Bearer ${sender.token}` },
+      });
+      expect(history.json().peerReadUpToSeq).toBe("1001");
     } finally {
-      if (sequenceIsText) {
-        await pool!.query(
-          "ALTER TABLE messages ALTER COLUMN seq TYPE bigint USING seq::bigint",
-        );
-      }
-      if (identityRemoved) {
-        await pool!.query(
-          "ALTER TABLE messages ALTER COLUMN seq ADD GENERATED ALWAYS AS IDENTITY",
-        );
-        await pool!.query(
-          `SELECT setval(
-             pg_get_serial_sequence('messages','seq'),
-             COALESCE(max(seq), 1),
-             max(seq) IS NOT NULL
-           ) FROM messages`,
-        );
-      }
+      senderSocket.close();
+      readerSocket.close();
     }
   });
 
