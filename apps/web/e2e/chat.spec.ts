@@ -96,33 +96,44 @@ async function createAccount(
   }
   await page.getByLabel("I have saved the phrase").check();
   await page.getByRole("button", { name: "Finish account setup" }).click();
-  await expect(page.getByTestId("user-id")).toBeVisible();
+  await expect(page.getByTestId("profile")).toBeVisible();
   await expect(page.getByTestId("connection-status")).toHaveAttribute(
     "data-state",
     "connected",
   );
-  return { phrase, id: (await page.getByTestId("user-id").innerText()).trim() };
+  const id = await revealUserId(page);
+  return { phrase, id };
+}
+
+async function revealUserId(page: Page): Promise<string> {
+  await page.getByTestId("profile").click();
+  await page.getByRole("button", { name: "User ID" }).click();
+  const id = (await page.getByTestId("user-id").innerText()).trim();
+  await page.getByTestId("profile").click();
+  return id;
 }
 
 async function signIn(page: Page, phrase: string): Promise<string> {
   await page.getByTestId("open-login").click();
   await page.getByLabel("Seed phrase").fill(phrase);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await expect(page.getByTestId("user-id")).toBeVisible();
+  await expect(page.getByTestId("profile")).toBeVisible();
   await expect(page.getByTestId("connection-status")).toHaveAttribute(
     "data-state",
     "connected",
   );
-  return (await page.getByTestId("user-id").innerText()).trim();
+  return revealUserId(page);
 }
 
 async function logout(page: Page): Promise<void> {
+  await page.getByTestId("profile").click();
   await page.getByTestId("logout").click();
   await page.getByTestId("confirm-logout").click();
   await expect(page.getByTestId("open-login")).toBeVisible();
 }
 
 async function openChat(page: Page, peerId: string): Promise<void> {
+  await page.getByRole("button", { name: /New chat/u }).click();
   await page.getByTestId("peer-id-input").fill(peerId);
   await page.getByTestId("new-chat").click();
   await expect(page.locator(".conversation-head")).toContainText(
@@ -215,6 +226,11 @@ test.describe("real browser chat", () => {
     expect(
       await messageList.evaluate((list) => list.scrollTop),
     ).toBeGreaterThan(0);
+    await expect(
+      a.page
+        .locator('[data-testid="message"][data-direction="out"]')
+        .filter({ hasText: "Long history message 15" }),
+    ).toHaveAttribute("data-status", /^(sent|delivered)$/u);
 
     await a.page.setViewportSize({ width: 1440, height: 900 });
     await expect(input).toBeInViewport();
@@ -223,7 +239,10 @@ test.describe("real browser chat", () => {
     const preview = chatWith(a.page, bob.id);
     await expect(preview).toContainText("Long history message 15");
     await expect(a.page.locator(".conversation-head")).toHaveCount(0);
-    await expect(preview.locator("span")).toHaveCSS("white-space", "nowrap");
+    await expect(preview.locator(".chat-item-copy > span")).toHaveCSS(
+      "white-space",
+      "nowrap",
+    );
   });
 
   test("offline mailbox delivers exactly two queued messages after sign-in", async ({
@@ -263,6 +282,10 @@ test.describe("real browser chat", () => {
         .locator('[data-testid="message"]')
         .filter({ hasText: "History survives a reload" }),
     ).toBeVisible();
+    await a.page
+      .locator(".conversation-head")
+      .locator(".contact-name-trigger")
+      .click();
     await a.page
       .locator(".conversation-head")
       .getByLabel("Contact name (optional)")
@@ -368,7 +391,7 @@ test.describe("real browser chat", () => {
     ).toContainText("During outage");
     await b.page.reload();
     try {
-      await expect(b.page.getByTestId("user-id")).toBeVisible();
+      await expect(b.page.getByTestId("profile")).toBeVisible();
       await expect(b.page.getByTestId("connection-status")).toHaveAttribute(
         "data-state",
         "offline",
@@ -425,8 +448,10 @@ test.describe("real browser chat", () => {
     const bob = await createAccount(b.page);
     const charlie = await createAccount(c.page);
     await openChat(a.page, bob.id);
+    await b.page.getByRole("button", { name: /New chat/u }).click();
     await b.page.getByTestId("peer-id-input").fill(alice.id);
     await b.page.getByTestId("new-chat").click();
+    await c.page.getByRole("button", { name: /New chat/u }).click();
     await c.page.getByTestId("peer-id-input").fill(alice.id);
     await c.page.getByTestId("new-chat").click();
     await send(c.page, "Hello Alice from Charlie");
@@ -455,5 +480,123 @@ test.describe("real browser chat", () => {
     );
     expect(sessionDatabases).toEqual([]);
     expect(await signIn(user.page, account.phrase)).toBe(account.id);
+  });
+
+  test("chat layout, compact forms, profile controls and responsive navigation", async ({
+    browser,
+  }, testInfo) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(a.page, bob.id);
+    await send(a.page, "Keep the chat in the conversation list");
+    await expect(
+      a.page
+        .locator('[data-testid="message"][data-direction="out"]')
+        .filter({ hasText: "Keep the chat in the conversation list" }),
+    ).toHaveAttribute("data-status", /^(sent|delivered)$/u);
+    await logout(a.page);
+    await a.page.setViewportSize({ width: 360, height: 640 });
+    expect(await signIn(a.page, alice.phrase)).toBe(alice.id);
+    await expect(a.page.locator(".chat-sidebar")).toBeVisible();
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
+    await expect(
+      a.page.getByRole("button", { name: /New chat/u }),
+    ).toBeVisible();
+    await expect(
+      a.page.getByText("Select a chat or start a new one."),
+    ).toBeHidden();
+
+    await a.page.setViewportSize({ width: 1280, height: 720 });
+    await expect(a.page.locator(".chat-sidebar")).toBeVisible();
+    await expect(
+      a.page.getByText("Select a chat or start a new one."),
+    ).toBeVisible();
+    await expect(a.page.getByTestId("connection-status")).toHaveAttribute(
+      "aria-label",
+      "connected",
+    );
+    await expect(a.page.getByTestId("new-chat-form")).toHaveCount(0);
+    await a.page.getByRole("button", { name: /New chat/u }).click();
+    await expect(a.page.getByTestId("new-chat-form")).toBeVisible();
+    await a.page.getByTestId("peer-id-input").fill(bob.id);
+    await a.page.getByTestId("new-chat").click();
+    await expect(a.page.getByTestId("new-chat-form")).toHaveCount(0);
+    await expect(a.page.locator(".conversation-head")).toContainText(
+      bob.id.slice(-10),
+    );
+
+    const nameButton = a.page.locator(".contact-name-trigger");
+    await expect(a.page.getByRole("button", { name: "Save name" })).toHaveCount(
+      0,
+    );
+    await nameButton.click();
+    await a.page.getByLabel("Contact name (optional)").fill("Bob named");
+    await expect(
+      a.page.getByRole("button", { name: "Save name" }),
+    ).toBeVisible();
+
+    await a.page.setViewportSize({ width: 1280, height: 720 });
+    await expect(a.page.getByTestId("message-input")).toBeInViewport();
+    await expect(a.page.getByTestId("send-message")).toBeInViewport();
+    expect(
+      await a.page
+        .locator(".chat-sidebar")
+        .evaluate((el) => el.getBoundingClientRect().height),
+    ).toBeGreaterThanOrEqual(504);
+    expect(
+      await a.page
+        .locator(".conversation")
+        .evaluate((el) => el.getBoundingClientRect().height),
+    ).toBeGreaterThanOrEqual(504);
+    await a.page.screenshot({
+      path: testInfo.outputPath("chat-desktop.png"),
+      fullPage: true,
+    });
+
+    await a.page.setViewportSize({ width: 360, height: 640 });
+    await expect(a.page.locator(".chat-sidebar")).toBeHidden();
+    await expect(a.page.getByTestId("message-input")).toBeInViewport();
+    await a.page.screenshot({
+      path: testInfo.outputPath("chat-mobile.png"),
+      fullPage: true,
+    });
+    await a.page.getByRole("button", { name: "Back" }).click();
+    await expect(a.page.locator(".chat-sidebar")).toBeVisible();
+    await expect(a.page.locator(".conversation")).toBeHidden();
+    await expect(
+      a.page.getByRole("button", { name: /New chat/u }),
+    ).toBeVisible();
+
+    await a.page.getByTestId("profile").click();
+    await expect(a.page.getByTestId("profile")).toHaveAttribute(
+      "aria-label",
+      "Profile",
+    );
+    await expect(a.page.getByTestId("profile")).toHaveAttribute(
+      "title",
+      "Profile",
+    );
+    expect(await a.page.getByTestId("profile").innerText()).toBe("");
+    await a.page.getByRole("button", { name: "RU" }).click();
+    await expect(a.page.getByTestId("profile")).toHaveAttribute(
+      "aria-label",
+      "Профиль",
+    );
+    await expect(a.page.getByTestId("profile")).toHaveAttribute(
+      "title",
+      "Профиль",
+    );
+    await a.page.getByRole("button", { name: "EN" }).click();
+    await a.page.getByTestId("profile").click();
+    await expect(a.page.getByTestId("user-id")).toHaveCount(0);
+    await a.page.getByRole("button", { name: "User ID" }).click();
+    await expect(a.page.getByTestId("user-id")).toBeVisible();
+    await a.page.getByTestId("logout").click();
+    await expect(a.page.getByRole("alertdialog")).toBeVisible();
+    await a.page.getByRole("button", { name: "Cancel" }).click();
+    await expect(a.page.getByTestId("profile")).toBeVisible();
+    expect(alice.id).toHaveLength(64);
   });
 });

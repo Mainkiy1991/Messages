@@ -57,12 +57,38 @@ function App() {
   const [contactNameDraft, setContactNameDraft] = useState("");
   const [draft, setDraft] = useState("");
   const [chatError, setChatError] = useState("");
-  const [mobileChat, setMobileChat] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [idExpanded, setIdExpanded] = useState(false);
+  const [newChatOpen, setNewChatOpen] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const profileRef = useRef<HTMLDivElement | null>(null);
   const controllerRef = useRef<ChatController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const wasNearBottomRef = useRef(true);
   const previousPeerRef = useRef("");
   const preserveScrollRef = useRef(false);
+
+  useEffect(() => {
+    if (!profileOpen) return;
+    const outside = (event: PointerEvent) => {
+      if (!profileRef.current?.contains(event.target as Node)) {
+        setIdExpanded(false);
+        setProfileOpen(false);
+      }
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIdExpanded(false);
+        setProfileOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [profileOpen]);
 
   useEffect(() => {
     void restoreSession().then(async (saved) => {
@@ -219,8 +245,8 @@ function App() {
       }
       setPeerInput("");
       setNewContactName("");
+      setNewChatOpen(false);
       setContactNameDraft(chatState.contacts[next.activePeer] ?? "");
-      setMobileChat(true);
     }
   }
 
@@ -239,27 +265,117 @@ function App() {
   }
   return (
     <main className="shell">
-      <header>
+      <header className={screen === "home" ? "app-header" : undefined}>
         <a
           className="brand"
           onClick={() => screen === "welcome" && setScreen("welcome")}
         >
           {t.title}
         </a>
-        <div className="language">
-          <span>{t.language}</span>
-          <button
-            onClick={() => changeLanguage("ru")}
-            aria-pressed={language === "ru"}
-          >
-            RU
-          </button>
-          <button
-            onClick={() => changeLanguage("en")}
-            aria-pressed={language === "en"}
-          >
-            EN
-          </button>
+        {screen === "home" && (
+          <span
+            className={`connection-dot ${socketState}`}
+            data-testid="connection-status"
+            data-state={socketState}
+            aria-label={
+              socketState === "connected"
+                ? t.connected
+                : socketState === "connecting"
+                  ? t.connecting
+                  : t.offline
+            }
+            title={
+              socketState === "connected"
+                ? t.connected
+                : socketState === "connecting"
+                  ? t.connecting
+                  : t.offline
+            }
+            tabIndex={0}
+          />
+        )}
+        <div className="header-actions">
+          <div className="language" aria-label={t.language}>
+            <button
+              onClick={() => changeLanguage("ru")}
+              aria-pressed={language === "ru"}
+            >
+              RU
+            </button>
+            <button
+              onClick={() => changeLanguage("en")}
+              aria-pressed={language === "en"}
+            >
+              EN
+            </button>
+          </div>
+          {screen === "home" && (
+            <div className="profile-wrap" ref={profileRef}>
+              <button
+                data-testid="profile"
+                className="profile-button"
+                aria-label={t.profile}
+                title={t.profile}
+                aria-expanded={profileOpen}
+                onClick={() => {
+                  if (profileOpen) setIdExpanded(false);
+                  setProfileOpen(!profileOpen);
+                }}
+              >
+                <svg
+                  aria-hidden="true"
+                  focusable="false"
+                  viewBox="0 0 24 24"
+                  width="20"
+                  height="20"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <circle cx="12" cy="8" r="4" />
+                  <path d="M5 21v-2a7 7 0 0 1 14 0v2" />
+                </svg>
+              </button>
+              {profileOpen && (
+                <div className="profile-panel">
+                  <button
+                    className="id-toggle"
+                    aria-expanded={idExpanded}
+                    onClick={() => setIdExpanded(!idExpanded)}
+                  >
+                    {t.userId}
+                  </button>
+                  {idExpanded && (
+                    <div className="profile-id">
+                      <code data-testid="user-id">{userId}</code>
+                      <button
+                        className="secondary copy-button"
+                        onClick={() => {
+                          void navigator.clipboard
+                            .writeText(userId)
+                            .then(() => {
+                              setCopied(true);
+                              setTimeout(() => setCopied(false), 1600);
+                            });
+                        }}
+                      >
+                        {copied ? t.copied : t.copy}
+                      </button>
+                    </div>
+                  )}
+                  <button
+                    data-testid="logout"
+                    className="danger profile-logout"
+                    onClick={() => setShowLogoutConfirmation(true)}
+                  >
+                    {t.logout}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </header>
       <section className="card">
@@ -361,59 +477,60 @@ function App() {
         )}
         {screen === "home" && (
           <>
-            <h1>{t.title}</h1>
-            <p
-              className="muted"
-              data-testid="connection-status"
-              data-state={socketState}
-            >
-              {t.chats} ·{" "}
-              {socketState === "connected"
-                ? t.connected
-                : socketState === "connecting"
-                  ? t.connecting
-                  : t.offline}
-            </p>
-            <div className="id-box">
-              <label>{t.userId}</label>
-              <code data-testid="user-id">{userId}</code>
-              <button
-                className="secondary"
-                onClick={() => {
-                  void navigator.clipboard.writeText(userId).then(() => {
-                    setCopied(true);
-                    setTimeout(() => setCopied(false), 1600);
-                  });
-                }}
-              >
-                {copied ? t.copied : t.copy}
-              </button>
-            </div>
-            <section className={`messenger ${mobileChat ? "show-chat" : ""}`}>
+            <section className={`messenger ${activePeer ? "show-chat" : ""}`}>
               <aside className="chat-sidebar">
-                <form
-                  onSubmit={(event) => void openChat(event)}
-                  className="new-chat"
-                  data-testid="new-chat-form"
+                <button
+                  className="secondary new-chat-toggle"
+                  onClick={() => {
+                    setNewChatOpen(!newChatOpen);
+                    setChatError("");
+                  }}
                 >
-                  <input
-                    aria-label={t.peerId}
-                    data-testid="peer-id-input"
-                    value={peerInput}
-                    onChange={(event) => setPeerInput(event.target.value)}
-                    placeholder={t.peerId}
-                  />
-                  <input
-                    aria-label={t.contactName}
-                    value={newContactName}
-                    onChange={(event) => setNewContactName(event.target.value)}
-                    placeholder={t.contactName}
-                  />
-                  <button data-testid="new-chat" className="secondary">
-                    {t.newChat}
-                  </button>
-                </form>
-                {chatError && <p className="error">{chatError}</p>}
+                  {newChatOpen ? t.cancel : `＋ ${t.newChat}`}
+                </button>
+                {newChatOpen && (
+                  <form
+                    onSubmit={(event) => void openChat(event)}
+                    className="new-chat"
+                    data-testid="new-chat-form"
+                  >
+                    <input
+                      aria-label={t.peerId}
+                      data-testid="peer-id-input"
+                      value={peerInput}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") setNewChatOpen(false);
+                      }}
+                      onChange={(event) => setPeerInput(event.target.value)}
+                      placeholder={t.peerId}
+                    />
+                    <input
+                      aria-label={t.contactName}
+                      value={newContactName}
+                      onChange={(event) =>
+                        setNewContactName(event.target.value)
+                      }
+                      placeholder={t.contactName}
+                    />
+                    {chatError && <p className="error">{chatError}</p>}
+                    <div className="new-chat-actions">
+                      <button data-testid="new-chat" className="primary">
+                        {t.createChat}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => {
+                          setNewChatOpen(false);
+                          setPeerInput("");
+                          setNewContactName("");
+                        }}
+                      >
+                        {t.cancel}
+                      </button>
+                    </div>
+                  </form>
+                )}
                 <div data-testid="chat-list">
                   {chats.map((chat) => (
                     <button
@@ -426,13 +543,14 @@ function App() {
                         setContactNameDraft(
                           chatState.contacts[chat.peerId] ?? "",
                         );
-                        setMobileChat(true);
                       }}
                     >
-                      <strong>
-                        {contactLabel(chat.peerId, chatState.contacts)}
-                      </strong>
-                      <span>{chatPreview(chat, t)}</span>
+                      <span className="chat-item-copy">
+                        <strong>
+                          {contactLabel(chat.peerId, chatState.contacts)}
+                        </strong>
+                        <span>{chatPreview(chat, t)}</span>
+                      </span>
                       {chat.unreadCount > 0 && (
                         <b className="unread-count" data-testid="unread-count">
                           {chat.unreadCount}
@@ -460,42 +578,78 @@ function App() {
                     <div className="conversation-head">
                       <button
                         className="text-button mobile-back"
+                        aria-label={t.back}
                         onClick={() => {
                           controllerRef.current?.closeActiveChat();
-                          setMobileChat(false);
                         }}
                       >
-                        {t.back}
+                        ← {t.back}
                       </button>
-                      <strong>
-                        {contactLabel(activePeer, chatState.contacts)}
-                      </strong>
-                      <form
-                        className="contact-name-form"
-                        onSubmit={async (event) => {
-                          event.preventDefault();
-                          const saved =
-                            await controllerRef.current?.saveContactName(
-                              activePeer,
-                              contactNameDraft,
+                      {!editingName ? (
+                        <button
+                          className="contact-name-trigger"
+                          onClick={() => {
+                            setContactNameDraft(
+                              chatState.contacts[activePeer] ?? "",
                             );
-                          if (!saved) setChatError(t.contactSaveFailed);
-                          else setChatError("");
-                        }}
-                      >
-                        <input
-                          aria-label={t.contactName}
-                          value={contactNameDraft}
-                          onChange={(event) =>
-                            setContactNameDraft(event.target.value)
-                          }
-                          placeholder={
-                            chatState.contacts[activePeer] ||
-                            activePeer.slice(-10)
-                          }
-                        />
-                        <button className="text-button">{t.saveName}</button>
-                      </form>
+                            setEditingName(true);
+                          }}
+                        >
+                          <strong>
+                            {contactLabel(activePeer, chatState.contacts)}
+                          </strong>
+                          <small>{activePeer.slice(-10)}</small>
+                          <span aria-hidden="true">✎</span>
+                        </button>
+                      ) : (
+                        <form
+                          className="contact-name-form"
+                          onSubmit={async (event) => {
+                            event.preventDefault();
+                            const saved =
+                              await controllerRef.current?.saveContactName(
+                                activePeer,
+                                contactNameDraft,
+                              );
+                            if (!saved) setChatError(t.contactSaveFailed);
+                            else {
+                              setChatError("");
+                              setEditingName(false);
+                            }
+                          }}
+                        >
+                          <input
+                            aria-label={t.contactName}
+                            value={contactNameDraft}
+                            onChange={(event) =>
+                              setContactNameDraft(event.target.value)
+                            }
+                            onKeyDown={(event) => {
+                              if (event.key === "Escape") {
+                                setContactNameDraft(
+                                  chatState.contacts[activePeer] ?? "",
+                                );
+                                setEditingName(false);
+                              }
+                            }}
+                            placeholder={
+                              chatState.contacts[activePeer] ||
+                              activePeer.slice(-10)
+                            }
+                          />
+                          {contactNameDraft.trim() !==
+                            (chatState.contacts[activePeer] ?? "") && (
+                            <button className="secondary">{t.saveName}</button>
+                          )}
+                          <button
+                            type="button"
+                            className="text-button"
+                            onClick={() => setEditingName(false)}
+                          >
+                            {t.cancel}
+                          </button>
+                        </form>
+                      )}
                     </div>
                     <div
                       className="message-list"
@@ -586,7 +740,11 @@ function App() {
                         value={draft}
                         data-testid="message-input"
                         maxLength={4000}
-                        onChange={(event) => setDraft(event.target.value)}
+                        onChange={(event) => {
+                          setDraft(event.target.value);
+                          event.currentTarget.style.height = "auto";
+                          event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 130)}px`;
+                        }}
                         onKeyDown={(event) => {
                           if (event.key === "Enter" && !event.shiftKey) {
                             event.preventDefault();
@@ -612,13 +770,6 @@ function App() {
             {chatState.contactsError && (
               <p className="error">{t.contactsDecryptError}</p>
             )}
-            <button
-              data-testid="logout"
-              className="danger"
-              onClick={() => setShowLogoutConfirmation(true)}
-            >
-              {t.logout}
-            </button>
             {showLogoutConfirmation && (
               <div
                 className="confirm-panel"
@@ -631,7 +782,7 @@ function App() {
                   className="danger"
                   onClick={() => void confirmLogout()}
                 >
-                  {t.confirm}
+                  {t.logout}
                 </button>
                 <button
                   className="secondary"
