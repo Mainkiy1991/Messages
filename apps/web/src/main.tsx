@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   deriveKeys,
@@ -22,6 +22,7 @@ import {
 } from "./session.js";
 import {
   ChatController,
+  chatPreview,
   contactLabel,
   type ChatControllerState,
 } from "./lib/chat-controller.js";
@@ -58,6 +59,10 @@ function App() {
   const [chatError, setChatError] = useState("");
   const [mobileChat, setMobileChat] = useState(false);
   const controllerRef = useRef<ChatController | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
+  const wasNearBottomRef = useRef(true);
+  const previousPeerRef = useRef("");
+  const preserveScrollRef = useRef(false);
 
   useEffect(() => {
     void restoreSession().then(async (saved) => {
@@ -153,6 +158,20 @@ function App() {
   const chats = chatState.chats;
   const activePeer = chatState.activePeer;
   const socketState = chatState.connectionState;
+  const activeChat = chats.find((chat) => chat.peerId === activePeer);
+  const activeMessages = activeChat?.messages ?? [];
+  useLayoutEffect(() => {
+    const list = messageListRef.current;
+    if (!list) return;
+    if (previousPeerRef.current !== activePeer) {
+      previousPeerRef.current = activePeer;
+      list.scrollTop = list.scrollHeight;
+      wasNearBottomRef.current = true;
+      return;
+    }
+    if (preserveScrollRef.current) return;
+    if (wasNearBottomRef.current) list.scrollTop = list.scrollHeight;
+  }, [activePeer, activeMessages]);
   const errorText = (code: string) =>
     code === "invalid_id"
       ? t.invalidId
@@ -396,59 +415,43 @@ function App() {
                 </form>
                 {chatError && <p className="error">{chatError}</p>}
                 <div data-testid="chat-list">
-                  {chats
-                    .slice()
-                    .sort((a, b) =>
-                      (
-                        b.messages.at(-1)?.createdAt ??
-                        b.lastCreatedAt ??
-                        ""
-                      ).localeCompare(
-                        a.messages.at(-1)?.createdAt ?? a.lastCreatedAt ?? "",
-                      ),
-                    )
-                    .map((chat) => (
-                      <button
-                        data-testid="chat-item"
-                        data-peer-id={chat.peerId}
-                        className={`chat-list-item ${chat.peerId === activePeer ? "selected" : ""}`}
-                        key={chat.peerId}
-                        onClick={() => {
-                          controllerRef.current?.selectChat(chat.peerId);
-                          setContactNameDraft(
-                            chatState.contacts[chat.peerId] ?? "",
-                          );
-                          setMobileChat(true);
-                        }}
-                      >
-                        <strong>
-                          {contactLabel(chat.peerId, chatState.contacts)}
-                        </strong>
-                        <span>
-                          {chat.messages.at(-1)?.text ?? t.noMessages}
-                        </span>
-                        {chat.unreadCount > 0 && (
-                          <b
-                            className="unread-count"
-                            data-testid="unread-count"
-                          >
-                            {chat.unreadCount}
-                          </b>
-                        )}
-                        {(chat.messages.at(-1)?.createdAt ??
-                          chat.lastCreatedAt) && (
-                          <small>
-                            {new Date(
-                              chat.messages.at(-1)?.createdAt ??
-                                chat.lastCreatedAt!,
-                            ).toLocaleTimeString(
-                              language === "ru" ? "ru-RU" : "en-US",
-                              { hour: "2-digit", minute: "2-digit" },
-                            )}
-                          </small>
-                        )}
-                      </button>
-                    ))}
+                  {chats.map((chat) => (
+                    <button
+                      data-testid="chat-item"
+                      data-peer-id={chat.peerId}
+                      className={`chat-list-item ${chat.peerId === activePeer ? "selected" : ""}`}
+                      key={chat.peerId}
+                      onClick={() => {
+                        controllerRef.current?.selectChat(chat.peerId);
+                        setContactNameDraft(
+                          chatState.contacts[chat.peerId] ?? "",
+                        );
+                        setMobileChat(true);
+                      }}
+                    >
+                      <strong>
+                        {contactLabel(chat.peerId, chatState.contacts)}
+                      </strong>
+                      <span>{chatPreview(chat, t)}</span>
+                      {chat.unreadCount > 0 && (
+                        <b className="unread-count" data-testid="unread-count">
+                          {chat.unreadCount}
+                        </b>
+                      )}
+                      {(chat.messages.at(-1)?.createdAt ??
+                        chat.lastCreatedAt) && (
+                        <small>
+                          {new Date(
+                            chat.messages.at(-1)?.createdAt ??
+                              chat.lastCreatedAt!,
+                          ).toLocaleTimeString(
+                            language === "ru" ? "ru-RU" : "en-US",
+                            { hour: "2-digit", minute: "2-digit" },
+                          )}
+                        </small>
+                      )}
+                    </button>
+                  ))}
                 </div>
               </aside>
               <section className="conversation">
@@ -494,11 +497,45 @@ function App() {
                         <button className="text-button">{t.saveName}</button>
                       </form>
                     </div>
-                    <div className="message-list">
-                      {(
-                        chats.find((chat) => chat.peerId === activePeer)
-                          ?.messages ?? []
-                      ).map((message) => (
+                    <div
+                      className="message-list"
+                      ref={messageListRef}
+                      onScroll={(event) => {
+                        const list = event.currentTarget;
+                        wasNearBottomRef.current =
+                          list.scrollHeight -
+                            list.scrollTop -
+                            list.clientHeight <=
+                          80;
+                      }}
+                    >
+                      {activeChat?.hasMore && (
+                        <button
+                          className="secondary load-more"
+                          disabled={activeChat.loadingHistory}
+                          onClick={async () => {
+                            const list = messageListRef.current;
+                            if (!list) return;
+                            const oldHeight = list.scrollHeight;
+                            const oldTop = list.scrollTop;
+                            preserveScrollRef.current = true;
+                            await controllerRef.current?.loadHistory(
+                              activePeer,
+                            );
+                            requestAnimationFrame(() => {
+                              const updated = messageListRef.current;
+                              if (updated)
+                                updated.scrollTop =
+                                  oldTop + updated.scrollHeight - oldHeight;
+                              preserveScrollRef.current = false;
+                              wasNearBottomRef.current = false;
+                            });
+                          }}
+                        >
+                          {activeChat.loadingHistory ? t.loading : t.loadMore}
+                        </button>
+                      )}
+                      {activeMessages.map((message) => (
                         <article
                           data-testid="message"
                           data-status={message.status}
@@ -541,24 +578,6 @@ function App() {
                         </article>
                       ))}
                     </div>
-                    {chats.find((chat) => chat.peerId === activePeer)
-                      ?.hasMore && (
-                      <button
-                        className="secondary"
-                        disabled={
-                          chats.find((chat) => chat.peerId === activePeer)
-                            ?.loadingHistory
-                        }
-                        onClick={() =>
-                          void controllerRef.current?.loadHistory(activePeer)
-                        }
-                      >
-                        {chats.find((chat) => chat.peerId === activePeer)
-                          ?.loadingHistory
-                          ? t.loading
-                          : t.loadMore}
-                      </button>
-                    )}
                     <form
                       className="composer"
                       onSubmit={(event) => void sendMessage(event)}

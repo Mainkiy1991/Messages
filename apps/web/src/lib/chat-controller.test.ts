@@ -11,6 +11,7 @@ import {
 import { ApiError, type ContactBookResponse, type UserKeys } from "./api.js";
 import {
   ChatController,
+  chatPreview,
   contactLabel,
   mergeMessages,
   type ChatControllerDependencies,
@@ -92,6 +93,7 @@ function makeController(
     logout?: (token: string) => Promise<void>;
     getConversations?: ChatControllerDependencies["getConversations"];
     getContacts?: ChatControllerDependencies["getContacts"];
+    getHistory?: ChatControllerDependencies["getHistory"];
   } = {},
 ) {
   const sockets: TestSocket[] = [];
@@ -125,6 +127,7 @@ function makeController(
       logout: options.logout,
       getConversations: options.getConversations,
       getContacts: options.getContacts,
+      getHistory: options.getHistory,
     },
   );
   return { controller, sockets, tokens, getLoginCount: () => loginCount };
@@ -563,6 +566,176 @@ describe("ChatController", () => {
     expect(contactLabel(bobId, controller.getSnapshot().contacts)).toBe(
       bobId.slice(-10),
     );
+    controller.stop();
+  });
+
+  it("loads previews from history with at most three requests and twenty chats", async () => {
+    vi.stubGlobal("window", {});
+    const peers = Array.from({ length: 25 }, (_, index) =>
+      index.toString(16).padStart(64, "0"),
+    );
+    let active = 0;
+    let peak = 0;
+    const calls: string[] = [];
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getConversations: async () => ({
+        conversations: peers.map((peerId, index) => ({
+          peerId,
+          lastSeq: "1",
+          lastCreatedAt: new Date(Date.now() - index * 1000).toISOString(),
+        })),
+      }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async (peerId) => {
+        calls.push(peerId);
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active--;
+        if (peerId === peers[0]) {
+          const clientMsgId = "00000000000000000000000000000031";
+          return {
+            hasMore: false,
+            messages: [
+              {
+                id: "preview",
+                seq: "1",
+                direction: "out",
+                clientMsgId,
+                payload: encryptHistoryEntry({
+                  historyKey: alice.historyKey,
+                  clientMsgId,
+                  peerId,
+                  text: "Latest preview",
+                  sentAt: Date.now(),
+                }),
+                createdAt: new Date().toISOString(),
+                deliveredAt: null,
+              },
+            ],
+          };
+        }
+        return { messages: [], hasMore: false };
+      },
+    });
+    await (
+      controller as unknown as { loadAccountData(): Promise<void> }
+    ).loadAccountData();
+    await waitFor(() => calls.length === 20);
+    expect(calls).toHaveLength(20);
+    expect(peak).toBeLessThanOrEqual(3);
+    expect(controller.getSnapshot().chats[0]?.messages[0]?.text).toBe(
+      "Latest preview",
+    );
+    expect(controller.getSnapshot().error).toBe("");
+    controller.stop();
+  });
+
+  it("keeps preview history failures quiet and only labels loaded empty chats", async () => {
+    vi.stubGlobal("window", {});
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getConversations: async () => ({
+        conversations: [
+          { peerId: bobId, lastSeq: "1", lastCreatedAt: future() },
+        ],
+      }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      outbox: {
+        list: async () => [],
+        put: async () => undefined,
+        remove: async () => undefined,
+        clear: async () => undefined,
+      },
+      getHistory: async () => {
+        throw new ApiError(503, "unavailable");
+      },
+    });
+    await (
+      controller as unknown as { loadAccountData(): Promise<void> }
+    ).loadAccountData();
+    await controller.loadHistory(bobId, { silent: true });
+    expect(controller.getSnapshot().error).toBe("");
+    expect(
+      chatPreview(controller.getSnapshot().chats[0]!, {
+        loading: "Loading…",
+        decryptFailed: "Could not decrypt",
+        noMessages: "No messages",
+        you: "You",
+      }),
+    ).toBe("");
+    expect(
+      chatPreview(
+        {
+          peerId: bobId,
+          messages: [],
+          unreadCount: 0,
+          hasMore: true,
+        },
+        {
+          loading: "Loading…",
+          decryptFailed: "Could not decrypt",
+          noMessages: "No messages",
+          you: "You",
+        },
+      ),
+    ).toBe("");
+    expect(
+      chatPreview(
+        {
+          peerId: bobId,
+          messages: [],
+          unreadCount: 0,
+          hasMore: false,
+        },
+        {
+          loading: "Loading…",
+          decryptFailed: "Could not decrypt",
+          noMessages: "No messages",
+          you: "You",
+        },
+      ),
+    ).toBe("No messages");
+    controller.stop();
+  });
+
+  it("moves a chat to the top when a new outgoing message arrives", async () => {
+    const now = Date.now();
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      now: () => now,
+      outbox: {
+        list: async () => [],
+        put: async () => undefined,
+        remove: async () => undefined,
+        clear: async () => undefined,
+      },
+      getHistory: async () => ({ messages: [], hasMore: false }),
+    });
+    const old = new Date(now - 60_000).toISOString();
+    (
+      controller as unknown as {
+        update(patch: { chats: Array<Record<string, unknown>> }): void;
+      }
+    ).update({
+      chats: [
+        {
+          peerId: bobId,
+          messages: [],
+          unreadCount: 0,
+          hasMore: false,
+          lastCreatedAt: old,
+        },
+        {
+          peerId: "c".repeat(64),
+          messages: [],
+          unreadCount: 0,
+          hasMore: false,
+          lastCreatedAt: old,
+        },
+      ],
+    });
+    controller.selectChat(bobId);
+    await controller.sendText("Newest chat message");
+    expect(controller.getSnapshot().chats[0]?.peerId).toBe(bobId);
     controller.stop();
   });
 
