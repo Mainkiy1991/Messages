@@ -151,8 +151,10 @@ function chatWith(page: Page, peerId: string) {
 }
 
 test.describe("real browser chat", () => {
-  test.beforeEach(() => {
+  test.beforeEach(async ({ serverControl }) => {
     activeUsers = [];
+    await serverControl.stop();
+    await serverControl.start();
   });
 
   test("shows live and persisted read receipts", async ({ browser }) => {
@@ -283,6 +285,60 @@ test.describe("real browser chat", () => {
       "white-space",
       "nowrap",
     );
+  });
+
+  test("restores every message after reload and sign-in across history pages", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(a.page, bob.id);
+    await openChat(b.page, alice.id);
+
+    const expected: string[] = [];
+    for (let index = 1; index <= 52; index++) {
+      const text = `Reload history ${String(index).padStart(2, "0")}`;
+      const sender = index % 2 ? a.page : b.page;
+      await send(sender, text);
+      await expect(
+        sender.locator(".message-list .message-text").filter({ hasText: text }),
+      ).toBeVisible();
+      await expect(
+        sender
+          .locator('[data-testid="message"][data-direction="out"]')
+          .filter({ hasText: text }),
+      ).toHaveAttribute("data-status", /^(sent|delivered|read)$/u);
+      expected.push(text);
+    }
+
+    await a.page.reload();
+    await b.page.reload();
+    for (const user of [a, b]) {
+      await expect(user.page.getByTestId("connection-status")).toHaveAttribute(
+        "data-state",
+        "connected",
+      );
+    }
+    await logout(a.page);
+    await logout(b.page);
+    expect(await signIn(a.page, alice.phrase)).toBe(alice.id);
+    expect(await signIn(b.page, bob.phrase)).toBe(bob.id);
+
+    for (const [user, peerId] of [
+      [a, bob.id],
+      [b, alice.id],
+    ] as const) {
+      await chatWith(user.page, peerId).click();
+      const messageTexts = user.page.locator(".message-list .message-text");
+      while ((await messageTexts.count()) < expected.length) {
+        const loadMore = user.page.locator(".message-list .load-more");
+        await expect(loadMore).toBeVisible();
+        await loadMore.click();
+      }
+      await expect(messageTexts).toHaveText(expected);
+    }
   });
 
   test("offline mailbox delivers exactly two queued messages after sign-in", async ({

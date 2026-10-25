@@ -541,6 +541,56 @@ describe("ChatController", () => {
     });
   });
 
+  it("orders merged history and advances its cursor numerically across digit boundaries", async () => {
+    const calls: Array<string | undefined> = [];
+    const createEntry = (seq: string) => {
+      const clientMsgId = seq.padStart(32, "0");
+      return {
+        id: `history-${seq}`,
+        seq,
+        direction: "out" as const,
+        clientMsgId,
+        payload: encryptHistoryEntry({
+          historyKey: alice.historyKey,
+          clientMsgId,
+          peerId: bobId,
+          text: `message ${seq}`,
+          sentAt: Date.now(),
+        }),
+        createdAt: `2025-01-01T00:00:${seq.padStart(2, "0")}Z`,
+        deliveredAt: null,
+      };
+    };
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      fetchPeerKeys: async () => userKeys(bob),
+      getHistory: async (_peerId, _token, before) => {
+        calls.push(before);
+        return before === undefined
+          ? {
+              hasMore: true,
+              messages: ["231", "99", "101", "100"].map(createEntry),
+            }
+          : { hasMore: false, messages: ["98"].map(createEntry) };
+      },
+    });
+
+    await controller.openChat(bobId);
+    await waitFor(
+      () => controller.getSnapshot().chats[0]?.messages.length === 4,
+    );
+    expect(
+      controller.getSnapshot().chats[0]!.messages.map((message) => message.seq),
+    ).toEqual(["99", "100", "101", "231"]);
+
+    await controller.loadHistory(bobId);
+    await waitFor(() => controller.getSnapshot().chats[0]?.hasMore === false);
+    expect(calls).toEqual([undefined, "99"]);
+    expect(
+      controller.getSnapshot().chats[0]!.messages.map((message) => message.seq),
+    ).toEqual(["98", "99", "100", "101", "231"]);
+    controller.stop();
+  });
+
   it("uses the final ten ID characters when a contact name is missing", () => {
     expect(contactLabel(bobId, {})).toBe(bobId.slice(-10));
     expect(contactLabel(bobId, { [bobId]: "Bob" })).toBe("Bob");
