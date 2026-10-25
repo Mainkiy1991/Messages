@@ -490,6 +490,12 @@ test.describe("real browser chat", () => {
     const alice = await createAccount(a.page);
     const bob = await createAccount(b.page);
     await openChat(a.page, bob.id);
+    await send(a.page, "Keep the chat in the conversation list");
+    await expect(
+      a.page
+        .locator('[data-testid="message"][data-direction="out"]')
+        .filter({ hasText: "Keep the chat in the conversation list" }),
+    ).toHaveAttribute("data-status", /^(sent|delivered)$/u);
     await logout(a.page);
     await a.page.setViewportSize({ width: 360, height: 640 });
     expect(await signIn(a.page, alice.phrase)).toBe(alice.id);
