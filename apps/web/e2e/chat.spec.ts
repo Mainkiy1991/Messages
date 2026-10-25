@@ -11,6 +11,7 @@ type User = {
   page: Page;
   errors: string[];
   expectedDisconnect: boolean;
+  expectedContactsFailure: boolean;
 };
 type Fixtures = {
   serverControl: { stop(): Promise<void>; start(): Promise<void> };
@@ -35,7 +36,13 @@ async function openUser(browser: Browser): Promise<User> {
     localStorage.setItem("messages-language", "en");
   });
   const page = await context.newPage();
-  const user: User = { context, page, errors: [], expectedDisconnect: false };
+  const user: User = {
+    context,
+    page,
+    errors: [],
+    expectedDisconnect: false,
+    expectedContactsFailure: false,
+  };
   page.on("pageerror", (error) =>
     user.errors.push(`pageerror: ${error.message}`),
   );
@@ -49,8 +56,17 @@ async function openUser(browser: Browser): Promise<User> {
     const expectedApiRefusal =
       user.expectedDisconnect &&
       /localhost:3000|ERR_CONNECTION_REFUSED/u.test(message.text());
+    const expectedContactsFailure =
+      user.expectedContactsFailure &&
+      /Failed to load resource: the server responded with a status of 500/u.test(
+        message.text(),
+      );
     // Chromium emits this network diagnostic during the deliberately stopped-server window.
-    if (!expectedSocketRefusal && !expectedApiRefusal)
+    if (
+      !expectedSocketRefusal &&
+      !expectedApiRefusal &&
+      !expectedContactsFailure
+    )
       user.errors.push(`console.error: ${message.text()}`);
   });
   await page.goto("/");
@@ -250,6 +266,7 @@ test.describe("real browser chat", () => {
       a.page.locator('[data-testid="message"][data-status="sent"]'),
     ).toContainText("Persisted outgoing history");
 
+    a.expectedContactsFailure = true;
     await a.page.route("**/contacts", (route) =>
       route.fulfill({
         status: 500,
