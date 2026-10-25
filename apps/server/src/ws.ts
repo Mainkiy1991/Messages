@@ -305,7 +305,7 @@ export async function registerWebSocket(
             recent.push(time);
             readWindows.set(connection!.userId, recent);
             const maximum = await pool.query<{ seq: string }>(
-              `SELECT max(seq)::text AS seq FROM messages WHERE sender_id=$1 AND recipient_id=$2`,
+              `SELECT max(seq::bigint)::text AS seq FROM messages WHERE sender_id=$1 AND recipient_id=$2`,
               [parsed.data.peerId, connection!.userId],
             );
             if (!maximum.rows[0]?.seq) return;

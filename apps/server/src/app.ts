@@ -312,10 +312,10 @@ export async function buildApp(options: {
       `SELECT peer_id AS "peerId", last_seq::text AS "lastSeq", last_created_at AS "lastCreatedAt"
        FROM (
          SELECT CASE WHEN sender_id=$1 THEN recipient_id ELSE sender_id END AS peer_id,
-                max(seq) AS last_seq, (array_agg(created_at ORDER BY seq DESC))[1] AS last_created_at
+                max(seq::bigint) AS last_seq, (array_agg(created_at ORDER BY seq::bigint DESC))[1] AS last_created_at
          FROM messages WHERE sender_id=$1 OR recipient_id=$1
          GROUP BY CASE WHEN sender_id=$1 THEN recipient_id ELSE sender_id END
-       ) conversations ORDER BY last_seq DESC LIMIT 500`,
+       ) conversations ORDER BY last_seq::bigint DESC LIMIT 500`,
       [request.userId],
     );
     return { conversations: result.rows };
@@ -338,8 +338,8 @@ export async function buildApp(options: {
                 CASE WHEN sender_id=$1 THEN sender_copy ELSE ciphertext END AS payload,
                 created_at AS "createdAt", delivered_at AS "deliveredAt"
          FROM messages WHERE ((sender_id=$1 AND recipient_id=$2) OR (sender_id=$2 AND recipient_id=$1))
-           AND ($3::bigint IS NULL OR seq < $3::bigint)
-         ORDER BY seq DESC LIMIT $4`,
+           AND ($3::bigint IS NULL OR seq::bigint < $3::bigint)
+         ORDER BY seq::bigint DESC LIMIT $4`,
         [request.userId, request.params.peerId, before ?? null, limit + 1],
       );
       const hasMore = rows.rows.length > limit;
