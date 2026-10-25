@@ -276,7 +276,7 @@ test.describe("real browser chat", () => {
     ).toBeVisible();
     await a.page
       .locator(".conversation-head")
-      .getByRole("button", { name: /Bob/u })
+      .locator(".contact-name-trigger")
       .click();
     await a.page
       .locator(".conversation-head")
