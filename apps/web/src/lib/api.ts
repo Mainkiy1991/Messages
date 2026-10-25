@@ -166,11 +166,11 @@ export function getHistory(
 ) {
   const params = new URLSearchParams({ limit: "50" });
   if (before) params.set("before", before);
-  return request<{ messages: HistoryMessage[]; hasMore: boolean }>(
-    fetcher,
-    `/history/${peerId}?${params}`,
-    token,
-  );
+  return request<{
+    messages: HistoryMessage[];
+    hasMore: boolean;
+    peerReadUpToSeq: string | null;
+  }>(fetcher, `/history/${peerId}?${params}`, token);
 }
 
 export function getContacts(token: string, fetcher: FetchLike = fetch) {

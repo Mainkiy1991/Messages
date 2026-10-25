@@ -355,7 +355,16 @@ export async function buildApp(options: {
           createdAt: row.createdAt,
           deliveredAt: row.deliveredAt,
         }));
-      return { messages, hasMore };
+      const marker = await pool.query<{ readUpToSeq: string }>(
+        `SELECT read_up_to_seq::text AS "readUpToSeq" FROM read_markers
+         WHERE reader_id=$1 AND peer_id=$2`,
+        [request.params.peerId, request.userId],
+      );
+      return {
+        messages,
+        hasMore,
+        peerReadUpToSeq: marker.rows[0]?.readUpToSeq ?? null,
+      };
     },
   );
   app.get("/contacts", { preHandler: authenticate }, async (request) => {
