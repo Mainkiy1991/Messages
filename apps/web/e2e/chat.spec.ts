@@ -183,6 +183,49 @@ test.describe("real browser chat", () => {
     ).toBeVisible();
   });
 
+  test("keeps the composer visible with long history and restores the latest preview", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(a.page, bob.id);
+
+    await a.page.setViewportSize({ width: 360, height: 760 });
+    for (let index = 1; index <= 15; index++) {
+      await send(a.page, `Long history message ${index}`);
+      await expect(
+        a.page
+          .locator(".message-list .message-text")
+          .filter({ hasText: `Long history message ${index}` }),
+      ).toBeVisible();
+    }
+
+    const input = a.page.getByTestId("message-input");
+    const sendButton = a.page.getByTestId("send-message");
+    await expect(input).toBeInViewport();
+    await expect(sendButton).toBeInViewport();
+    const messageList = a.page.locator(".message-list");
+    expect(
+      await messageList.evaluate(
+        (list) => list.scrollHeight > list.clientHeight,
+      ),
+    ).toBe(true);
+    expect(
+      await messageList.evaluate((list) => list.scrollTop),
+    ).toBeGreaterThan(0);
+
+    await a.page.setViewportSize({ width: 1440, height: 900 });
+    await expect(input).toBeInViewport();
+    await expect(sendButton).toBeInViewport();
+    await a.page.reload();
+    const preview = chatWith(a.page, bob.id);
+    await expect(preview).toContainText("Long history message 15");
+    await expect(a.page.locator(".conversation-head")).toHaveCount(0);
+    await expect(preview.locator("span")).toHaveCSS("white-space", "nowrap");
+  });
+
   test("offline mailbox delivers exactly two queued messages after sign-in", async ({
     browser,
   }) => {

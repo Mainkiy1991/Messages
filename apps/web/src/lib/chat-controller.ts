@@ -54,6 +54,7 @@ export type Chat = {
   unreadCount: number;
   hasMore?: boolean;
   loadingHistory?: boolean;
+  historyLoadFailed?: boolean;
   lastCreatedAt?: string;
 };
 export type ChatControllerState = {
@@ -128,7 +129,7 @@ export class ChatController {
     number
   >();
   private stopped = false;
-  private historyRequests = new Set<string>();
+  private historyRequests = new Map<string, Promise<boolean>>();
   private state: ChatControllerState = {
     chats: [],
     activePeer: "",
@@ -276,20 +277,40 @@ export class ChatController {
         hasMore: true,
         lastCreatedAt: item.lastCreatedAt,
       }));
-      this.update({
-        chats: mergeChats(this.state.chats, chats).sort(
-          (a, b) =>
-            Date.parse(b.lastCreatedAt ?? "") -
-            Date.parse(a.lastCreatedAt ?? ""),
-        ),
-      });
+      this.update({ chats: sortChats(mergeChats(this.state.chats, chats)) });
       this.conversationsLoaded = true;
       this.resetAccountRetry("conversations");
+      void this.loadRecentPreviews(chats.map((chat) => chat.peerId));
     } catch (error) {
       if (this.isRetryableAccountError(error))
         this.scheduleAccountRetry("conversations");
       else this.update({ error: "server_unavailable" });
     }
+  }
+
+  private async loadRecentPreviews(peerIds: string[]): Promise<void> {
+    const candidates = peerIds
+      .slice(0, 20)
+      .filter((peerId) =>
+        this.state.chats.some(
+          (chat) =>
+            chat.peerId === peerId &&
+            chat.messages.length === 0 &&
+            chat.hasMore !== false &&
+            peerId !== this.state.activePeer,
+        ),
+      );
+    let next = 0;
+    const workers = Array.from(
+      { length: Math.min(3, candidates.length) },
+      async () => {
+        while (next < candidates.length && !this.stopped) {
+          const peerId = candidates[next++];
+          if (peerId) await this.loadHistory(peerId, { silent: true });
+        }
+      },
+    );
+    await Promise.all(workers);
   }
 
   private async loadContacts(token: string): Promise<void> {
@@ -359,7 +380,16 @@ export class ChatController {
     this.accountDataRetryAttempts.delete(resource);
   }
 
-  async loadHistory(peerId = this.state.activePeer): Promise<void> {
+  async loadHistory(
+    peerId = this.state.activePeer,
+    options: { silent?: boolean } = {},
+  ): Promise<void> {
+    const pending = this.historyRequests.get(peerId);
+    if (pending) {
+      const succeeded = await pending;
+      if (!options.silent && !succeeded) return this.loadHistory(peerId);
+      return;
+    }
     const chat = this.state.chats.find((item) => item.peerId === peerId);
     if (
       !chat ||
@@ -368,7 +398,16 @@ export class ChatController {
       this.historyRequests.has(peerId)
     )
       return;
-    this.historyRequests.add(peerId);
+    const request = this.fetchHistory(peerId, chat, options.silent ?? false);
+    this.historyRequests.set(peerId, request);
+    await request;
+  }
+
+  private async fetchHistory(
+    peerId: string,
+    chat: Chat,
+    silent: boolean,
+  ): Promise<boolean> {
     this.update({
       chats: this.state.chats.map((item) =>
         item.peerId === peerId ? { ...item, loadingHistory: true } : item,
@@ -435,15 +474,18 @@ export class ChatController {
         }),
       );
       this.update({
-        chats: this.state.chats.map((item) =>
-          item.peerId === peerId
-            ? {
-                ...item,
-                messages: mergeMessages(item.messages, messages),
-                hasMore: page.hasMore,
-                loadingHistory: false,
-              }
-            : item,
+        chats: sortChats(
+          this.state.chats.map((item) =>
+            item.peerId === peerId
+              ? {
+                  ...item,
+                  messages: mergeMessages(item.messages, messages),
+                  hasMore: page.hasMore,
+                  loadingHistory: false,
+                  historyLoadFailed: false,
+                }
+              : item,
+          ),
         ),
       });
       await Promise.all(
@@ -456,13 +498,17 @@ export class ChatController {
             ),
           ),
       );
+      return true;
     } catch {
       this.update({
         chats: this.state.chats.map((item) =>
-          item.peerId === peerId ? { ...item, loadingHistory: false } : item,
+          item.peerId === peerId
+            ? { ...item, loadingHistory: false, historyLoadFailed: true }
+            : item,
         ),
-        error: "server_unavailable",
+        ...(silent ? {} : { error: "server_unavailable" }),
       });
+      return false;
     } finally {
       this.historyRequests.delete(peerId);
     }
@@ -573,13 +619,20 @@ export class ChatController {
       return;
     }
     try {
+      const now = new Date((this.deps.now ?? Date.now)()).toISOString();
       const chats = this.state.chats.some((chat) => chat.peerId === peerId)
         ? this.state.chats
         : [
             ...this.state.chats,
-            { peerId, messages: [], unreadCount: 0, hasMore: true },
+            {
+              peerId,
+              messages: [],
+              unreadCount: 0,
+              hasMore: true,
+              lastCreatedAt: now,
+            },
           ];
-      this.update({ chats, activePeer: peerId, error: "" });
+      this.update({ chats: sortChats(chats), activePeer: peerId, error: "" });
       this.resetUnread(peerId);
       void this.loadHistory(peerId);
     } catch {
@@ -811,7 +864,7 @@ export class ChatController {
         )
         .sort(compareMessages),
     }));
-    this.update({ chats });
+    this.update({ chats: sortChats(chats) });
   }
 
   private upsertMessage(
@@ -832,7 +885,7 @@ export class ChatController {
           item.peerId === peerId ? nextChat : item,
         )
       : [...this.state.chats, nextChat];
-    this.update({ chats });
+    this.update({ chats: sortChats(chats) });
   }
 
   private resetUnread(peerId: string): void {
@@ -884,6 +937,32 @@ export function mergeMessages(
       };
   }
   return result.sort(compareMessages);
+}
+
+export function chatPreview(
+  chat: Chat,
+  labels: {
+    loading: string;
+    decryptFailed: string;
+    noMessages: string;
+    you: string;
+  },
+): string {
+  if (chat.loadingHistory) return labels.loading;
+  const latest = chat.messages.at(-1);
+  if (latest)
+    return latest.decryptFailed
+      ? labels.decryptFailed
+      : `${latest.direction === "out" ? `${labels.you}: ` : ""}${latest.text}`;
+  return chat.hasMore === false ? labels.noMessages : "";
+}
+
+function sortChats(chats: Chat[]): Chat[] {
+  return chats.slice().sort((a, b) => {
+    const aTime = a.messages.at(-1)?.createdAt ?? a.lastCreatedAt ?? "";
+    const bTime = b.messages.at(-1)?.createdAt ?? b.lastCreatedAt ?? "";
+    return bTime.localeCompare(aTime);
+  });
 }
 
 function mergeStatus(
