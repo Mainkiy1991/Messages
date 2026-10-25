@@ -1118,7 +1118,7 @@ suite("server authentication (PostgreSQL)", () => {
       [a.userId, b.userId],
     );
 
-    const actual: string[] = [];
+    const pages: string[][] = [];
     let before: string | undefined;
     let hasMore = true;
     while (hasMore) {
@@ -1136,12 +1136,17 @@ suite("server authentication (PostgreSQL)", () => {
         hasMore: boolean;
       };
       expect(page.messages.length).toBeGreaterThan(0);
-      actual.push(...page.messages.map((message) => message.seq));
+      pages.push(page.messages.map((message) => message.seq));
       before = page.messages[0]!.seq;
       hasMore = page.hasMore;
     }
 
-    expect(actual).toEqual(expected.rows.map((row) => row.seq));
+    for (const page of pages) {
+      expect(page).toEqual(
+        page.slice().sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1)),
+      );
+    }
+    expect(pages.reverse().flat()).toEqual(expected.rows.map((row) => row.seq));
   });
 
   it("stores monotonic read markers, clamps to real messages, forwards them, and exposes history", async () => {
