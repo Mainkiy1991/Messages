@@ -1,12 +1,21 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   bytesToHex,
+  decryptContactBook,
   deriveKeys,
+  encryptContactBook,
+  encryptHistoryEntry,
   encryptTextMessage,
   signKeyBinding,
 } from "@messages/crypto";
-import { ApiError, type UserKeys } from "./api.js";
-import { ChatController } from "./chat-controller.js";
+import { ApiError, type ContactBookResponse, type UserKeys } from "./api.js";
+import {
+  ChatController,
+  contactLabel,
+  mergeMessages,
+  type ChatControllerDependencies,
+  type ChatMessage,
+} from "./chat-controller.js";
 import type { ServerSession } from "../session.js";
 
 const alice = deriveKeys(
@@ -81,6 +90,8 @@ function makeController(
     clearTimer?: typeof clearTimeout;
     random?: () => number;
     logout?: (token: string) => Promise<void>;
+    getConversations?: ChatControllerDependencies["getConversations"];
+    getContacts?: ChatControllerDependencies["getContacts"];
   } = {},
 ) {
   const sockets: TestSocket[] = [];
@@ -112,6 +123,8 @@ function makeController(
       clearTimer: options.clearTimer,
       random: options.random,
       logout: options.logout,
+      getConversations: options.getConversations,
+      getContacts: options.getContacts,
     },
   );
   return { controller, sockets, tokens, getLoginCount: () => loginCount };
@@ -124,7 +137,10 @@ async function authenticate(socket: TestSocket) {
 }
 
 describe("ChatController", () => {
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
 
   it("preserves sending → sent → delivered and never downgrades on late sent", async () => {
     const f = makeController({ initialSession: session("token-a") });
@@ -490,6 +506,298 @@ describe("ChatController", () => {
     });
     await controller.logout();
     expect(logoutTokens).toEqual(["expired", "fresh"]);
+  });
+
+  it("merges history and live frames by id or clientMsgId without duplicates", () => {
+    const base: ChatMessage = {
+      id: "client",
+      clientMsgId: "same",
+      text: "pending",
+      createdAt: "2025-01-01T00:00:00.000Z",
+      direction: "out",
+      status: "sending",
+      arrivalOrder: 0,
+    };
+    const history: ChatMessage = {
+      ...base,
+      id: "server-id",
+      text: "saved",
+      seq: "4",
+      status: undefined,
+      arrivalOrder: 1,
+    };
+    const result = mergeMessages([base], [history]);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      id: "server-id",
+      clientMsgId: "same",
+      text: "saved",
+      status: "sending",
+    });
+  });
+
+  it("uses the final ten ID characters when a contact name is missing", () => {
+    expect(contactLabel(bobId, {})).toBe(bobId.slice(-10));
+    expect(contactLabel(bobId, { [bobId]: "Bob" })).toBe("Bob");
+  });
+
+  it("keeps conversations visible when contacts fail and uses ID labels", async () => {
+    vi.stubGlobal("window", {});
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getConversations: async () => ({
+        conversations: [
+          { peerId: bobId, lastSeq: "2", lastCreatedAt: future() },
+        ],
+      }),
+      getContacts: async () => {
+        throw new ApiError(500, "internal_error");
+      },
+    });
+    await (
+      controller as unknown as { loadAccountData(): Promise<void> }
+    ).loadAccountData();
+    expect(controller.getSnapshot().chats.map((chat) => chat.peerId)).toEqual([
+      bobId,
+    ]);
+    expect(controller.getSnapshot().contactsError).toBe(true);
+    expect(contactLabel(bobId, controller.getSnapshot().contacts)).toBe(
+      bobId.slice(-10),
+    );
+    controller.stop();
+  });
+
+  it("backs off account data retries by 2s, 4s, then 8s", async () => {
+    const timers: Array<{ callback: () => void; delay: number }> = [];
+    let calls = 0;
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      setTimer: ((callback: TimerHandler, delay?: number) => {
+        timers.push({ callback: callback as () => void, delay: Number(delay) });
+        return timers.length as unknown as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+      clearTimer: (() => undefined) as typeof clearTimeout,
+      getConversations: async () => {
+        calls++;
+        throw new TypeError("network unavailable");
+      },
+      getContacts: async () => ({ version: "0", blob: null }),
+    });
+    const load = (
+      controller as unknown as {
+        loadAccountData(): Promise<void>;
+      }
+    ).loadAccountData.bind(controller);
+    await load();
+    expect(timers.at(-1)?.delay).toBe(2_000);
+    timers.at(-1)!.callback();
+    await load();
+    expect(calls).toBe(2);
+    expect(timers.at(-1)?.delay).toBe(4_000);
+    timers.at(-1)!.callback();
+    await load();
+    expect(calls).toBe(3);
+    expect(timers.at(-1)?.delay).toBe(8_000);
+    controller.stop();
+  });
+
+  it("refreshes an expired session once for account data and retries the request", async () => {
+    const seenTokens: string[] = [];
+    let logins = 0;
+    const controller = new ChatController(alice, aliceId, session("expired"), {
+      login: async () => {
+        logins++;
+        return session("fresh");
+      },
+      getConversations: async (token) => {
+        seenTokens.push(token);
+        if (token === "expired") throw new ApiError(401, "unauthorized");
+        return { conversations: [] };
+      },
+      getContacts: async () => ({ version: "0", blob: null }),
+    });
+    await (
+      controller as unknown as { loadAccountData(): Promise<void> }
+    ).loadAccountData();
+    expect(seenTokens).toEqual(["expired", "fresh"]);
+    expect(logins).toBe(1);
+    controller.stop();
+  });
+
+  it("retries contact save on version conflict and overlays the local name", async () => {
+    const latest: ContactBookResponse = {
+      version: "2",
+      blob: encryptContactBook({
+        historyKey: alice.historyKey,
+        contacts: { [bobId]: "Remote" },
+      }),
+    };
+    let writes = 0;
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => latest,
+      putContacts: async (_token, version, blob) => {
+        writes++;
+        if (writes === 1) throw new ApiError(409, "version_conflict");
+        expect(version).toBe("2");
+        expect(
+          decryptContactBook({ historyKey: alice.historyKey, blob }),
+        ).toEqual({ [bobId]: "Local" });
+        return { version: "3" };
+      },
+    });
+    expect(await controller.saveContactName(bobId, "  Local  ")).toBe(true);
+    expect(writes).toBe(2);
+    expect(controller.getSnapshot().contacts[bobId]).toBe("Local");
+  });
+
+  it("stops contact conflict retries after three writes", async () => {
+    let writes = 0;
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => ({ version: String(writes + 1), blob: null }),
+      putContacts: async () => {
+        writes++;
+        throw new ApiError(409, "version_conflict");
+      },
+    });
+    expect(await controller.saveContactName(bobId, "Name")).toBe(false);
+    expect(writes).toBe(3);
+  });
+
+  it("restores an encrypted queued frame even while account HTTP endpoints are unavailable", async () => {
+    vi.stubGlobal("window", {});
+    const frame = {
+      type: "send" as const,
+      clientMsgId: "00000000000000000000000000000002",
+      to: bobId,
+      ciphertext: "encrypted-message",
+      senderCopy: encryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId: "00000000000000000000000000000002",
+        peerId: bobId,
+        text: "unsent text",
+        sentAt: Date.now(),
+      }),
+    };
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      outbox: {
+        list: async () => [frame],
+        put: async () => undefined,
+        remove: async () => undefined,
+        clear: async () => undefined,
+      },
+      getConversations: async () => {
+        throw new Error("offline");
+      },
+      getContacts: async () => {
+        throw new Error("offline");
+      },
+    });
+    controller.start();
+    await waitFor(() =>
+      controller.getSnapshot().chats.some((chat) => chat.peerId === bobId),
+    );
+    const message = controller.getSnapshot().chats[0]?.messages[0];
+    expect(message?.clientMsgId).toBe(frame.clientMsgId);
+    expect(message?.text).toBe("unsent text");
+    expect(message?.frame).toEqual(frame);
+    controller.stop();
+  });
+
+  it("displays a history placeholder and continues after a broken payload", async () => {
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      fetchPeerKeys: async () => userKeys(bob),
+      getHistory: async () => ({
+        hasMore: false,
+        messages: [
+          {
+            id: "ok",
+            seq: "1",
+            direction: "out",
+            clientMsgId: "00000000000000000000000000000001",
+            payload: "broken",
+            createdAt: "2025-01-01T00:00:00.000Z",
+            deliveredAt: null,
+          },
+        ],
+      }),
+    });
+    await controller.openChat(bobId);
+    await waitFor(() => controller.getSnapshot().chats[0]?.hasMore === false);
+    expect(controller.getSnapshot().chats[0]?.messages[0]?.decryptFailed).toBe(
+      true,
+    );
+  });
+
+  it("sets outgoing history status from deliveredAt and does not downgrade it", async () => {
+    const idSent = "00000000000000000000000000000011";
+    const idDelivered = "00000000000000000000000000000012";
+    const removed: string[] = [];
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      outbox: {
+        list: async () => [],
+        put: async () => undefined,
+        remove: async (_userId, id) => {
+          removed.push(id);
+        },
+        clear: async () => undefined,
+      },
+      fetchPeerKeys: async () => userKeys(bob),
+      getHistory: async () => ({
+        hasMore: false,
+        messages: [
+          {
+            id: "history-sent",
+            seq: "1",
+            direction: "out",
+            clientMsgId: idSent,
+            payload: encryptHistoryEntry({
+              historyKey: alice.historyKey,
+              clientMsgId: idSent,
+              peerId: bobId,
+              text: "sent history",
+              sentAt: Date.now(),
+            }),
+            createdAt: new Date().toISOString(),
+            deliveredAt: null,
+          },
+          {
+            id: "history-delivered",
+            seq: "2",
+            direction: "out",
+            clientMsgId: idDelivered,
+            payload: encryptHistoryEntry({
+              historyKey: alice.historyKey,
+              clientMsgId: idDelivered,
+              peerId: bobId,
+              text: "delivered history",
+              sentAt: Date.now(),
+            }),
+            createdAt: new Date().toISOString(),
+            deliveredAt: new Date().toISOString(),
+          },
+        ],
+      }),
+    });
+    await controller.openChat(bobId);
+    await waitFor(() => controller.getSnapshot().chats[0]?.hasMore === false);
+    await waitFor(() => removed.length === 2);
+    const messages = controller.getSnapshot().chats[0]!.messages;
+    expect(messages.map((message) => message.status)).toEqual([
+      "sent",
+      "delivered",
+    ]);
+    expect(removed).toEqual([idSent, idDelivered]);
+    expect(
+      mergeMessages(
+        [{ ...messages[1]!, status: "delivered" }],
+        [{ ...messages[1]!, status: "sending" }],
+      )[0]!.status,
+    ).toBe("delivered");
+    expect(
+      mergeMessages(
+        [{ ...messages[0]!, status: "sent" }],
+        [{ ...messages[0]!, status: "sending" }],
+      )[0]!.status,
+    ).toBe("sent");
+    controller.stop();
   });
 
   it("resends an unconfirmed frame after reconnect with the same payload and clientMsgId", async () => {

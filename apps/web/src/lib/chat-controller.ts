@@ -1,10 +1,23 @@
 import {
+  decryptContactBook,
+  decryptHistoryEntry,
   decryptTextMessage,
+  encryptContactBook,
   encryptHistoryEntry,
   encryptTextMessage,
   newClientMsgId,
   type DerivedKeys,
 } from "@messages/crypto";
+import {
+  getContacts,
+  getConversations,
+  getHistory,
+  putContacts,
+  type ContactBookResponse,
+  type ConversationSummary,
+  type HistoryMessage,
+} from "./api.js";
+import { indexedDbOutbox, type OutboxStore } from "./outbox.js";
 import type { ServerSession } from "../session.js";
 import {
   ApiError,
@@ -33,17 +46,23 @@ export type ChatMessage = {
   decryptFailed?: boolean;
   frame?: OutgoingFrame;
   arrivalOrder: number;
+  seq?: string;
 };
 export type Chat = {
   peerId: string;
   messages: ChatMessage[];
   unreadCount: number;
+  hasMore?: boolean;
+  loadingHistory?: boolean;
+  lastCreatedAt?: string;
 };
 export type ChatControllerState = {
   chats: Chat[];
   activePeer: string;
   connectionState: SocketState;
   error: string;
+  contacts: Record<string, string>;
+  contactsError: boolean;
 };
 export type ChatError =
   | "invalid_id"
@@ -73,6 +92,21 @@ export type ChatControllerDependencies = {
   now?: () => number;
   makeClientMsgId?: () => string;
   onChange?: (state: ChatControllerState) => void;
+  getConversations?: (
+    token: string,
+  ) => Promise<{ conversations: ConversationSummary[] }>;
+  getHistory?: (
+    peerId: string,
+    token: string,
+    before?: string,
+  ) => Promise<{ messages: HistoryMessage[]; hasMore: boolean }>;
+  getContacts?: (token: string) => Promise<ContactBookResponse>;
+  putContacts?: (
+    token: string,
+    version: string,
+    blob: string,
+  ) => Promise<{ version: string }>;
+  outbox?: OutboxStore;
 };
 
 export class ChatController {
@@ -80,11 +114,28 @@ export class ChatController {
   private readonly peerKeys = new Map<string, Uint8Array>();
   private readonly peerKeyRequests = new Map<string, Promise<Uint8Array>>();
   private arrivalOrder = 0;
+  private contactsVersion = "0";
+  private conversationsLoaded = false;
+  private contactsLoaded = false;
+  private outboxLoaded = false;
+  private accountDataLoading: Promise<void> | null = null;
+  private readonly accountDataRetryTimers = new Map<
+    "conversations" | "contacts",
+    ReturnType<typeof setTimeout>
+  >();
+  private readonly accountDataRetryAttempts = new Map<
+    "conversations" | "contacts",
+    number
+  >();
+  private stopped = false;
+  private historyRequests = new Set<string>();
   private state: ChatControllerState = {
     chats: [],
     activePeer: "",
     connectionState: "offline",
     error: "",
+    contacts: {},
+    contactsError: false,
   };
 
   constructor(
@@ -97,19 +148,32 @@ export class ChatController {
       keys,
       session,
       {
-        onState: (connectionState) => this.update({ connectionState }),
+        onState: (connectionState) => {
+          this.update({ connectionState });
+          if (
+            connectionState === "connected" &&
+            typeof window !== "undefined"
+          ) {
+            void this.loadAccountData();
+            if (this.state.activePeer)
+              void this.loadHistory(this.state.activePeer);
+          }
+        },
         onFrame: (frame) => this.handleFrame(frame),
         onSend: (clientMsgId) =>
           this.updateMessage(clientMsgId, (message) => ({
             ...message,
-            status: message.status === "delivered" ? "delivered" : "sending",
+            status: mergeStatus(message.status, "sending"),
             error: undefined,
           })),
         onSendTimeout: (clientMsgId) =>
           this.updateMessage(clientMsgId, (message) => ({
             ...message,
-            status: message.status === "delivered" ? "delivered" : "error",
-            error: message.status === "delivered" ? undefined : "send_failed",
+            status: mergeStatus(message.status, "error"),
+            error:
+              message.status === "delivered" || message.status === "sent"
+                ? undefined
+                : "send_failed",
           })),
       },
       {
@@ -131,16 +195,352 @@ export class ChatController {
     return this.connection.currentToken();
   }
   start(): void {
+    this.stopped = false;
+    if (typeof window !== "undefined") void this.loadAccountData();
     this.connection.start();
   }
 
+  private async loadAccountData(): Promise<void> {
+    if (this.accountDataLoading) return this.accountDataLoading;
+    this.accountDataLoading = (async () => {
+      if (!this.outboxLoaded) {
+        try {
+          const queued = await (this.deps.outbox ?? indexedDbOutbox).list(
+            this.userId,
+          );
+          for (const frame of queued) {
+            let text = "";
+            let decryptFailed = false;
+            try {
+              text = decryptHistoryEntry({
+                historyKey: this.keys.historyKey,
+                clientMsgId: frame.clientMsgId,
+                peerId: frame.to,
+                entry: frame.senderCopy,
+              }).text;
+            } catch {
+              decryptFailed = true;
+            }
+            this.upsertMessage(frame.to, {
+              id: frame.clientMsgId,
+              clientMsgId: frame.clientMsgId,
+              text,
+              createdAt: new Date().toISOString(),
+              direction: "out",
+              status: "sending",
+              frame,
+              ...(decryptFailed ? { decryptFailed: true } : {}),
+              arrivalOrder: this.arrivalOrder++,
+            });
+            this.connection.send(frame);
+          }
+          this.outboxLoaded = true;
+        } catch {
+          this.update({ error: "server_unavailable" });
+        }
+      }
+      if (this.conversationsLoaded && this.contactsLoaded) return;
+      let session: ServerSession;
+      try {
+        session = await this.connection.ensureSession();
+      } catch (error) {
+        if (this.isRetryableAccountError(error)) {
+          if (!this.conversationsLoaded)
+            this.scheduleAccountRetry("conversations");
+          if (!this.contactsLoaded) this.scheduleAccountRetry("contacts");
+        }
+        return;
+      }
+      const tasks: Promise<void>[] = [];
+      if (!this.conversationsLoaded)
+        tasks.push(this.loadConversations(session.token));
+      if (!this.contactsLoaded) tasks.push(this.loadContacts(session.token));
+      await Promise.allSettled(tasks);
+    })().finally(() => {
+      this.accountDataLoading = null;
+    });
+    return this.accountDataLoading;
+  }
+
+  private async loadConversations(token: string): Promise<void> {
+    const get =
+      this.deps.getConversations ??
+      ((value: string) => getConversations(value, this.deps.fetcher));
+    try {
+      const result = await this.withFreshSession(token, get);
+      if (this.stopped) return;
+      const chats = result.conversations.map((item) => ({
+        peerId: item.peerId,
+        messages: [],
+        unreadCount: 0,
+        hasMore: true,
+        lastCreatedAt: item.lastCreatedAt,
+      }));
+      this.update({
+        chats: mergeChats(this.state.chats, chats).sort(
+          (a, b) =>
+            Date.parse(b.lastCreatedAt ?? "") -
+            Date.parse(a.lastCreatedAt ?? ""),
+        ),
+      });
+      this.conversationsLoaded = true;
+      this.resetAccountRetry("conversations");
+    } catch (error) {
+      if (this.isRetryableAccountError(error))
+        this.scheduleAccountRetry("conversations");
+      else this.update({ error: "server_unavailable" });
+    }
+  }
+
+  private async loadContacts(token: string): Promise<void> {
+    const get =
+      this.deps.getContacts ??
+      ((value: string) => getContacts(value, this.deps.fetcher));
+    try {
+      const book = await this.withFreshSession(token, get);
+      if (this.stopped) return;
+      let contacts: Record<string, string> = {};
+      if (book.blob) {
+        contacts = decryptContactBook({
+          historyKey: this.keys.historyKey,
+          blob: book.blob,
+        });
+      }
+      this.contactsVersion = book.version;
+      this.update({ contacts, contactsError: false });
+      this.contactsLoaded = true;
+      this.resetAccountRetry("contacts");
+    } catch (error) {
+      if (this.stopped) return;
+      this.update({ contactsError: true });
+      if (this.isRetryableAccountError(error))
+        this.scheduleAccountRetry("contacts");
+      else this.contactsLoaded = true;
+    }
+  }
+
+  private async withFreshSession<T>(
+    token: string,
+    request: (token: string) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await request(token);
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 401) throw error;
+      const session = await this.connection.refreshSession();
+      return request(session.token);
+    }
+  }
+
+  private isRetryableAccountError(error: unknown): boolean {
+    if (error instanceof ApiError)
+      return error.status === 0 || error.status >= 500;
+    return error instanceof TypeError;
+  }
+
+  private scheduleAccountRetry(resource: "conversations" | "contacts"): void {
+    if (this.stopped || this.accountDataRetryTimers.has(resource)) return;
+    const attempt = this.accountDataRetryAttempts.get(resource) ?? 0;
+    const delay = Math.min(60_000, 2_000 * 2 ** attempt);
+    this.accountDataRetryAttempts.set(resource, attempt + 1);
+    const setTimer = this.deps.setTimer ?? globalThis.setTimeout;
+    const timer = setTimer(() => {
+      this.accountDataRetryTimers.delete(resource);
+      if (this.stopped) return;
+      void this.loadAccountData();
+    }, delay);
+    this.accountDataRetryTimers.set(resource, timer);
+  }
+
+  private resetAccountRetry(resource: "conversations" | "contacts"): void {
+    const timer = this.accountDataRetryTimers.get(resource);
+    if (timer) (this.deps.clearTimer ?? globalThis.clearTimeout)(timer);
+    this.accountDataRetryTimers.delete(resource);
+    this.accountDataRetryAttempts.delete(resource);
+  }
+
+  async loadHistory(peerId = this.state.activePeer): Promise<void> {
+    const chat = this.state.chats.find((item) => item.peerId === peerId);
+    if (
+      !chat ||
+      chat.loadingHistory ||
+      chat.hasMore === false ||
+      this.historyRequests.has(peerId)
+    )
+      return;
+    this.historyRequests.add(peerId);
+    this.update({
+      chats: this.state.chats.map((item) =>
+        item.peerId === peerId ? { ...item, loadingHistory: true } : item,
+      ),
+    });
+    try {
+      const oldest = chat.messages
+        .map((message) => message.seq)
+        .filter((seq): seq is string => !!seq)
+        .sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1))[0];
+      const session = await this.connection.ensureSession();
+      const page = await (
+        this.deps.getHistory ??
+        ((id, token, before) =>
+          getHistory(id, token, before, this.deps.fetcher))
+      )(peerId, session.token, oldest);
+      const messages = await Promise.all(
+        page.messages.map(async (entry) => {
+          try {
+            const text =
+              entry.direction === "out"
+                ? decryptHistoryEntry({
+                    historyKey: this.keys.historyKey,
+                    clientMsgId: entry.clientMsgId,
+                    peerId,
+                    entry: entry.payload,
+                  }).text
+                : decryptTextMessage({
+                    recipientEncryptionPrivateKey:
+                      this.keys.encryption.privateKey,
+                    senderEncryptionPublicKey:
+                      await this.getVerifiedPeerKey(peerId),
+                    senderId: peerId,
+                    recipientId: this.userId,
+                    ciphertext: entry.payload,
+                  }).text;
+            return {
+              id: entry.id,
+              clientMsgId: entry.clientMsgId,
+              seq: entry.seq,
+              text,
+              createdAt: entry.createdAt,
+              direction: entry.direction,
+              ...(entry.direction === "out"
+                ? { status: entry.deliveredAt ? "delivered" : "sent" }
+                : {}),
+              arrivalOrder: this.arrivalOrder++,
+            } as ChatMessage;
+          } catch {
+            return {
+              id: entry.id,
+              clientMsgId: entry.clientMsgId,
+              seq: entry.seq,
+              text: "",
+              createdAt: entry.createdAt,
+              direction: entry.direction,
+              ...(entry.direction === "out"
+                ? { status: entry.deliveredAt ? "delivered" : "sent" }
+                : {}),
+              decryptFailed: true,
+              arrivalOrder: this.arrivalOrder++,
+            } as ChatMessage;
+          }
+        }),
+      );
+      this.update({
+        chats: this.state.chats.map((item) =>
+          item.peerId === peerId
+            ? {
+                ...item,
+                messages: mergeMessages(item.messages, messages),
+                hasMore: page.hasMore,
+                loadingHistory: false,
+              }
+            : item,
+        ),
+      });
+      await Promise.all(
+        page.messages
+          .filter((entry) => entry.direction === "out")
+          .map((entry) =>
+            (this.deps.outbox ?? indexedDbOutbox).remove(
+              this.userId,
+              entry.clientMsgId,
+            ),
+          ),
+      );
+    } catch {
+      this.update({
+        chats: this.state.chats.map((item) =>
+          item.peerId === peerId ? { ...item, loadingHistory: false } : item,
+        ),
+        error: "server_unavailable",
+      });
+    } finally {
+      this.historyRequests.delete(peerId);
+    }
+  }
+
+  async saveContactName(peerId: string, value: string): Promise<boolean> {
+    const name = value.trim();
+    if (Array.from(name).length > 64) return false;
+    const local = { ...this.state.contacts };
+    if (name) local[peerId] = name;
+    else delete local[peerId];
+    const save =
+      this.deps.putContacts ??
+      ((token, version, blob) =>
+        putContacts(token, version, blob, this.deps.fetcher));
+    const fetchBook =
+      this.deps.getContacts ??
+      ((token) => getContacts(token, this.deps.fetcher));
+    try {
+      const session = await this.connection.ensureSession();
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const result = await save(
+            session.token,
+            this.contactsVersion,
+            encryptContactBook({
+              historyKey: this.keys.historyKey,
+              contacts: local,
+            }),
+          );
+          this.contactsVersion = result.version;
+          this.update({ contacts: local, contactsError: false });
+          return true;
+        } catch (error) {
+          if (
+            !(error instanceof ApiError) ||
+            error.status !== 409 ||
+            error.code !== "version_conflict" ||
+            attempt === 2
+          )
+            throw error;
+          const conflict = error.data;
+          const latest: ContactBookResponse =
+            conflict &&
+            typeof conflict.version === "string" &&
+            (typeof conflict.blob === "string" || conflict.blob === null)
+              ? { version: conflict.version, blob: conflict.blob }
+              : await fetchBook(session.token);
+          const remote = latest.blob
+            ? decryptContactBook({
+                historyKey: this.keys.historyKey,
+                blob: latest.blob,
+              })
+            : {};
+          if (name) remote[peerId] = name;
+          else delete remote[peerId];
+          Object.assign(local, remote);
+          this.contactsVersion = latest.version;
+        }
+      }
+    } catch {
+      /* localized UI error is displayed by the caller */
+    }
+    return false;
+  }
+
   stop(): void {
+    this.stopped = true;
+    for (const timer of this.accountDataRetryTimers.values())
+      (this.deps.clearTimer ?? globalThis.clearTimeout)(timer);
+    this.accountDataRetryTimers.clear();
     this.connection.stop();
   }
 
   async logout(): Promise<void> {
     const token = this.connection.currentToken();
     this.connection.stop();
+    this.stop();
     if (!token) return;
     const logout = this.deps.logout ?? logoutFromServer;
     try {
@@ -175,9 +575,13 @@ export class ChatController {
     try {
       const chats = this.state.chats.some((chat) => chat.peerId === peerId)
         ? this.state.chats
-        : [...this.state.chats, { peerId, messages: [], unreadCount: 0 }];
+        : [
+            ...this.state.chats,
+            { peerId, messages: [], unreadCount: 0, hasMore: true },
+          ];
       this.update({ chats, activePeer: peerId, error: "" });
       this.resetUnread(peerId);
+      void this.loadHistory(peerId);
     } catch {
       this.setError("server_unavailable");
     }
@@ -187,6 +591,7 @@ export class ChatController {
     if (!this.state.chats.some((chat) => chat.peerId === peerId)) return;
     this.update({ activePeer: peerId, error: "" });
     this.resetUnread(peerId);
+    void this.loadHistory(peerId);
   }
 
   closeActiveChat(): void {
@@ -239,6 +644,7 @@ export class ChatController {
         frame,
         arrivalOrder: this.arrivalOrder++,
       };
+      await (this.deps.outbox ?? indexedDbOutbox).put(this.userId, frame);
       this.upsertMessage(peerId, message);
       this.update({ error: "" });
       this.connection.send(frame);
@@ -355,9 +761,13 @@ export class ChatController {
           typeof frame.createdAt === "string"
             ? frame.createdAt
             : message.createdAt,
-        status: message.status === "delivered" ? "delivered" : "sent",
+        status: mergeStatus(message.status, "sent"),
         error: undefined,
       }));
+      await (this.deps.outbox ?? indexedDbOutbox).remove(
+        this.userId,
+        frame.clientMsgId,
+      );
       return;
     }
     if (frame.type === "delivered" && typeof frame.clientMsgId === "string") {
@@ -414,10 +824,7 @@ export class ChatController {
       ? {
           ...chat,
           unreadCount: unreadCount ?? chat.unreadCount,
-          messages: [
-            ...chat.messages.filter((item) => item.id !== message.id),
-            message,
-          ].sort(compareMessages),
+          messages: mergeMessages(chat.messages, [message]),
         }
       : { peerId, unreadCount: unreadCount ?? 0, messages: [message] };
     const chats = chat
@@ -447,9 +854,75 @@ export class ChatController {
 }
 
 function compareMessages(a: ChatMessage, b: ChatMessage): number {
+  if (a.seq && b.seq && a.seq !== b.seq)
+    return BigInt(a.seq) < BigInt(b.seq) ? -1 : 1;
   const time = Date.parse(a.createdAt) - Date.parse(b.createdAt);
   return (
     (Number.isFinite(time) ? time : a.createdAt.localeCompare(b.createdAt)) ||
     a.arrivalOrder - b.arrivalOrder
   );
+}
+
+export function mergeMessages(
+  existing: ChatMessage[],
+  incoming: ChatMessage[],
+): ChatMessage[] {
+  const result = [...existing];
+  for (const message of incoming) {
+    const index = result.findIndex(
+      (item) =>
+        item.id === message.id ||
+        (!!item.clientMsgId && item.clientMsgId === message.clientMsgId),
+    );
+    if (index < 0) result.push(message);
+    else
+      result[index] = {
+        ...result[index]!,
+        ...message,
+        status: mergeStatus(result[index]!.status, message.status),
+        frame: message.frame ?? result[index]!.frame,
+      };
+  }
+  return result.sort(compareMessages);
+}
+
+function mergeStatus(
+  current: SendStatus | undefined,
+  incoming: SendStatus | undefined,
+): SendStatus | undefined {
+  if (!incoming) return current;
+  if (!current) return incoming;
+  if (incoming === "error")
+    return current === "sent" || current === "delivered" ? current : "error";
+  if (current === "error") return incoming;
+  const rank: Record<Exclude<SendStatus, "error">, number> = {
+    sending: 0,
+    sent: 1,
+    delivered: 2,
+  };
+  return rank[incoming] > rank[current] ? incoming : current;
+}
+
+export function contactLabel(
+  peerId: string,
+  contacts: Record<string, string>,
+): string {
+  return contacts[peerId] || peerId.slice(-10);
+}
+
+function mergeChats(existing: Chat[], incoming: Chat[]): Chat[] {
+  const result = [...existing];
+  for (const chat of incoming) {
+    const index = result.findIndex((item) => item.peerId === chat.peerId);
+    if (index < 0) result.push(chat);
+    else
+      result[index] = {
+        ...chat,
+        ...result[index]!,
+        hasMore: result[index]!.hasMore ?? chat.hasMore,
+        lastCreatedAt: result[index]!.lastCreatedAt ?? chat.lastCreatedAt,
+        messages: mergeMessages(chat.messages, result[index]!.messages),
+      };
+  }
+  return result;
 }

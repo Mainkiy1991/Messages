@@ -1109,6 +1109,43 @@ suite("server authentication (PostgreSQL)", () => {
     ).toBe(401);
   });
 
+  it("allows the contacts PUT preflight only from the configured web origin", async () => {
+    const allowed = await app.inject({
+      method: "OPTIONS",
+      url: "/contacts",
+      headers: {
+        origin: "http://localhost:5173",
+        "access-control-request-method": "PUT",
+        "access-control-request-headers": "authorization,content-type",
+      },
+    });
+    expect(allowed.statusCode).toBe(204);
+    expect(allowed.headers["access-control-allow-origin"]).toBe(
+      "http://localhost:5173",
+    );
+    expect(allowed.headers["access-control-allow-methods"]).toContain("PUT");
+    const allowedHeaders = String(
+      allowed.headers["access-control-allow-headers"],
+    )
+      .toLowerCase()
+      .split(/,\s*/u);
+    expect(allowedHeaders).toContain("authorization");
+    expect(allowedHeaders).toContain("content-type");
+
+    const denied = await app.inject({
+      method: "OPTIONS",
+      url: "/contacts",
+      headers: {
+        origin: "http://evil.example",
+        "access-control-request-method": "PUT",
+        "access-control-request-headers": "authorization,content-type",
+      },
+    });
+    expect(denied.headers["access-control-allow-origin"]).toBeUndefined();
+    expect(denied.headers["access-control-allow-methods"]).toBeUndefined();
+    expect(denied.headers["access-control-allow-headers"]).toBeUndefined();
+  });
+
   it("stores contacts with optimistic locking, atomic conflicts, and user isolation", async () => {
     const a = await createAccount();
     const b = await createAccount();

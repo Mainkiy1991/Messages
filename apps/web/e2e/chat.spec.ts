@@ -11,6 +11,7 @@ type User = {
   page: Page;
   errors: string[];
   expectedDisconnect: boolean;
+  expectedContactsFailure: boolean;
 };
 type Fixtures = {
   serverControl: { stop(): Promise<void>; start(): Promise<void> };
@@ -35,7 +36,13 @@ async function openUser(browser: Browser): Promise<User> {
     localStorage.setItem("messages-language", "en");
   });
   const page = await context.newPage();
-  const user: User = { context, page, errors: [], expectedDisconnect: false };
+  const user: User = {
+    context,
+    page,
+    errors: [],
+    expectedDisconnect: false,
+    expectedContactsFailure: false,
+  };
   page.on("pageerror", (error) =>
     user.errors.push(`pageerror: ${error.message}`),
   );
@@ -46,8 +53,20 @@ async function openUser(browser: Browser): Promise<User> {
       /^WebSocket connection to 'ws:\/\/localhost:3000\/ws' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED$/u.test(
         message.text(),
       );
+    const expectedApiRefusal =
+      user.expectedDisconnect &&
+      /localhost:3000|ERR_CONNECTION_REFUSED/u.test(message.text());
+    const expectedContactsFailure =
+      user.expectedContactsFailure &&
+      /Failed to load resource: the server responded with a status of 500/u.test(
+        message.text(),
+      );
     // Chromium emits this network diagnostic during the deliberately stopped-server window.
-    if (!expectedSocketRefusal)
+    if (
+      !expectedSocketRefusal &&
+      !expectedApiRefusal &&
+      !expectedContactsFailure
+    )
       user.errors.push(`console.error: ${message.text()}`);
   });
   await page.goto("/");
@@ -117,9 +136,7 @@ async function send(page: Page, message: string): Promise<void> {
 }
 
 function chatWith(page: Page, peerId: string) {
-  return page
-    .locator('[data-testid="chat-item"]')
-    .filter({ has: page.locator(`text=${peerId.slice(-10)}`) });
+  return page.locator(`[data-testid="chat-item"][data-peer-id="${peerId}"]`);
 }
 
 test.describe("real browser chat", () => {
@@ -188,6 +205,92 @@ test.describe("real browser chat", () => {
     ]);
   });
 
+  test("restores conversations and encrypted contacts in a clean browser context", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(a.page, bob.id);
+    await logout(b.page);
+    await send(a.page, "History survives a reload");
+    await expect(
+      a.page
+        .locator('[data-testid="message"]')
+        .filter({ hasText: "History survives a reload" }),
+    ).toBeVisible();
+    await a.page
+      .locator(".conversation-head")
+      .getByLabel("Contact name (optional)")
+      .fill("Bob Contact");
+    await a.page.getByRole("button", { name: "Save name" }).click();
+    await expect(a.page.locator(".conversation-head")).toContainText(
+      "Bob Contact",
+    );
+    await a.page.reload();
+    await expect(chatWith(a.page, bob.id)).toContainText("Bob Contact");
+    await chatWith(a.page, bob.id).click();
+    await expect(a.page.locator(".message-list .message-text")).toContainText(
+      "History survives a reload",
+    );
+
+    expect(await signIn(b.page, bob.phrase)).toBe(bob.id);
+    const bobChat = chatWith(b.page, alice.id);
+    await expect(bobChat).toBeVisible();
+    await bobChat.click();
+    await expect(b.page.locator(".message-list .message-text")).toContainText(
+      "History survives a reload",
+    );
+
+    const clean = await openUser(browser);
+    expect(await signIn(clean.page, alice.phrase)).toBe(alice.id);
+    await expect(
+      clean.page
+        .locator('[data-testid="chat-item"]')
+        .filter({ hasText: "Bob Contact" }),
+    ).toBeVisible();
+  });
+
+  test("shows chats and sent history when contacts return 500 after reload", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(a.page, bob.id);
+    await logout(b.page);
+    await send(a.page, "Persisted outgoing history");
+    await expect(
+      a.page.locator('[data-testid="message"][data-status="sent"]'),
+    ).toContainText("Persisted outgoing history");
+
+    a.expectedContactsFailure = true;
+    await a.page.route("**/contacts", (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: "{}",
+      }),
+    );
+    await a.page.reload();
+    const restoredChat = chatWith(a.page, bob.id);
+    await expect(restoredChat).toBeVisible();
+    await restoredChat.click();
+    const restoredMessage = a.page
+      .locator('[data-testid="message"]')
+      .filter({ hasText: "Persisted outgoing history" });
+    await expect(restoredMessage).toBeVisible();
+    await expect(restoredMessage).toHaveAttribute(
+      "data-status",
+      /^(sent|delivered)$/u,
+    );
+    await expect(
+      a.page.getByText("Could not load contacts. Chats are shown with IDs."),
+    ).toBeVisible();
+  });
+
   test("both clients reconnect after the server restarts without reloading", async ({
     browser,
     serverControl,
@@ -201,8 +304,7 @@ test.describe("real browser chat", () => {
     await expect(
       a.page.locator('[data-testid="message"][data-status="delivered"]'),
     ).toBeVisible();
-    await b.page.getByTestId("peer-id-input").fill(alice.id);
-    await b.page.getByTestId("new-chat").click();
+    await openChat(b.page, alice.id);
 
     a.expectedDisconnect = true;
     b.expectedDisconnect = true;
@@ -218,7 +320,26 @@ test.describe("real browser chat", () => {
       { timeout: 20_000 },
     );
     await send(b.page, "During outage");
-    await serverControl.start();
+    await expect(
+      b.page.locator('[data-testid="message"][data-status="sending"]'),
+    ).toContainText("During outage");
+    await b.page.reload();
+    try {
+      await expect(b.page.getByTestId("user-id")).toBeVisible();
+      await expect(b.page.getByTestId("connection-status")).toHaveAttribute(
+        "data-state",
+        "offline",
+        { timeout: 20_000 },
+      );
+      const restoredChat = chatWith(b.page, alice.id);
+      await expect(restoredChat).toBeVisible();
+      await restoredChat.click();
+      await expect(
+        b.page.locator('[data-testid="message"][data-status="sending"]'),
+      ).toContainText("During outage");
+    } finally {
+      await serverControl.start();
+    }
 
     await expect(a.page.getByTestId("connection-status")).toHaveAttribute(
       "data-state",

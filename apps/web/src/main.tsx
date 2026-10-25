@@ -22,6 +22,7 @@ import {
 } from "./session.js";
 import {
   ChatController,
+  contactLabel,
   type ChatControllerState,
 } from "./lib/chat-controller.js";
 import type { ChatMessage } from "./lib/chat-controller.js";
@@ -47,8 +48,12 @@ function App() {
     activePeer: "",
     connectionState: "offline",
     error: "",
+    contacts: {},
+    contactsError: false,
   });
   const [peerInput, setPeerInput] = useState("");
+  const [newContactName, setNewContactName] = useState("");
+  const [contactNameDraft, setContactNameDraft] = useState("");
   const [draft, setDraft] = useState("");
   const [chatError, setChatError] = useState("");
   const [mobileChat, setMobileChat] = useState(false);
@@ -76,6 +81,8 @@ function App() {
       activePeer: "",
       connectionState: "offline",
       error: "",
+      contacts: {},
+      contactsError: false,
     });
     setPhrase("");
     setScreen("home");
@@ -134,6 +141,8 @@ function App() {
       activePeer: "",
       connectionState: "offline",
       error: "",
+      contacts: {},
+      contactsError: false,
     });
     setPhrase("");
     setShowLogoutConfirmation(false);
@@ -182,7 +191,16 @@ function App() {
     const next = controllerRef.current?.getSnapshot();
     setChatError(next?.error ? errorText(next.error) : "");
     if (next?.activePeer) {
+      if (newContactName.trim()) {
+        const saved = await controllerRef.current?.saveContactName(
+          next.activePeer,
+          newContactName,
+        );
+        if (!saved) setChatError(t.contactSaveFailed);
+      }
       setPeerInput("");
+      setNewContactName("");
+      setContactNameDraft(chatState.contacts[next.activePeer] ?? "");
       setMobileChat(true);
     }
   }
@@ -191,7 +209,7 @@ function App() {
     event?.preventDefault();
     const text = draft;
     await controllerRef.current?.sendText(text);
-    setDraft("");
+    setDraft((current) => (current === text ? "" : current));
     const error = controllerRef.current?.getSnapshot().error;
     setChatError(error ? errorText(error) : "");
   }
@@ -366,6 +384,12 @@ function App() {
                     onChange={(event) => setPeerInput(event.target.value)}
                     placeholder={t.peerId}
                   />
+                  <input
+                    aria-label={t.contactName}
+                    value={newContactName}
+                    onChange={(event) => setNewContactName(event.target.value)}
+                    placeholder={t.contactName}
+                  />
                   <button data-testid="new-chat" className="secondary">
                     {t.newChat}
                   </button>
@@ -375,8 +399,12 @@ function App() {
                   {chats
                     .slice()
                     .sort((a, b) =>
-                      (b.messages.at(-1)?.createdAt ?? "").localeCompare(
-                        a.messages.at(-1)?.createdAt ?? "",
+                      (
+                        b.messages.at(-1)?.createdAt ??
+                        b.lastCreatedAt ??
+                        ""
+                      ).localeCompare(
+                        a.messages.at(-1)?.createdAt ?? a.lastCreatedAt ?? "",
                       ),
                     )
                     .map((chat) => (
@@ -387,10 +415,15 @@ function App() {
                         key={chat.peerId}
                         onClick={() => {
                           controllerRef.current?.selectChat(chat.peerId);
+                          setContactNameDraft(
+                            chatState.contacts[chat.peerId] ?? "",
+                          );
                           setMobileChat(true);
                         }}
                       >
-                        <strong>{chat.peerId.slice(-10)}</strong>
+                        <strong>
+                          {contactLabel(chat.peerId, chatState.contacts)}
+                        </strong>
                         <span>
                           {chat.messages.at(-1)?.text ?? t.noMessages}
                         </span>
@@ -402,10 +435,12 @@ function App() {
                             {chat.unreadCount}
                           </b>
                         )}
-                        {chat.messages.at(-1) && (
+                        {(chat.messages.at(-1)?.createdAt ??
+                          chat.lastCreatedAt) && (
                           <small>
                             {new Date(
-                              chat.messages.at(-1)!.createdAt,
+                              chat.messages.at(-1)?.createdAt ??
+                                chat.lastCreatedAt!,
                             ).toLocaleTimeString(
                               language === "ru" ? "ru-RU" : "en-US",
                               { hour: "2-digit", minute: "2-digit" },
@@ -429,7 +464,35 @@ function App() {
                       >
                         {t.back}
                       </button>
-                      <strong>{activePeer.slice(-10)}</strong>
+                      <strong>
+                        {contactLabel(activePeer, chatState.contacts)}
+                      </strong>
+                      <form
+                        className="contact-name-form"
+                        onSubmit={async (event) => {
+                          event.preventDefault();
+                          const saved =
+                            await controllerRef.current?.saveContactName(
+                              activePeer,
+                              contactNameDraft,
+                            );
+                          if (!saved) setChatError(t.contactSaveFailed);
+                          else setChatError("");
+                        }}
+                      >
+                        <input
+                          aria-label={t.contactName}
+                          value={contactNameDraft}
+                          onChange={(event) =>
+                            setContactNameDraft(event.target.value)
+                          }
+                          placeholder={
+                            chatState.contacts[activePeer] ||
+                            activePeer.slice(-10)
+                          }
+                        />
+                        <button className="text-button">{t.saveName}</button>
+                      </form>
                     </div>
                     <div className="message-list">
                       {(
@@ -478,6 +541,24 @@ function App() {
                         </article>
                       ))}
                     </div>
+                    {chats.find((chat) => chat.peerId === activePeer)
+                      ?.hasMore && (
+                      <button
+                        className="secondary"
+                        disabled={
+                          chats.find((chat) => chat.peerId === activePeer)
+                            ?.loadingHistory
+                        }
+                        onClick={() =>
+                          void controllerRef.current?.loadHistory(activePeer)
+                        }
+                      >
+                        {chats.find((chat) => chat.peerId === activePeer)
+                          ?.loadingHistory
+                          ? t.loading
+                          : t.loadMore}
+                      </button>
+                    )}
                     <form
                       className="composer"
                       onSubmit={(event) => void sendMessage(event)}
@@ -509,6 +590,9 @@ function App() {
                 )}
               </section>
             </section>
+            {chatState.contactsError && (
+              <p className="error">{t.contactsDecryptError}</p>
+            )}
             <button
               data-testid="logout"
               className="danger"

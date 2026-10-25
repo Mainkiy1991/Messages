@@ -1,4 +1,5 @@
 import type { DerivedKeys } from "@messages/crypto";
+import { indexedDbOutbox } from "./lib/outbox.js";
 
 const DB_NAME = "messages-session";
 const STORE_NAME = "keys";
@@ -78,6 +79,7 @@ export async function restoreSession(): Promise<DerivedKeys | null> {
 }
 
 export async function clearSession(): Promise<void> {
+  await indexedDbOutbox.clear();
   await new Promise<void>((resolve, reject) => {
     const request = indexedDB.deleteDatabase(DB_NAME);
     request.onsuccess = () => resolve();

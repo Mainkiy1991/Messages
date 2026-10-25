@@ -15,6 +15,21 @@ export type UserKeys = {
   encryptionPublicKey: string;
   keyBindingSignature: string;
 };
+export type ConversationSummary = {
+  peerId: string;
+  lastSeq: string;
+  lastCreatedAt: string;
+};
+export type HistoryMessage = {
+  id: string;
+  seq: string;
+  direction: "in" | "out";
+  clientMsgId: string;
+  payload: string;
+  createdAt: string;
+  deliveredAt: string | null;
+};
+export type ContactBookResponse = { version: string; blob: string | null };
 export const API_URL = (
   import.meta.env.VITE_API_URL || "http://localhost:3000"
 ).replace(/\/$/u, "");
@@ -23,6 +38,7 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     public code: string,
+    public data?: Record<string, unknown>,
   ) {
     super(code);
     this.name = "ApiError";
@@ -54,12 +70,14 @@ async function request<T>(
     });
     if (!response.ok) {
       let code = "request_error";
+      let data: Record<string, unknown> | undefined;
       try {
-        code = ((await response.json()) as { error?: string }).error ?? code;
+        data = (await response.json()) as Record<string, unknown>;
+        code = (data.error as string | undefined) ?? code;
       } catch {
         /* Empty response */
       }
-      throw new ApiError(response.status, code);
+      throw new ApiError(response.status, code, data);
     }
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
@@ -130,6 +148,46 @@ export async function logoutFromServer(
   fetcher: FetchLike = fetch,
 ): Promise<void> {
   await request<void>(fetcher, "/auth/logout", token, { method: "POST" });
+}
+
+export function getConversations(token: string, fetcher: FetchLike = fetch) {
+  return request<{ conversations: ConversationSummary[] }>(
+    fetcher,
+    "/conversations",
+    token,
+  );
+}
+
+export function getHistory(
+  peerId: string,
+  token: string,
+  before?: string,
+  fetcher: FetchLike = fetch,
+) {
+  const params = new URLSearchParams({ limit: "50" });
+  if (before) params.set("before", before);
+  return request<{ messages: HistoryMessage[]; hasMore: boolean }>(
+    fetcher,
+    `/history/${peerId}?${params}`,
+    token,
+  );
+}
+
+export function getContacts(token: string, fetcher: FetchLike = fetch) {
+  return request<ContactBookResponse>(fetcher, "/contacts", token);
+}
+
+export function putContacts(
+  token: string,
+  baseVersion: string,
+  blob: string,
+  fetcher: FetchLike = fetch,
+) {
+  return request<{ version: string }>(fetcher, "/contacts", token, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ baseVersion, blob }),
+  });
 }
 
 export function verifyUserKeys(peerId: string, value: UserKeys): Uint8Array {
