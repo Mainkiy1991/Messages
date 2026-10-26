@@ -211,15 +211,15 @@ export async function registerWebSocket(
   }
 
   async function persistLastSeen(userId: string): Promise<string> {
+    const online = (perUser.get(userId)?.size ?? 0) > 0;
+    if (online) lastSeenWrites.set(userId, Date.now());
     const result = await pool.query<{ last_seen_at: Date }>(
       `INSERT INTO presence(user_id,last_seen_at) VALUES($1,now())
        ON CONFLICT(user_id) DO UPDATE SET last_seen_at=now()
        RETURNING last_seen_at`,
       [userId],
     );
-    if ((perUser.get(userId)?.size ?? 0) > 0)
-      lastSeenWrites.set(userId, Date.now());
-    else lastSeenWrites.delete(userId);
+    if (!online) lastSeenWrites.delete(userId);
     return result.rows[0]!.last_seen_at.toISOString();
   }
 
@@ -402,11 +402,9 @@ export async function registerWebSocket(
               perToken.get(hash) ?? new Set<Connection>();
             tokenConnections.add(connection);
             perToken.set(hash, tokenConnections);
+            if (!wasOnline) await persistLastSeen(userId);
             socket.send(JSON.stringify({ type: "auth_ok", userId }));
-            if (!wasOnline) {
-              await persistLastSeen(userId);
-              publishPresence(userId, true, null);
-            }
+            if (!wasOnline) publishPresence(userId, true, null);
             await hub.sendMailbox(socket, userId);
             return;
           }
