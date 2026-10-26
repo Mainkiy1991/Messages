@@ -542,6 +542,9 @@ test.describe("real browser chat", () => {
       a.page.locator('[data-testid="message"][data-status="delivered"]'),
     ).toBeVisible();
     await openChat(b.page, alice.id);
+    await expect(
+      b.page.getByText("Before outage", { exact: true }),
+    ).toBeVisible();
 
     a.expectedDisconnect = true;
     b.expectedDisconnect = true;
