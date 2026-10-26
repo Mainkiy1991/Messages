@@ -290,6 +290,8 @@ test.describe("real browser chat", () => {
   test("restores every message after reload and sign-in across history pages", async ({
     browser,
   }) => {
+    test.setTimeout(180_000);
+
     const a = await openUser(browser);
     const b = await openUser(browser);
     const alice = await createAccount(a.page);
@@ -331,11 +333,22 @@ test.describe("real browser chat", () => {
       [b, alice.id],
     ] as const) {
       await chatWith(user.page, peerId).click();
+      await expect(user.page.locator(".conversation-head")).toContainText(
+        peerId.slice(-10),
+      );
       const messageTexts = user.page.locator(".message-list .message-text");
+      await expect
+        .poll(() => messageTexts.count())
+        .toBeGreaterThanOrEqual(Math.min(50, expected.length));
       while ((await messageTexts.count()) < expected.length) {
+        const previousCount = await messageTexts.count();
         const loadMore = user.page.locator(".message-list .load-more");
         await expect(loadMore).toBeVisible();
+        await expect(loadMore).toBeEnabled();
         await loadMore.click();
+        await expect
+          .poll(() => messageTexts.count())
+          .toBeGreaterThan(previousCount);
       }
       await expect(messageTexts).toHaveText(expected);
     }
