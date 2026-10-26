@@ -64,6 +64,7 @@ export type ChatControllerState = {
   error: string;
   contacts: Record<string, string>;
   contactsError: boolean;
+  presence: Record<string, { online: boolean; lastSeenAt: string | null }>;
 };
 export type ChatError =
   | "invalid_id"
@@ -138,6 +139,7 @@ export class ChatController {
   private readonly peerReadMarkers = new Map<string, string>();
   private readTimer: ReturnType<typeof setTimeout> | null = null;
   private historyRequests = new Map<string, Promise<boolean>>();
+  private presencePeerSignature = "";
   private state: ChatControllerState = {
     chats: [],
     activePeer: "",
@@ -145,6 +147,7 @@ export class ChatController {
     error: "",
     contacts: {},
     contactsError: false,
+    presence: {},
   };
 
   constructor(
@@ -158,7 +161,10 @@ export class ChatController {
       session,
       {
         onState: (connectionState) => {
-          this.update({ connectionState });
+          this.update({
+            connectionState,
+            ...(connectionState === "connected" ? {} : { presence: {} }),
+          });
           if (
             connectionState === "connected" &&
             typeof window !== "undefined"
@@ -826,6 +832,25 @@ export class ChatController {
   }
 
   private async handleFrame(frame: IncomingFrame): Promise<void> {
+    if (frame.type === "presence" && Array.isArray(frame.presences)) {
+      const presence = { ...this.state.presence };
+      for (const item of frame.presences) {
+        if (!item || typeof item !== "object") continue;
+        const value = item as Record<string, unknown>;
+        if (
+          typeof value.peerId !== "string" ||
+          typeof value.online !== "boolean"
+        )
+          continue;
+        presence[value.peerId] = {
+          online: value.online,
+          lastSeenAt:
+            typeof value.lastSeenAt === "string" ? value.lastSeenAt : null,
+        };
+      }
+      this.update({ presence });
+      return;
+    }
     if (
       frame.type === "message" &&
       typeof frame.id === "string" &&
@@ -1042,6 +1067,14 @@ export class ChatController {
 
   private update(patch: Partial<ChatControllerState>): void {
     this.state = { ...this.state, ...patch };
+    if (patch.chats) {
+      const ids = this.state.chats.map((chat) => chat.peerId).slice(0, 200);
+      const signature = ids.join(",");
+      if (signature !== this.presencePeerSignature) {
+        this.presencePeerSignature = signature;
+        this.connection.setPresencePeers(ids);
+      }
+    }
     this.deps.onChange?.(this.getSnapshot());
   }
 }

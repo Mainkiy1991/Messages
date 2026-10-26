@@ -66,6 +66,7 @@ export const strings = {
       "Не удалось загрузить контакты. Для чатов показаны ID.",
     loadMore: "Загрузить ещё",
     loading: "Загрузка…",
+    presenceOnline: "в сети",
   },
   en: {
     title: "Messages",
@@ -131,6 +132,7 @@ export const strings = {
     contactsDecryptError: "Could not load contacts. Chats are shown with IDs.",
     loadMore: "Load more",
     loading: "Loading…",
+    presenceOnline: "online",
   },
 } as const;
 

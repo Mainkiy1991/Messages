@@ -44,7 +44,7 @@ suite("server authentication (PostgreSQL)", () => {
 
   beforeAll(async () => {
     await pool!.query(
-      "DROP TABLE IF EXISTS read_markers, contact_books, messages, sessions, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS presence, read_markers, contact_books, messages, sessions, users, schema_migrations CASCADE",
     );
     await pool!.query(
       await readFile(
@@ -83,6 +83,12 @@ suite("server authentication (PostgreSQL)", () => {
     await pool!.query(
       await readFile(
         join(import.meta.dirname, "..", "migrations", "005_read_markers.sql"),
+        "utf8",
+      ),
+    );
+    await pool!.query(
+      await readFile(
+        join(import.meta.dirname, "..", "migrations", "006_presence.sql"),
         "utf8",
       ),
     );
@@ -457,6 +463,94 @@ suite("server authentication (PostgreSQL)", () => {
     const account = await createAccount();
     const { socket, auth } = await connectAuth(account.token, await listen());
     expect(auth).toEqual({ type: "auth_ok", userId: account.userId });
+    socket.close();
+  });
+
+  it("tracks presence across multiple authenticated sockets and persists last seen", async () => {
+    const a = await createAccount();
+    const b = await createAccount();
+    await pool!.query(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'YQ==','YQ=='),($2,$1,$4,'Yg==','Yg==')`,
+      [a.userId, b.userId, randomId(), randomId()],
+    );
+    const url = await listen();
+    const b1 = (await connectAuth(b.token, url)).socket;
+    const b2 = (await connectAuth(b.token, url)).socket;
+    const viewer = (await connectAuth(a.token, url)).socket;
+    const online = nextFrame(viewer, (frame) => frame.type === "presence");
+    sendFrame(viewer, { type: "presence_subscribe", peerIds: [b.userId] });
+    expect((await online).presences).toEqual([
+      { peerId: b.userId, online: true, lastSeenAt: null },
+    ]);
+
+    const b1Closed = new Promise<void>((resolve) =>
+      b1.once("close", () => resolve()),
+    );
+    b1.close();
+    await b1Closed;
+    const stillOnline = nextFrame(viewer, (frame) => frame.type === "presence");
+    sendFrame(viewer, { type: "presence_subscribe", peerIds: [b.userId] });
+    expect((await stillOnline).presences).toEqual([
+      { peerId: b.userId, online: true, lastSeenAt: null },
+    ]);
+
+    const offline = nextFrame(
+      viewer,
+      (frame) =>
+        frame.type === "presence" &&
+        Array.isArray(frame.presences) &&
+        (frame.presences[0] as { peerId?: string } | undefined)?.peerId ===
+          b.userId &&
+        (frame.presences[0] as { online?: boolean } | undefined)?.online ===
+          false,
+    );
+    const b2Closed = new Promise<void>((resolve) =>
+      b2.once("close", () => resolve()),
+    );
+    b2.close();
+    await b2Closed;
+    const status = (await offline).presences as Array<{
+      online: boolean;
+      lastSeenAt: string | null;
+    }>;
+    expect(status[0]?.online).toBe(false);
+    expect(status[0]?.lastSeenAt).toBeTruthy();
+    viewer.close();
+  });
+
+  it("hides presence when messages have flowed in only one direction", async () => {
+    const a = await createAccount();
+    const b = await createAccount();
+    await pool!.query(
+      "INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy) VALUES($1,$2,$3,'YQ==','YQ==')",
+      [a.userId, b.userId, randomId()],
+    );
+    const url = await listen();
+    const target = (await connectAuth(b.token, url)).socket;
+    const viewer = (await connectAuth(a.token, url)).socket;
+    const snapshot = nextFrame(viewer, (frame) => frame.type === "presence");
+    sendFrame(viewer, { type: "presence_subscribe", peerIds: [b.userId] });
+    expect((await snapshot).presences).toEqual([
+      { peerId: b.userId, online: false, lastSeenAt: null },
+    ]);
+    target.close();
+    viewer.close();
+  });
+
+  it("rejects oversized presence subscriptions without closing the socket", async () => {
+    const account = await createAccount();
+    const socket = (await connectAuth(account.token, await listen())).socket;
+    const rejected = nextFrame(
+      socket,
+      (frame) => frame.type === "error" && frame.code === "invalid_frame",
+    );
+    sendFrame(socket, {
+      type: "presence_subscribe",
+      peerIds: Array.from({ length: 201 }, () => "ab".repeat(32)),
+    });
+    await rejected;
+    expect(socket.readyState).toBe(WebSocket.OPEN);
     socket.close();
   });
 
