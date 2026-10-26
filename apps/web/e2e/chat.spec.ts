@@ -611,9 +611,7 @@ test.describe("real browser chat", () => {
       timeout: 45_000,
     });
     await expect(
-      a.page
-        .locator(".message-list .message-text")
-        .filter({ hasText: "Before outage" }),
+      a.page.getByText("Before outage", { exact: true }),
     ).toBeVisible();
     await expect(
       b.page
