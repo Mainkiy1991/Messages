@@ -44,6 +44,13 @@ const historyQuerySchema = z
           /^\d{1,19}$/u.test(value) && BigInt(value) <= 9223372036854775807n,
       )
       .optional(),
+    after: z
+      .string()
+      .refine(
+        (value) =>
+          /^\d{1,19}$/u.test(value) && BigInt(value) <= 9223372036854775807n,
+      )
+      .optional(),
     limit: z
       .string()
       .regex(/^\d+$/u)
@@ -323,7 +330,7 @@ export async function buildApp(options: {
   });
   app.get<{
     Params: { peerId: string };
-    Querystring: { before?: string; limit?: string };
+    Querystring: { before?: string; after?: string; limit?: string };
   }>(
     "/history/:peerId",
     { preHandler: authenticate },
@@ -333,29 +340,38 @@ export async function buildApp(options: {
       const parsed = historyQuerySchema.safeParse(request.query);
       if (!parsed.success)
         return reply.code(400).send({ error: "invalid_request" });
-      const { before, limit } = parsed.data;
+      const { before, after, limit } = parsed.data;
+      if (before && after)
+        return reply.code(400).send({ error: "invalid_request" });
+      const forward = !!after;
       const rows = await pool.query(
         `SELECT id, seq::text AS seq, sender_id, client_msg_id AS "clientMsgId",
                 CASE WHEN sender_id=$1 THEN sender_copy ELSE ciphertext END AS payload,
                 created_at AS "createdAt", delivered_at AS "deliveredAt"
          FROM messages WHERE ((sender_id=$1 AND recipient_id=$2) OR (sender_id=$2 AND recipient_id=$1))
            AND ($3::bigint IS NULL OR seq::bigint < $3::bigint)
-         ORDER BY seq::bigint DESC LIMIT $4`,
-        [request.userId, request.params.peerId, before ?? null, limit + 1],
+           AND ($4::bigint IS NULL OR seq::bigint > $4::bigint)
+         ORDER BY seq::bigint ${forward ? "ASC" : "DESC"} LIMIT $5`,
+        [
+          request.userId,
+          request.params.peerId,
+          before ?? null,
+          after ?? null,
+          limit + 1,
+        ],
       );
       const hasMore = rows.rows.length > limit;
-      const messages = rows.rows
-        .slice(0, limit)
-        .reverse()
-        .map((row) => ({
-          id: row.id,
-          seq: row.seq,
-          direction: row.sender_id === request.userId ? "out" : "in",
-          clientMsgId: row.clientMsgId,
-          payload: row.payload,
-          createdAt: row.createdAt,
-          deliveredAt: row.deliveredAt,
-        }));
+      const selectedRows = rows.rows.slice(0, limit);
+      if (!forward) selectedRows.reverse();
+      const messages = selectedRows.map((row) => ({
+        id: row.id,
+        seq: row.seq,
+        direction: row.sender_id === request.userId ? "out" : "in",
+        clientMsgId: row.clientMsgId,
+        payload: row.payload,
+        createdAt: row.createdAt,
+        deliveredAt: row.deliveredAt,
+      }));
       const marker = await pool.query<{ readUpToSeq: string }>(
         `SELECT read_up_to_seq::text AS "readUpToSeq" FROM read_markers
          WHERE reader_id=$1 AND peer_id=$2`,
@@ -395,7 +411,9 @@ export async function buildApp(options: {
       )
         return reply.code(400).send({ error: "invalid_request" });
       const updated = await pool.query(
-        `INSERT INTO contact_books(user_id, version, blob) VALUES($1, 1, $3)
+        `INSERT INTO contact_books(user_id, version, blob)
+       SELECT $1, 1, $3
+       WHERE $2::bigint = 0 OR EXISTS(SELECT 1 FROM contact_books WHERE user_id=$1)
        ON CONFLICT(user_id) DO UPDATE SET version=contact_books.version+1, blob=EXCLUDED.blob, updated_at=now()
        WHERE contact_books.version=$2::bigint RETURNING version::text AS version`,
         [request.userId, baseVersion, blob],

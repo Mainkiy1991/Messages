@@ -173,6 +173,20 @@ export function getHistory(
   }>(fetcher, `/history/${peerId}?${params}`, token);
 }
 
+export function getHistoryAfter(
+  peerId: string,
+  token: string,
+  after: string,
+  fetcher: FetchLike = fetch,
+) {
+  const params = new URLSearchParams({ limit: "50", after });
+  return request<{
+    messages: HistoryMessage[];
+    hasMore: boolean;
+    peerReadUpToSeq: string | null;
+  }>(fetcher, `/history/${peerId}?${params}`, token);
+}
+
 export function getContacts(token: string, fetcher: FetchLike = fetch) {
   return request<ContactBookResponse>(fetcher, "/contacts", token);
 }

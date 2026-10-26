@@ -13,6 +13,7 @@ import {
   getContacts,
   getConversations,
   getHistory,
+  getHistoryAfter,
   putContacts,
   type ContactBookResponse,
   type ConversationSummary,
@@ -56,6 +57,9 @@ export type Chat = {
   hasMore?: boolean;
   loadingHistory?: boolean;
   historyLoadFailed?: boolean;
+  historyLoaded?: boolean;
+  historyStale?: boolean;
+  historyAfterMore?: boolean;
   lastCreatedAt?: string;
 };
 export type ChatControllerState = {
@@ -109,6 +113,15 @@ export type ChatControllerDependencies = {
     peerReadUpToSeq?: string | null;
   }>;
   getContacts?: (token: string) => Promise<ContactBookResponse>;
+  getHistoryAfter?: (
+    peerId: string,
+    token: string,
+    after: string,
+  ) => Promise<{
+    messages: HistoryMessage[];
+    hasMore: boolean;
+    peerReadUpToSeq?: string | null;
+  }>;
   putContacts?: (
     token: string,
     version: string,
@@ -140,7 +153,9 @@ export class ChatController {
   private readonly peerReadMarkers = new Map<string, string>();
   private readTimer: ReturnType<typeof setTimeout> | null = null;
   private historyRequests = new Map<string, Promise<boolean>>();
+  private historyCatchupRequests = new Map<string, Promise<void>>();
   private presencePeerSignature = "";
+  private hasConnected = false;
   private state: ChatControllerState = {
     chats: [],
     activePeer: "",
@@ -171,8 +186,8 @@ export class ChatController {
             typeof window !== "undefined"
           ) {
             void this.loadAccountData();
-            if (this.state.activePeer)
-              void this.loadHistory(this.state.activePeer);
+            if (this.hasConnected) void this.refreshHistoryHeads();
+            this.hasConnected = true;
           }
         },
         onFrame: (frame) => this.handleFrame(frame),
@@ -420,10 +435,91 @@ export class ChatController {
     await request;
   }
 
+  private loadMissedHistory(peerId: string): Promise<void> {
+    const pending = this.historyCatchupRequests.get(peerId);
+    if (pending) return pending;
+    const request = this.fetchMissedHistory(peerId).finally(() => {
+      this.historyCatchupRequests.delete(peerId);
+    });
+    this.historyCatchupRequests.set(peerId, request);
+    return request;
+  }
+
+  private async refreshHistoryHeads(): Promise<void> {
+    try {
+      const session = await this.connection.ensureSession();
+      const result = await this.withFreshSession(
+        session.token,
+        this.deps.getConversations ??
+          ((token) => getConversations(token, this.deps.fetcher)),
+      );
+      const lastSeq = new Map(
+        result.conversations.map((conversation) => [
+          conversation.peerId,
+          conversation.lastSeq,
+        ]),
+      );
+      this.update({
+        chats: this.state.chats.map((chat) => {
+          if (!chat.historyLoaded) return chat;
+          const known = chat.messages
+            .map((message) => message.seq)
+            .filter((seq): seq is string => !!seq)
+            .reduce((max, seq) => (BigInt(seq) > BigInt(max) ? seq : max), "0");
+          const server = lastSeq.get(chat.peerId) ?? "0";
+          return { ...chat, historyStale: BigInt(server) > BigInt(known) };
+        }),
+      });
+      const activePeer = this.state.activePeer;
+      if (
+        activePeer &&
+        this.state.chats.find((chat) => chat.peerId === activePeer)
+          ?.historyStale
+      )
+        void this.loadMissedHistory(activePeer);
+    } catch {
+      /* A reconnect head check is retried on the next reconnect. */
+    }
+  }
+
+  private async fetchMissedHistory(peerId: string): Promise<void> {
+    const chat = this.state.chats.find((item) => item.peerId === peerId);
+    if (!chat?.historyLoaded || !chat.historyStale) return;
+    let after = chat.messages
+      .map((message) => message.seq)
+      .filter((seq): seq is string => !!seq)
+      .reduce((max, seq) => (BigInt(seq) > BigInt(max) ? seq : max), "0");
+    while (!this.stopped) {
+      const current = this.state.chats.find((item) => item.peerId === peerId);
+      if (!current) return;
+      const loaded = await this.fetchHistory(peerId, current, true, after);
+      if (!loaded) return;
+      const latest = this.state.chats
+        .find((item) => item.peerId === peerId)
+        ?.messages.map((message) => message.seq)
+        .filter((seq): seq is string => !!seq)
+        .reduce((max, seq) => (BigInt(seq) > BigInt(max) ? seq : max), after);
+      const updated = this.state.chats.find((item) => item.peerId === peerId);
+      if (!updated?.historyAfterMore || !latest || latest === after) {
+        if (updated)
+          this.update({
+            chats: this.state.chats.map((item) =>
+              item.peerId === peerId
+                ? { ...item, historyStale: false, historyAfterMore: false }
+                : item,
+            ),
+          });
+        return;
+      }
+      after = latest;
+    }
+  }
+
   private async fetchHistory(
     peerId: string,
     chat: Chat,
     silent: boolean,
+    after?: string,
   ): Promise<boolean> {
     this.update({
       chats: this.state.chats.map((item) =>
@@ -436,11 +532,17 @@ export class ChatController {
         .filter((seq): seq is string => !!seq)
         .sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1))[0];
       const session = await this.connection.ensureSession();
-      const page = await (
-        this.deps.getHistory ??
-        ((id, token, before) =>
-          getHistory(id, token, before, this.deps.fetcher))
-      )(peerId, session.token, oldest);
+      const page = after
+        ? await (
+            this.deps.getHistoryAfter ??
+            ((id, token, cursor) =>
+              getHistoryAfter(id, token, cursor, this.deps.fetcher))
+          )(peerId, session.token, after)
+        : await (
+            this.deps.getHistory ??
+            ((id, token, before) =>
+              getHistory(id, token, before, this.deps.fetcher))
+          )(peerId, session.token, oldest);
       if (page.peerReadUpToSeq) {
         const marker = page.peerReadUpToSeq;
         this.peerReadMarkers.set(peerId, marker);
@@ -536,7 +638,9 @@ export class ChatController {
               ? {
                   ...item,
                   messages: mergeMessages(item.messages, messages),
-                  hasMore: page.hasMore,
+                  hasMore: after ? item.hasMore : page.hasMore,
+                  historyLoaded: true,
+                  ...(after ? { historyAfterMore: page.hasMore } : {}),
                   loadingHistory: false,
                   historyLoadFailed: false,
                 }
@@ -547,12 +651,16 @@ export class ChatController {
       await Promise.all(
         page.messages
           .filter((entry) => entry.direction === "out")
-          .map((entry) =>
-            (this.deps.outbox ?? indexedDbOutbox).remove(
-              this.userId,
-              entry.clientMsgId,
-            ),
-          ),
+          .map(async (entry) => {
+            try {
+              await (this.deps.outbox ?? indexedDbOutbox).remove(
+                this.userId,
+                entry.clientMsgId,
+              );
+            } catch {
+              console.warn("Could not remove acknowledged outbox item");
+            }
+          }),
       );
       if (this.state.activePeer === peerId) this.scheduleRead(peerId);
       return true;
@@ -691,7 +799,9 @@ export class ChatController {
           ];
       this.update({ chats: sortChats(chats), activePeer: peerId, error: "" });
       this.resetUnread(peerId);
-      void this.loadHistory(peerId);
+      const chat = this.state.chats.find((item) => item.peerId === peerId);
+      if (chat?.historyStale) void this.loadMissedHistory(peerId);
+      else if (!chat?.historyLoaded) void this.loadHistory(peerId);
       this.scheduleRead(peerId);
     } catch {
       this.setError("server_unavailable");
@@ -702,7 +812,9 @@ export class ChatController {
     if (!this.state.chats.some((chat) => chat.peerId === peerId)) return;
     this.update({ activePeer: peerId, error: "" });
     this.resetUnread(peerId);
-    void this.loadHistory(peerId);
+    const chat = this.state.chats.find((item) => item.peerId === peerId);
+    if (chat?.historyStale) void this.loadMissedHistory(peerId);
+    else if (!chat?.historyLoaded) void this.loadHistory(peerId);
     this.scheduleRead(peerId);
   }
 
