@@ -337,10 +337,14 @@ test.describe("real browser chat", () => {
         peerId.slice(-10),
       );
       const messageTexts = user.page.locator(".message-list .message-text");
+      await expect
+        .poll(() => messageTexts.count())
+        .toBeGreaterThanOrEqual(Math.min(50, expected.length));
       while ((await messageTexts.count()) < expected.length) {
         const previousCount = await messageTexts.count();
         const loadMore = user.page.locator(".message-list .load-more");
         await expect(loadMore).toBeVisible();
+        await expect(loadMore).toBeEnabled();
         await loadMore.click();
         await expect
           .poll(() => messageTexts.count())
