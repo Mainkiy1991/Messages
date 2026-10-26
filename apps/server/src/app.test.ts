@@ -16,6 +16,7 @@ import {
   generateMnemonic,
 } from "@messages/crypto";
 import { buildApp } from "./app.js";
+import { getWebSocketMemoryState } from "./ws.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl && process.env.CI === "true") {
@@ -657,8 +658,16 @@ suite("server authentication (PostgreSQL)", () => {
       subscriber,
       (frame) => frame.type === "presence",
     );
+    const idleSnapshot = nextFrame(
+      idleTab,
+      (frame) => frame.type === "presence",
+    );
     sendFrame(subscriber, { type: "presence_subscribe", peerIds: [b.userId] });
+    sendFrame(idleTab, { type: "presence_subscribe", peerIds: [b.userId] });
     expect((await snapshot).presences).toEqual([
+      { peerId: b.userId, online: false, lastSeenAt: null },
+    ]);
+    expect((await idleSnapshot).presences).toEqual([
       { peerId: b.userId, online: false, lastSeenAt: null },
     ]);
 
@@ -667,15 +676,61 @@ suite("server authentication (PostgreSQL)", () => {
     );
     subscriber.close();
     await closed;
+    const idleUpdate = nextFrame(
+      idleTab,
+      (frame) =>
+        frame.type === "presence" &&
+        (frame.presences as Array<{ online: boolean }>)[0]?.online === true,
+    );
     const target = (await connectAuth(b.token, url)).socket;
-    expect(
-      (frameBuffers.get(idleTab) ?? []).filter(
-        (frame) => frame.type === "presence",
-      ),
-    ).toEqual([]);
+    expect((await idleUpdate).presences).toEqual([
+      { peerId: b.userId, online: true, lastSeenAt: null },
+    ]);
     expect(idleTab.readyState).toBe(WebSocket.OPEN);
     target.close();
     idleTab.close();
+  });
+
+  it("clears read limits, user counts, and presence subscriptions after the last socket closes", async () => {
+    const a = await createAccount();
+    const b = await createAccount();
+    const inserted = await pool!.query<{ seq: string }>(
+      "INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy) VALUES($1,$2,$3,'YQ==','YQ==') RETURNING seq::text AS seq",
+      [b.userId, a.userId, randomId()],
+    );
+    const url = await listen();
+    const reader = (await connectAuth(a.token, url)).socket;
+    const sender = (await connectAuth(b.token, url)).socket;
+    const initial = nextFrame(reader, (frame) => frame.type === "presence");
+    sendFrame(reader, { type: "presence_subscribe", peerIds: [b.userId] });
+    await initial;
+    const readUpdate = nextFrame(sender, (frame) => frame.type === "read");
+    sendFrame(reader, {
+      type: "read",
+      peerId: b.userId,
+      upToSeq: inserted.rows[0]!.seq,
+    });
+    await readUpdate;
+    const readerClosed = new Promise<void>((resolve) =>
+      reader.once("close", () => resolve()),
+    );
+    reader.close();
+    await readerClosed;
+    expect(getWebSocketMemoryState(app!)).toEqual({
+      users: 1,
+      readWindows: 0,
+      subscribedConnections: 0,
+    });
+    const senderClosed = new Promise<void>((resolve) =>
+      sender.once("close", () => resolve()),
+    );
+    sender.close();
+    await senderClosed;
+    expect(getWebSocketMemoryState(app!)).toEqual({
+      users: 0,
+      readWindows: 0,
+      subscribedConnections: 0,
+    });
   });
 
   it("accepts 500 presence keys and rejects 501 without closing the socket", async () => {
@@ -1127,6 +1182,12 @@ suite("server authentication (PostgreSQL)", () => {
     const recipient = await createAccount();
     const a = (await connectAuth(sender.token, await listen())).socket;
     const clientMsgId = randomId();
+    const ready = nextFrame(a, (frame) => frame.type === "presence");
+    sendFrame(a, {
+      type: "presence_subscribe",
+      peerIds: [recipient.userId],
+    });
+    await ready;
     await pool!.query("ALTER TABLE messages RENAME TO messages_test_hold");
     try {
       const error = nextFrame(a, (frame) => frame.type === "error");
@@ -1390,6 +1451,16 @@ suite("server authentication (PostgreSQL)", () => {
       );
     }
     expect(pages.reverse().flat()).toEqual(expected.rows.map((row) => row.seq));
+    const cursor = expected.rows[48]!.seq;
+    const forward = await app.inject({
+      method: "GET",
+      url: `/history/${b.userId}?after=${cursor}&limit=7`,
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(forward.statusCode).toBe(200);
+    expect(
+      forward.json().messages.map((message: { seq: string }) => message.seq),
+    ).toEqual(expected.rows.slice(49).map((row) => row.seq));
   });
 
   it("paginates numeric sequence boundaries and clamps read markers numerically", async () => {
@@ -1458,6 +1529,47 @@ suite("server authentication (PostgreSQL)", () => {
         .reverse()
         .flat(),
     ).toEqual(["98", "99", "100", "101", "231", "998", "999", "1000", "1001"]);
+
+    const forwardPages: string[][] = [];
+    let after = "0";
+    let more = true;
+    while (more) {
+      const response = await app.inject({
+        method: "GET",
+        url: `/history/${reader.userId}?after=${after}&limit=4`,
+        headers: { authorization: `Bearer ${sender.token}` },
+      });
+      expect(response.statusCode).toBe(200);
+      const page = response.json() as {
+        messages: Array<{ seq: string }>;
+        hasMore: boolean;
+      };
+      expect(page.messages.length).toBeGreaterThan(0);
+      const seqs = page.messages.map((message) => message.seq);
+      expect(seqs).toEqual(
+        seqs.slice().sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1)),
+      );
+      forwardPages.push(seqs);
+      after = seqs.at(-1)!;
+      more = page.hasMore;
+    }
+    const forwardSeqs = forwardPages.flat();
+    expect(forwardSeqs).toEqual([
+      "98",
+      "99",
+      "100",
+      "101",
+      "231",
+      "998",
+      "999",
+      "1000",
+      "1001",
+    ]);
+    expect(new Set(forwardSeqs).size).toBe(forwardSeqs.length);
+    expect(forwardPages[0]).toContain("99");
+    expect(forwardPages[0]).toContain("100");
+    expect(forwardPages[1]).toContain("999");
+    expect(forwardPages[1]).toContain("1000");
 
     const websocketUrl = await listen();
     const { socket: senderSocket } = await connectAuth(
@@ -1803,6 +1915,7 @@ suite("server authentication (PostgreSQL)", () => {
         headers: { authorization: `Bearer ${token}` },
         payload: { baseVersion, blob },
       });
+    expect((await put("1", "YQ==")).statusCode).toBe(409);
     const concurrent = await Promise.all([put("0", "YQ=="), put("0", "Yg==")]);
     expect(concurrent.map((response) => response.statusCode).sort()).toEqual([
       200, 409,

@@ -130,6 +130,22 @@ export async function registerWebSocket(
   const readWindows = new Map<string, number[]>();
   const presenceWindows = new Map<string, number[]>();
   const lastSeenWrites = new Map<string, number>();
+  const appWithWsState = app as FastifyInstance & {
+    getWebSocketMemoryState?: () => {
+      users: number;
+      readWindows: number;
+      subscribedConnections: number;
+    };
+  };
+  if (process.env.NODE_ENV === "test") {
+    appWithWsState.getWebSocketMemoryState = () => ({
+      users: perUser.size,
+      readWindows: readWindows.size,
+      subscribedConnections: [...connections].filter(
+        (connection) => connection.peerIds.size > 0,
+      ).length,
+    });
+  }
 
   type PresenceTarget = { connection: Connection; peerId: string };
 
@@ -695,6 +711,26 @@ export async function registerWebSocket(
   (
     app as FastifyInstance & { closeWsToken?: (hash: string) => void }
   ).closeWsToken = closeToken;
+}
+
+export function getWebSocketMemoryState(app: FastifyInstance) {
+  if (process.env.NODE_ENV !== "test")
+    throw new Error("WebSocket memory state is available in tests only");
+  return (
+    (
+      app as FastifyInstance & {
+        getWebSocketMemoryState?: () => {
+          users: number;
+          readWindows: number;
+          subscribedConnections: number;
+        };
+      }
+    ).getWebSocketMemoryState?.() ?? {
+      users: 0,
+      readWindows: 0,
+      subscribedConnections: 0,
+    }
+  );
 }
 
 export function closeWebSocketsForToken(app: FastifyInstance, hash: string) {

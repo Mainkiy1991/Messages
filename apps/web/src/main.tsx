@@ -27,7 +27,10 @@ import {
   type ChatControllerState,
 } from "./lib/chat-controller.js";
 import type { ChatMessage } from "./lib/chat-controller.js";
-import { formatPresence } from "./lib/presence.js";
+import {
+  PresenceDot,
+  PresenceLabel,
+} from "./components/presence-indicators.js";
 import "./style.css";
 
 type Screen = "welcome" | "create" | "verify" | "login" | "home";
@@ -568,14 +571,11 @@ function App() {
                       <span className="chat-item-copy">
                         <strong>
                           {contactLabel(chat.peerId, chatState.contacts)}
-                          {socketState === "connected" &&
-                            chatState.presence[chat.peerId]?.online && (
-                              <span
-                                className="presence-dot"
-                                aria-label={t.presenceOnline}
-                                data-testid="presence-dot"
-                              />
-                            )}
+                          <PresenceDot
+                            connectionState={socketState}
+                            presence={chatState.presence[chat.peerId]}
+                            onlineLabel={t.presenceOnline}
+                          />
                         </strong>
                         <span>{chatPreview(chat, t)}</span>
                       </span>
@@ -627,28 +627,12 @@ function App() {
                             {contactLabel(activePeer, chatState.contacts)}
                           </strong>
                           <small>{activePeer.slice(-10)}</small>
-                          {socketState === "connected" &&
-                            formatPresence(
-                              chatState.presence[activePeer]?.online ?? false,
-                              chatState.presence[activePeer]?.lastSeenAt ??
-                                null,
-                              language,
-                              presenceClock,
-                            ) && (
-                              <small
-                                className="presence-label"
-                                data-testid="presence-label"
-                              >
-                                {formatPresence(
-                                  chatState.presence[activePeer]?.online ??
-                                    false,
-                                  chatState.presence[activePeer]?.lastSeenAt ??
-                                    null,
-                                  language,
-                                  presenceClock,
-                                )}
-                              </small>
-                            )}
+                          <PresenceLabel
+                            connectionState={socketState}
+                            presence={chatState.presence[activePeer]}
+                            language={language}
+                            now={presenceClock}
+                          />
                           <span aria-hidden="true">✎</span>
                         </button>
                       ) : (

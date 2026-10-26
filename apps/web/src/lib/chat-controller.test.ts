@@ -25,8 +25,12 @@ const alice = deriveKeys(
 const bob = deriveKeys(
   "legal winner thank year wave sausage worth useful legal winner thank yellow",
 );
+const charlie = deriveKeys(
+  "letter advice cage absurd amount doctor acoustic avoid letter advice cage above",
+);
 const aliceId = bytesToHex(alice.identity.publicKey);
 const bobId = bytesToHex(bob.identity.publicKey);
+const charlieId = bytesToHex(charlie.identity.publicKey);
 const future = () => new Date(Date.now() + 60_000).toISOString();
 const session = (token: string): ServerSession => ({
   token,
@@ -94,6 +98,7 @@ function makeController(
     getConversations?: ChatControllerDependencies["getConversations"];
     getContacts?: ChatControllerDependencies["getContacts"];
     getHistory?: ChatControllerDependencies["getHistory"];
+    getHistoryAfter?: ChatControllerDependencies["getHistoryAfter"];
     isVisible?: () => boolean;
   } = {},
 ) {
@@ -113,6 +118,7 @@ function makeController(
         tokens.push(token);
         if (options.userKeys) return options.userKeys(peerId, token);
         if (peerId === bobId) return userKeys(bob);
+        if (peerId === charlieId) return userKeys(charlie);
         if (peerId === aliceId) return userKeys(alice);
         throw new ApiError(404, "not_found");
       },
@@ -129,6 +135,7 @@ function makeController(
       getConversations: options.getConversations,
       getContacts: options.getContacts,
       getHistory: options.getHistory,
+      getHistoryAfter: options.getHistoryAfter,
       isVisible: options.isVisible,
     },
   );
@@ -591,6 +598,296 @@ describe("ChatController", () => {
     controller.stop();
   });
 
+  it("does not request history again when selecting an already loaded chat", async () => {
+    const requests: Array<string | undefined> = [];
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      fetchPeerKeys: async () => userKeys(bob),
+      getHistory: async (_peerId, _token, before) => {
+        requests.push(before);
+        return { hasMore: true, messages: [] };
+      },
+    });
+    await controller.openChat(bobId);
+    await waitFor(
+      () => controller.getSnapshot().chats[0]?.historyLoaded === true,
+    );
+    controller.selectChat(bobId);
+    await Promise.resolve();
+    expect(requests).toEqual([undefined]);
+    controller.stop();
+  });
+
+  it("catches up changed loaded chats after reconnect and skips unchanged inactive chats", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", {});
+    const historyRequests: Array<{ peerId: string; before?: string }> = [];
+    const catchupRequests: Array<{ peerId: string; after: string }> = [];
+    let conversationCalls = 0;
+    const entry = (peerId: string, seq: string, direction: "in" | "out") => {
+      const clientMsgId = seq.padStart(32, "0");
+      return {
+        clientMsgId,
+        id: `history-${peerId}-${seq}`,
+        seq,
+        direction,
+        payload:
+          direction === "out"
+            ? encryptHistoryEntry({
+                historyKey: alice.historyKey,
+                clientMsgId,
+                peerId,
+                text: `message ${seq}`,
+                sentAt: Date.now(),
+              })
+            : "YQ==",
+        createdAt: new Date().toISOString(),
+        deliveredAt: null,
+      };
+    };
+    const f = makeController({
+      initialSession: session("token-a"),
+      getConversations: async () => {
+        conversationCalls++;
+        return {
+          conversations:
+            conversationCalls === 1
+              ? []
+              : [
+                  { peerId: bobId, lastSeq: "100", lastCreatedAt: future() },
+                  { peerId: charlieId, lastSeq: "99", lastCreatedAt: future() },
+                ],
+        };
+      },
+      getHistory: async (peerId, _token, before) => {
+        historyRequests.push({ peerId, before });
+        return {
+          hasMore: true,
+          messages: [entry(peerId, "99", peerId === bobId ? "in" : "out")],
+        };
+      },
+      getHistoryAfter: async (peerId, _token, after) => {
+        catchupRequests.push({ peerId, after });
+        return {
+          hasMore: false,
+          messages: [entry(peerId, "100", peerId === bobId ? "in" : "out")],
+        };
+      },
+      random: () => 0,
+    });
+    f.controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.open();
+    f.sockets[0]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    await f.controller.openChat(bobId);
+    await f.controller.loadHistory(bobId);
+    f.controller.closeActiveChat();
+    await f.controller.openChat(charlieId);
+    await f.controller.loadHistory(charlieId);
+    f.controller.closeActiveChat();
+    f.sockets[0]!.close(1006);
+    await vi.advanceTimersByTimeAsync(800);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.sockets).toHaveLength(2);
+    f.sockets[1]!.open();
+    f.sockets[1]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.controller.getSnapshot().connectionState).toBe("connected");
+    expect(
+      f.controller.getSnapshot().chats.find((chat) => chat.peerId === bobId)
+        ?.historyStale,
+    ).toBe(true);
+    expect(
+      f.controller.getSnapshot().chats.find((chat) => chat.peerId === charlieId)
+        ?.historyStale,
+    ).toBe(false);
+    expect(
+      (f.controller as unknown as { hasConnected: boolean }).hasConnected,
+    ).toBe(true);
+    f.controller.selectChat(charlieId);
+    expect(catchupRequests).toEqual([]);
+    f.controller.selectChat(bobId);
+    await vi.waitFor(() => expect(catchupRequests).toHaveLength(1));
+    expect(historyRequests).toEqual([
+      { peerId: bobId, before: undefined },
+      { peerId: charlieId, before: undefined },
+    ]);
+    expect(catchupRequests).toEqual([{ peerId: bobId, after: "99" }]);
+    expect(
+      f.controller
+        .getSnapshot()
+        .chats.find((chat) => chat.peerId === bobId)
+        ?.messages.map((message) => message.seq)
+        .filter((seq): seq is string => !!seq),
+    ).toEqual(["99", "100"]);
+    expect(
+      f.controller
+        .getSnapshot()
+        .chats.find((chat) => chat.peerId === charlieId)
+        ?.messages.map((message) => message.seq)
+        .filter((seq): seq is string => !!seq),
+    ).toEqual(["99"]);
+    f.controller.stop();
+  });
+
+  it("retries conversation heads independently and reloads the active chat after recovery", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", {});
+    let conversationCalls = 0;
+    let historyCalls = 0;
+    const f = makeController({
+      initialSession: session("token-a"),
+      getConversations: async () => {
+        conversationCalls++;
+        if (conversationCalls < 3) throw new TypeError("server starting");
+        return {
+          conversations: [
+            { peerId: bobId, lastSeq: "1", lastCreatedAt: future() },
+          ],
+        };
+      },
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () => {
+        historyCalls++;
+        if (historyCalls === 1) throw new TypeError("server starting");
+        return { messages: [], hasMore: false };
+      },
+    });
+
+    f.controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.open();
+    f.sockets[0]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.controller.getSnapshot().connectionState).toBe("connected");
+    await f.controller.openChat(bobId);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(historyCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(conversationCalls).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => expect(historyCalls).toBe(2));
+    expect(conversationCalls).toBe(3);
+    expect(f.controller.getSnapshot().connectionState).toBe("connected");
+    expect(f.controller.getSnapshot().chats[0]?.historyLoaded).toBe(true);
+    f.controller.stop();
+  });
+
+  it("reloads an active chat whose history request failed before reconnect", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", {});
+    let historyCalls = 0;
+    let conversationCalls = 0;
+    const f = makeController({
+      initialSession: session("token-a"),
+      getConversations: async () => {
+        conversationCalls++;
+        return {
+          conversations:
+            conversationCalls === 1
+              ? []
+              : [{ peerId: bobId, lastSeq: "5", lastCreatedAt: future() }],
+        };
+      },
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () => {
+        historyCalls++;
+        if (historyCalls === 1) throw new TypeError("server restarting");
+        return { messages: [], hasMore: false };
+      },
+      random: () => 0,
+    });
+
+    f.controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.open();
+    f.sockets[0]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    await f.controller.openChat(bobId);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(historyCalls).toBe(1);
+    expect(f.controller.getSnapshot().chats[0]?.historyLoaded).not.toBe(true);
+
+    f.sockets[0]!.close(1006);
+    await vi.advanceTimersByTimeAsync(800);
+    expect(f.sockets).toHaveLength(2);
+    f.sockets[1]!.open();
+    f.sockets[1]!.frame({ type: "auth_ok" });
+    await vi.waitFor(() => expect(historyCalls).toBe(2));
+    expect(f.controller.getSnapshot().connectionState).toBe("connected");
+    expect(f.controller.getSnapshot().chats[0]?.historyLoaded).toBe(true);
+    f.controller.stop();
+  });
+
+  it("keeps successful history when acknowledged outbox cleanup fails", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const clientMsgId = "00000000000000000000000000000003";
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      fetchPeerKeys: async () => userKeys(bob),
+      outbox: {
+        list: async () => [],
+        put: async () => undefined,
+        remove: async () => {
+          throw new Error("indexeddb unavailable");
+        },
+        clear: async () => undefined,
+      },
+      getHistory: async () => ({
+        hasMore: false,
+        messages: [
+          {
+            id: "outbox-cleanup",
+            seq: "7",
+            direction: "out",
+            clientMsgId,
+            payload: encryptHistoryEntry({
+              historyKey: alice.historyKey,
+              clientMsgId,
+              peerId: bobId,
+              text: "saved message",
+              sentAt: Date.now(),
+            }),
+            createdAt: new Date().toISOString(),
+            deliveredAt: null,
+          },
+        ],
+      }),
+    });
+    await controller.openChat(bobId);
+    await waitFor(
+      () => controller.getSnapshot().chats[0]?.historyLoaded === true,
+    );
+    expect(controller.getSnapshot().error).toBe("");
+    expect(controller.getSnapshot().chats[0]?.messages[0]?.text).toBe(
+      "saved message",
+    );
+    expect(warning).toHaveBeenCalledWith(
+      "Could not remove acknowledged outbox item",
+    );
+    controller.stop();
+  });
+
+  it("clears presence statuses when the server connection is lost", async () => {
+    vi.useFakeTimers();
+    const f = makeController({ initialSession: session("token") });
+    f.controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.open();
+    f.sockets[0]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.frame({
+      type: "presence",
+      presences: [{ peerId: bobId, online: true, lastSeenAt: null }],
+    });
+    await vi.waitFor(() =>
+      expect(f.controller.getSnapshot().presence[bobId]?.online).toBe(true),
+    );
+    f.sockets[0]!.close(1006);
+    expect(f.controller.getSnapshot().presence).toEqual({});
+    f.controller.stop();
+  });
+
   it("uses the final ten ID characters when a contact name is missing", () => {
     expect(contactLabel(bobId, {})).toBe(bobId.slice(-10));
     expect(contactLabel(bobId, { [bobId]: "Bob" })).toBe("Bob");
@@ -871,6 +1168,23 @@ describe("ChatController", () => {
     expect(await controller.saveContactName(bobId, "  Local  ")).toBe(true);
     expect(writes).toBe(2);
     expect(controller.getSnapshot().contacts[bobId]).toBe("Local");
+  });
+
+  it("starts a contact book for an existing account at version zero", async () => {
+    let version = "";
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => ({ version: "0", blob: null }),
+      putContacts: async (_token, baseVersion) => {
+        version = baseVersion;
+        return { version: "1" };
+      },
+    });
+    await (
+      controller as unknown as { loadContacts(token: string): Promise<void> }
+    ).loadContacts("token");
+    expect(await controller.saveContactName(bobId, "Bob")).toBe(true);
+    expect(version).toBe("0");
+    controller.stop();
   });
 
   it("stops contact conflict retries after three writes", async () => {

@@ -209,6 +209,9 @@ test.describe("real browser chat", () => {
 
     await openChat(a.page, bob.id);
     await expect(a.page.getByTestId("presence-label")).toHaveCount(0);
+    await expect(
+      chatWith(a.page, bob.id).getByTestId("presence-dot"),
+    ).toHaveCount(0);
     await send(a.page, "Hello Bob");
     await openChat(b.page, alice.id);
     await send(b.page, "Hello Alice");
@@ -222,9 +225,15 @@ test.describe("real browser chat", () => {
     await expect(a.page.getByTestId("presence-label")).toContainText(
       "last seen",
     );
+    await expect(
+      chatWith(a.page, bob.id).getByTestId("presence-dot"),
+    ).toHaveCount(0);
     b = await openUser(browser);
     await signIn(b.page, bob.phrase);
     await expect(a.page.getByTestId("presence-label")).toHaveText("online");
+    await expect(
+      chatWith(a.page, bob.id).getByTestId("presence-dot"),
+    ).toBeVisible();
   });
 
   test("updates presence after the first reply without reloading", async ({
@@ -533,6 +542,11 @@ test.describe("real browser chat", () => {
       a.page.locator('[data-testid="message"][data-status="delivered"]'),
     ).toBeVisible();
     await openChat(b.page, alice.id);
+    await expect(
+      b.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: "Before outage" }),
+    ).toBeVisible();
 
     a.expectedDisconnect = true;
     b.expectedDisconnect = true;
