@@ -8,6 +8,7 @@ import {
   newClientMsgId,
   type DerivedKeys,
 } from "@messages/crypto";
+import { MAX_CONVERSATIONS } from "@messages/shared";
 import {
   getContacts,
   getConversations,
@@ -1068,7 +1069,9 @@ export class ChatController {
   private update(patch: Partial<ChatControllerState>): void {
     this.state = { ...this.state, ...patch };
     if (patch.chats) {
-      const ids = this.state.chats.map((chat) => chat.peerId).slice(0, 200);
+      const ids = this.state.chats
+        .map((chat) => chat.peerId)
+        .slice(0, MAX_CONVERSATIONS);
       const signature = ids.join(",");
       if (signature !== this.presencePeerSignature) {
         this.presencePeerSignature = signature;

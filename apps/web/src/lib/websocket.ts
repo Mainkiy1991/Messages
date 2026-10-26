@@ -1,4 +1,5 @@
 import { userIdFromPublicKey, type DerivedKeys } from "@messages/crypto";
+import { MAX_CONVERSATIONS } from "@messages/shared";
 import { API_URL, type FetchLike, loginToServer } from "./api.js";
 import type { ServerSession } from "../session.js";
 
@@ -129,7 +130,7 @@ export class ChatConnection {
 
   setPresencePeers(peerIds: string[]): void {
     this.presenceConfigured = true;
-    this.presencePeerIds = [...new Set(peerIds)].slice(0, 500);
+    this.presencePeerIds = [...new Set(peerIds)].slice(0, MAX_CONVERSATIONS);
     if (this.authenticated) this.sendPresenceSubscriptions();
   }
 
@@ -141,18 +142,12 @@ export class ChatConnection {
       !this.active
     )
       return;
-    for (let index = 0; index < this.presencePeerIds.length; index += 200) {
-      this.socket.send(
-        JSON.stringify({
-          type: "presence_subscribe",
-          peerIds: this.presencePeerIds.slice(index, index + 200),
-        }),
-      );
-    }
-    if (!this.presencePeerIds.length)
-      this.socket.send(
-        JSON.stringify({ type: "presence_subscribe", peerIds: [] }),
-      );
+    this.socket.send(
+      JSON.stringify({
+        type: "presence_subscribe",
+        peerIds: this.presencePeerIds,
+      }),
+    );
   }
 
   retryMessage(frame: OutgoingFrame): void {

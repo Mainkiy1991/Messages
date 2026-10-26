@@ -17,6 +17,7 @@ const env = {
   VITE_API_URL: "http://localhost:3000",
 };
 for (const args of [
+  ["--filter", "@messages/shared", "build"],
   ["--filter", "@messages/crypto", "build"],
   ["--filter", "@messages/server", "build"],
   ["--filter", "@messages/web", "build"],

@@ -5,6 +5,7 @@ import type { Pool } from "pg";
 import WebSocket from "ws";
 import { z } from "zod";
 import { createMessageHub, type MessageRow } from "./messages.js";
+import { MAX_CONVERSATIONS } from "@messages/shared";
 
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/u;
 const sendSchema = z
@@ -49,7 +50,9 @@ const readSchema = z
 const presenceSubscribeSchema = z
   .object({
     type: z.literal("presence_subscribe"),
-    peerIds: z.array(z.string().regex(/^[0-9a-f]{64}$/u)).max(200),
+    peerIds: z
+      .array(z.string().regex(/^[0-9a-f]{64}$/u))
+      .max(MAX_CONVERSATIONS),
   })
   .strict();
 
@@ -128,86 +131,102 @@ export async function registerWebSocket(
   const presenceWindows = new Map<string, number[]>();
   const lastSeenWrites = new Map<string, number>();
 
-  async function canSeePresence(
-    viewerId: string,
-    peerId: string,
-  ): Promise<boolean> {
-    if (viewerId === peerId) return false;
-    const result = await pool.query(
-      `SELECT EXISTS(SELECT 1 FROM messages WHERE sender_id=$1 AND recipient_id=$2)
-       AND EXISTS(SELECT 1 FROM messages WHERE sender_id=$2 AND recipient_id=$1) AS allowed`,
-      [viewerId, peerId],
+  type PresenceTarget = { connection: Connection; peerId: string };
+
+  async function getPresenceVisibility(
+    targets: PresenceTarget[],
+  ): Promise<Map<string, boolean>> {
+    if (!targets.length) return new Map();
+    const result = await pool.query<{
+      viewer_id: string;
+      peer_id: string;
+      allowed: boolean;
+    }>(
+      `SELECT pairs.viewer_id, pairs.peer_id,
+              (pairs.viewer_id <> pairs.peer_id
+               AND EXISTS(SELECT 1 FROM messages m WHERE m.sender_id=pairs.viewer_id AND m.recipient_id=pairs.peer_id)
+               AND EXISTS(SELECT 1 FROM messages m WHERE m.sender_id=pairs.peer_id AND m.recipient_id=pairs.viewer_id)) AS allowed
+       FROM unnest($1::text[], $2::text[]) AS pairs(viewer_id, peer_id)`,
+      [
+        targets.map(({ connection }) => connection.userId),
+        targets.map(({ peerId }) => peerId),
+      ],
     );
-    return result.rows[0]?.allowed === true;
+    return new Map(
+      result.rows.map((row) => [
+        `${row.viewer_id}:${row.peer_id}`,
+        row.allowed,
+      ]),
+    );
   }
 
-  async function presenceFrame(connection: Connection, peerIds: string[]) {
-    const presences = [];
-    for (const peerId of peerIds) {
-      if (!(await canSeePresence(connection.userId, peerId))) {
-        presences.push({ peerId, online: false, lastSeenAt: null });
-        continue;
-      }
-      const online = (perUser.get(peerId)?.size ?? 0) > 0;
-      const seen = online
-        ? null
-        : await pool.query<{ last_seen_at: Date }>(
-            "SELECT last_seen_at FROM presence WHERE user_id=$1",
-            [peerId],
-          );
+  async function sendPresenceStatuses(
+    targets: PresenceTarget[],
+    omitHidden = false,
+  ) {
+    if (!targets.length) return;
+    const visibility = await getPresenceVisibility(targets);
+    const offlineVisibleIds = [
+      ...new Set(
+        targets
+          .filter(
+            ({ connection, peerId }) =>
+              visibility.get(`${connection.userId}:${peerId}`) &&
+              (perUser.get(peerId)?.size ?? 0) === 0,
+          )
+          .map(({ peerId }) => peerId),
+      ),
+    ];
+    const seenRows = offlineVisibleIds.length
+      ? await pool.query<{ user_id: string; last_seen_at: Date }>(
+          "SELECT user_id, last_seen_at FROM presence WHERE user_id=ANY($1::text[])",
+          [offlineVisibleIds],
+        )
+      : { rows: [] as Array<{ user_id: string; last_seen_at: Date }> };
+    const lastSeen = new Map(
+      seenRows.rows.map((row) => [row.user_id, row.last_seen_at.toISOString()]),
+    );
+    const byConnection = new Map<
+      Connection,
+      Array<{ peerId: string; online: boolean; lastSeenAt: string | null }>
+    >();
+    for (const { connection, peerId } of targets) {
+      const allowed = visibility.get(`${connection.userId}:${peerId}`) ?? false;
+      if (omitHidden && !allowed) continue;
+      const online = allowed && (perUser.get(peerId)?.size ?? 0) > 0;
+      const presences = byConnection.get(connection) ?? [];
       presences.push({
         peerId,
         online,
-        lastSeenAt: online
-          ? null
-          : (seen?.rows[0]?.last_seen_at?.toISOString() ?? null),
+        lastSeenAt: allowed && !online ? (lastSeen.get(peerId) ?? null) : null,
       });
+      byConnection.set(connection, presences);
     }
-    if (connection.socket.readyState === WebSocket.OPEN)
-      connection.socket.send(JSON.stringify({ type: "presence", presences }));
+    for (const [connection, presences] of byConnection) {
+      if (connection.socket.readyState === WebSocket.OPEN)
+        connection.socket.send(JSON.stringify({ type: "presence", presences }));
+    }
   }
 
-  function publishPresence(
-    userId: string,
-    online: boolean,
-    lastSeenAt: string | null,
-  ) {
-    for (const subscriber of connections) {
-      if (!subscriber.peerIds.has(userId)) continue;
-      void canSeePresence(subscriber.userId, userId)
-        .then((allowed) => {
-          if (
-            allowed &&
-            subscriber.peerIds.has(userId) &&
-            subscriber.socket.readyState === WebSocket.OPEN
-          )
-            subscriber.socket.send(
-              JSON.stringify({
-                type: "presence",
-                presences: [{ peerId: userId, online, lastSeenAt }],
-              }),
-            );
-        })
-        .catch((error: unknown) =>
-          app.log.error(
-            { errorType: error instanceof Error ? error.name : typeof error },
-            "Presence visibility check failed",
-          ),
-        );
-    }
+  async function publishPresence(userId: string): Promise<void> {
+    const targets = [...connections]
+      .filter((subscriber) => subscriber.peerIds.has(userId))
+      .map((connection) => ({ connection, peerId: userId }));
+    await sendPresenceStatuses(targets, true);
   }
 
   async function notifyNewlyVisiblePair(firstId: string, secondId: string) {
-    if (!(await canSeePresence(firstId, secondId))) return;
-    for (const subscriber of connections) {
-      const peerId =
-        subscriber.userId === firstId && subscriber.peerIds.has(secondId)
-          ? secondId
-          : subscriber.userId === secondId && subscriber.peerIds.has(firstId)
-            ? firstId
-            : null;
-      if (peerId) void presenceFrame(subscriber, [peerId]);
+    const targets: PresenceTarget[] = [];
+    for (const connection of connections) {
+      if (connection.userId === firstId && connection.peerIds.has(secondId))
+        targets.push({ connection, peerId: secondId });
+      else if (
+        connection.userId === secondId &&
+        connection.peerIds.has(firstId)
+      )
+        targets.push({ connection, peerId: firstId });
     }
+    await sendPresenceStatuses(targets, true);
   }
 
   async function persistLastSeen(userId: string): Promise<string> {
@@ -225,6 +244,7 @@ export async function registerWebSocket(
 
   function remove(connection: Connection) {
     connections.delete(connection);
+    connection.peerIds.clear();
     hub.unregister(connection.socket, connection.userId);
     const userSockets = perUser.get(connection.userId);
     userSockets?.delete(connection);
@@ -233,9 +253,9 @@ export async function registerWebSocket(
       readWindows.delete(connection.userId);
       presenceWindows.delete(connection.userId);
       void persistLastSeen(connection.userId)
-        .then((at) => {
+        .then(async () => {
           if ((perUser.get(connection!.userId)?.size ?? 0) === 0)
-            publishPresence(connection!.userId, false, at);
+            await publishPresence(connection!.userId);
         })
         .catch((error: unknown) =>
           app.log.error(
@@ -257,11 +277,12 @@ export async function registerWebSocket(
   }
   app.addHook("onClose", async () => {
     for (const userId of perUser.keys()) {
-      const at = await persistLastSeen(userId);
-      publishPresence(userId, false, at);
+      await persistLastSeen(userId);
     }
-    for (const connection of connections)
+    for (const connection of connections) {
+      connection.peerIds.clear();
       connection.socket.close(1001, "server closing");
+    }
     connections.clear();
     perUser.clear();
     perToken.clear();
@@ -402,9 +423,21 @@ export async function registerWebSocket(
               perToken.get(hash) ?? new Set<Connection>();
             tokenConnections.add(connection);
             perToken.set(hash, tokenConnections);
-            if (!wasOnline) await persistLastSeen(userId);
+            if (!wasOnline) {
+              await persistLastSeen(userId);
+              try {
+                await publishPresence(userId);
+              } catch (error) {
+                app.log.error(
+                  {
+                    errorType:
+                      error instanceof Error ? error.name : typeof error,
+                  },
+                  "Presence update failed",
+                );
+              }
+            }
             socket.send(JSON.stringify({ type: "auth_ok", userId }));
-            if (!wasOnline) publishPresence(userId, true, null);
             await hub.sendMailbox(socket, userId);
             return;
           }
@@ -437,7 +470,12 @@ export async function registerWebSocket(
             recent.push(time);
             presenceWindows.set(connection!.userId, recent);
             connection!.peerIds = new Set(parsed.data.peerIds);
-            await presenceFrame(connection!, parsed.data.peerIds);
+            await sendPresenceStatuses(
+              parsed.data.peerIds.map((peerId) => ({
+                connection: connection!,
+                peerId,
+              })),
+            );
             return;
           }
           if (type === "read") {
@@ -505,10 +543,12 @@ export async function registerWebSocket(
               errorFrame(socket, "recipient_not_found", input.clientMsgId);
               return;
             }
-            const wasVisible = await canSeePresence(
-              connection!.userId,
-              input.to,
-            );
+            const visibilityBefore = await getPresenceVisibility([
+              { connection: connection!, peerId: input.to },
+            ]);
+            const wasVisible =
+              visibilityBefore.get(`${connection!.userId}:${input.to}`) ??
+              false;
 
             const inserted = await pool.query<MessageRow>(
               `INSERT INTO messages(sender_id, recipient_id, client_msg_id, ciphertext, sender_copy)

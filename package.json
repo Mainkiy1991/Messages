@@ -5,9 +5,9 @@
   "version": "0.1.0",
   "packageManager": "pnpm@11.25.0",
   "scripts": {
-    "dev": "pnpm --filter @messages/crypto build && concurrently -k -n web,server \"pnpm --filter @messages/web dev\" \"pnpm --filter @messages/server dev\"",
+    "dev": "pnpm --filter @messages/shared build && pnpm --filter @messages/crypto build && concurrently -k -n web,server \"pnpm --filter @messages/web dev\" \"pnpm --filter @messages/server dev\"",
     "dev:web": "pnpm --filter @messages/web dev",
-    "dev:server": "pnpm --filter @messages/crypto build && pnpm --filter @messages/server dev",
+    "dev:server": "pnpm --filter @messages/shared build && pnpm --filter @messages/crypto build && pnpm --filter @messages/server dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "test:e2e": "node apps/web/e2e/prepare.mjs && playwright test --config apps/web/playwright.config.ts",
