@@ -730,6 +730,96 @@ describe("ChatController", () => {
     f.controller.stop();
   });
 
+  it("retries conversation heads independently and reloads the active chat after recovery", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", {});
+    let conversationCalls = 0;
+    let historyCalls = 0;
+    const f = makeController({
+      initialSession: session("token-a"),
+      getConversations: async () => {
+        conversationCalls++;
+        if (conversationCalls < 3) throw new TypeError("server starting");
+        return {
+          conversations: [
+            { peerId: bobId, lastSeq: "1", lastCreatedAt: future() },
+          ],
+        };
+      },
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () => {
+        historyCalls++;
+        if (historyCalls === 1) throw new TypeError("server starting");
+        return { messages: [], hasMore: false };
+      },
+    });
+
+    f.controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.open();
+    f.sockets[0]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.controller.getSnapshot().connectionState).toBe("connected");
+    await f.controller.openChat(bobId);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(historyCalls).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(conversationCalls).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.waitFor(() => expect(historyCalls).toBe(2));
+    expect(conversationCalls).toBe(3);
+    expect(f.controller.getSnapshot().connectionState).toBe("connected");
+    expect(f.controller.getSnapshot().chats[0]?.historyLoaded).toBe(true);
+    f.controller.stop();
+  });
+
+  it("reloads an active chat whose history request failed before reconnect", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", {});
+    let historyCalls = 0;
+    let conversationCalls = 0;
+    const f = makeController({
+      initialSession: session("token-a"),
+      getConversations: async () => {
+        conversationCalls++;
+        return {
+          conversations:
+            conversationCalls === 1
+              ? []
+              : [{ peerId: bobId, lastSeq: "5", lastCreatedAt: future() }],
+        };
+      },
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () => {
+        historyCalls++;
+        if (historyCalls === 1) throw new TypeError("server restarting");
+        return { messages: [], hasMore: false };
+      },
+      random: () => 0,
+    });
+
+    f.controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.open();
+    f.sockets[0]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    await f.controller.openChat(bobId);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(historyCalls).toBe(1);
+    expect(f.controller.getSnapshot().chats[0]?.historyLoaded).not.toBe(true);
+
+    f.sockets[0]!.close(1006);
+    await vi.advanceTimersByTimeAsync(800);
+    expect(f.sockets).toHaveLength(2);
+    f.sockets[1]!.open();
+    f.sockets[1]!.frame({ type: "auth_ok" });
+    await vi.waitFor(() => expect(historyCalls).toBe(2));
+    expect(f.controller.getSnapshot().connectionState).toBe("connected");
+    expect(f.controller.getSnapshot().chats[0]?.historyLoaded).toBe(true);
+    f.controller.stop();
+  });
+
   it("keeps successful history when acknowledged outbox cleanup fails", async () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     const clientMsgId = "00000000000000000000000000000003";

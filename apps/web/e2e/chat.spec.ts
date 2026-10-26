@@ -543,7 +543,9 @@ test.describe("real browser chat", () => {
     ).toBeVisible();
     await openChat(b.page, alice.id);
     await expect(
-      b.page.getByText("Before outage", { exact: true }),
+      b.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: "Before outage" }),
     ).toBeVisible();
 
     a.expectedDisconnect = true;
@@ -601,7 +603,9 @@ test.describe("real browser chat", () => {
       timeout: 45_000,
     });
     await expect(
-      a.page.getByText("Before outage", { exact: true }),
+      a.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: "Before outage" }),
     ).toBeVisible();
     await expect(
       b.page

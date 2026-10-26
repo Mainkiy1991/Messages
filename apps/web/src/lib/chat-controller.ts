@@ -313,6 +313,12 @@ export class ChatController {
       this.conversationsLoaded = true;
       this.resetAccountRetry("conversations");
       void this.loadRecentPreviews(chats.map((chat) => chat.peerId));
+      const activePeer = this.state.activePeer;
+      const activeChat = this.state.chats.find(
+        (chat) => chat.peerId === activePeer,
+      );
+      if (activeChat && !activeChat.historyLoaded)
+        void this.loadHistory(activePeer, { silent: true });
     } catch (error) {
       if (this.isRetryableAccountError(error))
         this.scheduleAccountRetry("conversations");
@@ -400,7 +406,9 @@ export class ChatController {
     const timer = setTimer(() => {
       this.accountDataRetryTimers.delete(resource);
       if (this.stopped) return;
-      void this.loadAccountData();
+      if (resource === "conversations" && this.conversationsLoaded)
+        void this.refreshHistoryHeads();
+      else void this.loadAccountData();
     }, delay);
     this.accountDataRetryTimers.set(resource, timer);
   }
@@ -453,6 +461,7 @@ export class ChatController {
         this.deps.getConversations ??
           ((token) => getConversations(token, this.deps.fetcher)),
       );
+      this.resetAccountRetry("conversations");
       const lastSeq = new Map(
         result.conversations.map((conversation) => [
           conversation.peerId,
@@ -471,14 +480,14 @@ export class ChatController {
         }),
       });
       const activePeer = this.state.activePeer;
-      if (
-        activePeer &&
-        this.state.chats.find((chat) => chat.peerId === activePeer)
-          ?.historyStale
-      )
-        void this.loadMissedHistory(activePeer);
+      const activeChat = this.state.chats.find(
+        (chat) => chat.peerId === activePeer,
+      );
+      if (activeChat?.historyStale) void this.loadMissedHistory(activePeer);
+      else if (activeChat && !activeChat.historyLoaded)
+        void this.loadHistory(activePeer, { silent: true });
     } catch {
-      /* A reconnect head check is retried on the next reconnect. */
+      this.scheduleAccountRetry("conversations");
     }
   }
 
