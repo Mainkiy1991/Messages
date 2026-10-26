@@ -1183,7 +1183,10 @@ suite("server authentication (PostgreSQL)", () => {
     const a = (await connectAuth(sender.token, await listen())).socket;
     const clientMsgId = randomId();
     const ready = nextFrame(a, (frame) => frame.type === "presence");
-    sendFrame(a, { type: "presence_subscribe", peerIds: [] });
+    sendFrame(a, {
+      type: "presence_subscribe",
+      peerIds: [recipient.userId],
+    });
     await ready;
     await pool!.query("ALTER TABLE messages RENAME TO messages_test_hold");
     try {
