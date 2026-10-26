@@ -12,6 +12,7 @@ type User = {
   errors: string[];
   expectedDisconnect: boolean;
   expectedContactsFailure: boolean;
+  expectedDeleteFailure: boolean;
 };
 type Fixtures = {
   serverControl: { stop(): Promise<void>; start(): Promise<void> };
@@ -42,6 +43,7 @@ async function openUser(browser: Browser): Promise<User> {
     errors: [],
     expectedDisconnect: false,
     expectedContactsFailure: false,
+    expectedDeleteFailure: false,
   };
   page.on("pageerror", (error) =>
     user.errors.push(`pageerror: ${error.message}`),
@@ -61,11 +63,16 @@ async function openUser(browser: Browser): Promise<User> {
       /Failed to load resource: the server responded with a status of 500/u.test(
         message.text(),
       );
+    // Chromium reports the intentionally aborted DELETE route as a console error.
+    const expectedDeleteFailure =
+      user.expectedDeleteFailure &&
+      message.text() === "Failed to load resource: net::ERR_FAILED";
     // Chromium emits this network diagnostic during the deliberately stopped-server window.
     if (
       !expectedSocketRefusal &&
       !expectedApiRefusal &&
-      !expectedContactsFailure
+      !expectedContactsFailure &&
+      !expectedDeleteFailure
     )
       user.errors.push(`console.error: ${message.text()}`);
   });
@@ -204,7 +211,7 @@ test.describe("real browser chat", () => {
   }) => {
     const a = await openUser(browser);
     const b = await openUser(browser);
-    await createAccount(a.page);
+    const alice = await createAccount(a.page);
     const bob = await createAccount(b.page);
 
     await openChat(a.page, bob.id);
@@ -262,12 +269,14 @@ test.describe("real browser chat", () => {
       else await route.continue();
     };
     await a.page.route("**/conversations/**", deleteRoute);
+    a.expectedDeleteFailure = true;
     await a.page.getByTestId("chat-menu").click();
     await a.page.getByTestId("delete-chat").click();
     await a.page.getByTestId("confirm-delete-chat").click();
     await expect(a.page.getByRole("alertdialog")).toContainText(
       "Could not delete the conversation. Check your connection and try again.",
     );
+    a.expectedDeleteFailure = false;
     await expect(chatWith(a.page, bob.id)).toBeVisible();
     await expect(a.page.locator(".message-list .message-text")).toContainText(
       "Keep me if deletion fails",
