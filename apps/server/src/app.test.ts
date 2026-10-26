@@ -1182,6 +1182,9 @@ suite("server authentication (PostgreSQL)", () => {
     const recipient = await createAccount();
     const a = (await connectAuth(sender.token, await listen())).socket;
     const clientMsgId = randomId();
+    const ready = nextFrame(a, (frame) => frame.type === "presence");
+    sendFrame(a, { type: "presence_subscribe", peerIds: [] });
+    await ready;
     await pool!.query("ALTER TABLE messages RENAME TO messages_test_hold");
     try {
       const error = nextFrame(a, (frame) => frame.type === "error");
