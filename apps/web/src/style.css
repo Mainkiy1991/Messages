@@ -360,6 +360,15 @@ select {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.presence-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: #21a45b;
+  vertical-align: middle;
+}
 .chat-item-copy span {
   color: #70778a;
   font-size: 0.85rem;
@@ -412,6 +421,15 @@ select {
   grid-column: 1;
   color: #73798a;
   font-size: 0.75rem;
+}
+.contact-name-trigger .presence-label {
+  grid-column: 1 / -1;
+  max-width: min(72vw, 280px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #21834d;
+  font-size: 0.78rem;
 }
 .contact-name-trigger span {
   grid-column: 2;

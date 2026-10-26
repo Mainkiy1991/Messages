@@ -44,7 +44,7 @@ suite("server authentication (PostgreSQL)", () => {
 
   beforeAll(async () => {
     await pool!.query(
-      "DROP TABLE IF EXISTS read_markers, contact_books, messages, sessions, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS presence, read_markers, contact_books, messages, sessions, users, schema_migrations CASCADE",
     );
     await pool!.query(
       await readFile(
@@ -83,6 +83,12 @@ suite("server authentication (PostgreSQL)", () => {
     await pool!.query(
       await readFile(
         join(import.meta.dirname, "..", "migrations", "005_read_markers.sql"),
+        "utf8",
+      ),
+    );
+    await pool!.query(
+      await readFile(
+        join(import.meta.dirname, "..", "migrations", "006_presence.sql"),
         "utf8",
       ),
     );
@@ -460,6 +466,241 @@ suite("server authentication (PostgreSQL)", () => {
     socket.close();
   });
 
+  it("applies migration 006 on a clean schema and after 005 without losing rows", async () => {
+    const migrationFiles = [
+      "001_initial.sql",
+      "002_messages.sql",
+      "003_message_sequence.sql",
+      "004_history_contacts.sql",
+      "005_read_markers.sql",
+      "006_presence.sql",
+    ];
+    async function applyInSchema(schema: string, count: number) {
+      const client = await pool!.connect();
+      try {
+        await client.query(`CREATE SCHEMA ${schema}`);
+        await client.query(`SET search_path TO ${schema}`);
+        for (const name of migrationFiles.slice(0, count)) {
+          const sql = await readFile(
+            join(import.meta.dirname, "..", "migrations", name),
+            "utf8",
+          );
+          await client.query(sql);
+        }
+        const columns = await client.query<{
+          column_name: string;
+          is_nullable: string;
+        }>(
+          `SELECT column_name, is_nullable FROM information_schema.columns
+           WHERE table_schema=$1 AND table_name='presence' ORDER BY ordinal_position`,
+          [schema],
+        );
+        expect(columns.rows).toEqual([
+          { column_name: "user_id", is_nullable: "NO" },
+          { column_name: "last_seen_at", is_nullable: "NO" },
+        ]);
+      } finally {
+        await client.query("SET search_path TO public");
+        await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+        client.release();
+      }
+    }
+
+    await applyInSchema(`presence_clean_${randomBytes(5).toString("hex")}`, 6);
+
+    const schema = `presence_upgrade_${randomBytes(5).toString("hex")}`;
+    const client = await pool!.connect();
+    try {
+      await client.query(`CREATE SCHEMA ${schema}`);
+      await client.query(`SET search_path TO ${schema}`);
+      for (const name of migrationFiles.slice(0, 5)) {
+        await client.query(
+          await readFile(
+            join(import.meta.dirname, "..", "migrations", name),
+            "utf8",
+          ),
+        );
+      }
+      await client.query(
+        `INSERT INTO users(id,encryption_public_key,key_binding_signature)
+         VALUES($1,$1,$1)`,
+        ["ab".repeat(32)],
+      );
+      await client.query(
+        `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+         VALUES($1,$1,$2,'YQ==','YQ==')`,
+        ["ab".repeat(32), randomId()],
+      );
+      await client.query(
+        await readFile(
+          join(import.meta.dirname, "..", "migrations", "006_presence.sql"),
+          "utf8",
+        ),
+      );
+      expect(
+        (await client.query("SELECT count(*)::int AS count FROM messages"))
+          .rows[0]?.count,
+      ).toBe(1);
+      expect(
+        (await client.query("SELECT count(*)::int AS count FROM presence"))
+          .rows[0]?.count,
+      ).toBe(0);
+    } finally {
+      await client.query("SET search_path TO public");
+      await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      client.release();
+    }
+  });
+
+  it("tracks presence across multiple authenticated sockets and persists last seen", async () => {
+    const a = await createAccount();
+    const b = await createAccount();
+    await pool!.query(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'YQ==','YQ=='),($2,$1,$4,'Yg==','Yg==')`,
+      [a.userId, b.userId, randomId(), randomId()],
+    );
+    const url = await listen();
+    const viewer = (await connectAuth(a.token, url)).socket;
+    const initial = nextFrame(viewer, (frame) => frame.type === "presence");
+    sendFrame(viewer, { type: "presence_subscribe", peerIds: [b.userId] });
+    expect((await initial).presences).toEqual([
+      { peerId: b.userId, online: false, lastSeenAt: null },
+    ]);
+
+    const online = nextFrame(
+      viewer,
+      (frame) =>
+        frame.type === "presence" &&
+        Array.isArray(frame.presences) &&
+        (frame.presences[0] as { online?: boolean } | undefined)?.online ===
+          true,
+    );
+    const b1 = (await connectAuth(b.token, url)).socket;
+    expect((await online).presences).toEqual([
+      { peerId: b.userId, online: true, lastSeenAt: null },
+    ]);
+    const b2 = (await connectAuth(b.token, url)).socket;
+
+    const b1Closed = new Promise<void>((resolve) =>
+      b1.once("close", () => resolve()),
+    );
+    b1.close();
+    await b1Closed;
+    const stillOnline = nextFrame(viewer, (frame) => frame.type === "presence");
+    sendFrame(viewer, { type: "presence_subscribe", peerIds: [b.userId] });
+    expect((await stillOnline).presences).toEqual([
+      { peerId: b.userId, online: true, lastSeenAt: null },
+    ]);
+
+    const offline = nextFrame(
+      viewer,
+      (frame) =>
+        frame.type === "presence" &&
+        Array.isArray(frame.presences) &&
+        (frame.presences[0] as { peerId?: string } | undefined)?.peerId ===
+          b.userId &&
+        (frame.presences[0] as { online?: boolean } | undefined)?.online ===
+          false,
+    );
+    const b2Closed = new Promise<void>((resolve) =>
+      b2.once("close", () => resolve()),
+    );
+    b2.close();
+    await b2Closed;
+    const status = (await offline).presences as Array<{
+      online: boolean;
+      lastSeenAt: string | null;
+    }>;
+    expect(status[0]?.online).toBe(false);
+    expect(status[0]?.lastSeenAt).toBeTruthy();
+    viewer.close();
+  });
+
+  it("does not push presence changes when messages have flowed in only one direction", async () => {
+    const a = await createAccount();
+    const b = await createAccount();
+    await pool!.query(
+      "INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy) VALUES($1,$2,$3,'YQ==','YQ==')",
+      [a.userId, b.userId, randomId()],
+    );
+    const url = await listen();
+    const viewer = (await connectAuth(a.token, url)).socket;
+    const snapshot = nextFrame(viewer, (frame) => frame.type === "presence");
+    sendFrame(viewer, { type: "presence_subscribe", peerIds: [b.userId] });
+    expect((await snapshot).presences).toEqual([
+      { peerId: b.userId, online: false, lastSeenAt: null },
+    ]);
+    const target = (await connectAuth(b.token, url)).socket;
+    expect(
+      (frameBuffers.get(viewer) ?? []).filter(
+        (frame) => frame.type === "presence",
+      ),
+    ).toEqual([]);
+    expect(viewer.readyState).toBe(WebSocket.OPEN);
+    target.close();
+    viewer.close();
+  });
+
+  it("clears a closed socket's presence subscription without affecting another tab", async () => {
+    const a = await createAccount();
+    const b = await createAccount();
+    await pool!.query(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'YQ==','YQ=='),($2,$1,$4,'Yg==','Yg==')`,
+      [a.userId, b.userId, randomId(), randomId()],
+    );
+    const url = await listen();
+    const subscriber = (await connectAuth(a.token, url)).socket;
+    const idleTab = (await connectAuth(a.token, url)).socket;
+    const snapshot = nextFrame(
+      subscriber,
+      (frame) => frame.type === "presence",
+    );
+    sendFrame(subscriber, { type: "presence_subscribe", peerIds: [b.userId] });
+    expect((await snapshot).presences).toEqual([
+      { peerId: b.userId, online: false, lastSeenAt: null },
+    ]);
+
+    const closed = new Promise<void>((resolve) =>
+      subscriber.once("close", () => resolve()),
+    );
+    subscriber.close();
+    await closed;
+    const target = (await connectAuth(b.token, url)).socket;
+    expect(
+      (frameBuffers.get(idleTab) ?? []).filter(
+        (frame) => frame.type === "presence",
+      ),
+    ).toEqual([]);
+    expect(idleTab.readyState).toBe(WebSocket.OPEN);
+    target.close();
+    idleTab.close();
+  });
+
+  it("accepts 500 presence keys and rejects 501 without closing the socket", async () => {
+    const account = await createAccount();
+    const socket = (await connectAuth(account.token, await listen())).socket;
+    const maximum = nextFrame(socket, (frame) => frame.type === "presence");
+    sendFrame(socket, {
+      type: "presence_subscribe",
+      peerIds: Array.from({ length: 500 }, () => "ab".repeat(32)),
+    });
+    expect(((await maximum).presences as unknown[]).length).toBe(500);
+
+    const rejected = nextFrame(
+      socket,
+      (frame) => frame.type === "error" && frame.code === "invalid_frame",
+    );
+    sendFrame(socket, {
+      type: "presence_subscribe",
+      peerIds: Array.from({ length: 501 }, () => "ab".repeat(32)),
+    });
+    await rejected;
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+    socket.close();
+  });
+
   it("serializes duplicate auth frames and removes closed connections from the limit", async () => {
     const account = await createAccount();
     const url = await listen();
@@ -604,12 +845,17 @@ suite("server authentication (PostgreSQL)", () => {
       onlineSocket,
       buffered.filter((frame) => frame.type !== "message"),
     );
+    const expectedOrder = Array.from({ length: 10 }, (_, index) =>
+      Buffer.from([index + 1]).toString("base64"),
+    );
     const onlineReceived = new Promise<void>((resolve) => {
       onlineSocket.on("message", (data) => {
         const frame = JSON.parse(data.toString());
         if (frame.type !== "message") return;
         onlineOrder.push(frame.ciphertext);
-        if (onlineOrder.length === 10) resolve();
+        const received = new Set(onlineOrder);
+        if (expectedOrder.every((ciphertext) => received.has(ciphertext)))
+          resolve();
       });
     });
     const sendPromises = Array.from({ length: 10 }, (_, index) =>
@@ -638,9 +884,6 @@ suite("server authentication (PostgreSQL)", () => {
     }
     await Promise.all(sendPromises);
     await onlineReceived;
-    const expectedOrder = Array.from({ length: 10 }, (_, index) =>
-      Buffer.from([index + 1]).toString("base64"),
-    );
     expect(new Set(onlineOrder)).toEqual(new Set(expectedOrder));
 
     const offlineSocket = connect(url);

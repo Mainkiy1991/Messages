@@ -1,4 +1,5 @@
 import { userIdFromPublicKey, type DerivedKeys } from "@messages/crypto";
+import { MAX_CONVERSATIONS } from "@messages/shared";
 import { API_URL, type FetchLike, loginToServer } from "./api.js";
 import type { ServerSession } from "../session.js";
 
@@ -30,6 +31,8 @@ export class ChatConnection {
   private ackTimer: ReturnType<typeof setTimeout> | null = null;
   private state: SocketState = "offline";
   private readonly seen = new Set<string>();
+  private presencePeerIds: string[] = [];
+  private presenceConfigured = false;
   private session: ServerSession | null;
   private sessionRequest: Promise<ServerSession> | null = null;
   private receiveQueue: Promise<void> = Promise.resolve();
@@ -125,6 +128,28 @@ export class ChatConnection {
       this.socket.send(JSON.stringify({ type: "read", peerId, upToSeq }));
   }
 
+  setPresencePeers(peerIds: string[]): void {
+    this.presenceConfigured = true;
+    this.presencePeerIds = [...new Set(peerIds)].slice(0, MAX_CONVERSATIONS);
+    if (this.authenticated) this.sendPresenceSubscriptions();
+  }
+
+  private sendPresenceSubscriptions(): void {
+    if (
+      !this.presenceConfigured ||
+      !this.authenticated ||
+      !this.socket ||
+      !this.active
+    )
+      return;
+    this.socket.send(
+      JSON.stringify({
+        type: "presence_subscribe",
+        peerIds: this.presencePeerIds,
+      }),
+    );
+  }
+
   retryMessage(frame: OutgoingFrame): void {
     const pending = this.outbox.get(frame.clientMsgId) ?? {
       frame,
@@ -214,6 +239,7 @@ export class ChatConnection {
       this.retry = 0;
       this.unauthorizedRetries = 0;
       this.setState("connected");
+      this.sendPresenceSubscriptions();
       for (const pending of this.outbox.values()) this.sendPending(pending);
       return;
     }

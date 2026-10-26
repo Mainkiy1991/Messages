@@ -5,6 +5,7 @@ import type { Pool } from "pg";
 import WebSocket from "ws";
 import { z } from "zod";
 import { createMessageHub, type MessageRow } from "./messages.js";
+import { MAX_CONVERSATIONS } from "@messages/shared";
 
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/u;
 const sendSchema = z
@@ -46,12 +47,21 @@ const readSchema = z
       }),
   })
   .strict();
+const presenceSubscribeSchema = z
+  .object({
+    type: z.literal("presence_subscribe"),
+    peerIds: z
+      .array(z.string().regex(/^[0-9a-f]{64}$/u))
+      .max(MAX_CONVERSATIONS),
+  })
+  .strict();
 
 type Connection = {
   socket: WebSocket;
   userId: string;
   tokenHash: string;
   alive: boolean;
+  peerIds: Set<string>;
 };
 type WsOptions = {
   origin: string;
@@ -118,15 +128,141 @@ export async function registerWebSocket(
   const perUser = new Map<string, Set<Connection>>();
   const perToken = new Map<string, Set<Connection>>();
   const readWindows = new Map<string, number[]>();
+  const presenceWindows = new Map<string, number[]>();
+  const lastSeenWrites = new Map<string, number>();
+
+  type PresenceTarget = { connection: Connection; peerId: string };
+
+  async function getPresenceVisibility(
+    targets: PresenceTarget[],
+  ): Promise<Map<string, boolean>> {
+    if (!targets.length) return new Map();
+    const result = await pool.query<{
+      viewer_id: string;
+      peer_id: string;
+      allowed: boolean;
+    }>(
+      `SELECT pairs.viewer_id, pairs.peer_id,
+              (pairs.viewer_id <> pairs.peer_id
+               AND EXISTS(SELECT 1 FROM messages m WHERE m.sender_id=pairs.viewer_id AND m.recipient_id=pairs.peer_id)
+               AND EXISTS(SELECT 1 FROM messages m WHERE m.sender_id=pairs.peer_id AND m.recipient_id=pairs.viewer_id)) AS allowed
+       FROM unnest($1::text[], $2::text[]) AS pairs(viewer_id, peer_id)`,
+      [
+        targets.map(({ connection }) => connection.userId),
+        targets.map(({ peerId }) => peerId),
+      ],
+    );
+    return new Map(
+      result.rows.map((row) => [
+        `${row.viewer_id}:${row.peer_id}`,
+        row.allowed,
+      ]),
+    );
+  }
+
+  async function sendPresenceStatuses(
+    targets: PresenceTarget[],
+    omitHidden = false,
+  ) {
+    if (!targets.length) return;
+    const visibility = await getPresenceVisibility(targets);
+    const offlineVisibleIds = [
+      ...new Set(
+        targets
+          .filter(
+            ({ connection, peerId }) =>
+              visibility.get(`${connection.userId}:${peerId}`) &&
+              (perUser.get(peerId)?.size ?? 0) === 0,
+          )
+          .map(({ peerId }) => peerId),
+      ),
+    ];
+    const seenRows = offlineVisibleIds.length
+      ? await pool.query<{ user_id: string; last_seen_at: Date }>(
+          "SELECT user_id, last_seen_at FROM presence WHERE user_id=ANY($1::text[])",
+          [offlineVisibleIds],
+        )
+      : { rows: [] as Array<{ user_id: string; last_seen_at: Date }> };
+    const lastSeen = new Map(
+      seenRows.rows.map((row) => [row.user_id, row.last_seen_at.toISOString()]),
+    );
+    const byConnection = new Map<
+      Connection,
+      Array<{ peerId: string; online: boolean; lastSeenAt: string | null }>
+    >();
+    for (const { connection, peerId } of targets) {
+      const allowed = visibility.get(`${connection.userId}:${peerId}`) ?? false;
+      if (omitHidden && !allowed) continue;
+      const online = allowed && (perUser.get(peerId)?.size ?? 0) > 0;
+      const presences = byConnection.get(connection) ?? [];
+      presences.push({
+        peerId,
+        online,
+        lastSeenAt: allowed && !online ? (lastSeen.get(peerId) ?? null) : null,
+      });
+      byConnection.set(connection, presences);
+    }
+    for (const [connection, presences] of byConnection) {
+      if (connection.socket.readyState === WebSocket.OPEN)
+        connection.socket.send(JSON.stringify({ type: "presence", presences }));
+    }
+  }
+
+  async function publishPresence(userId: string): Promise<void> {
+    const targets = [...connections]
+      .filter((subscriber) => subscriber.peerIds.has(userId))
+      .map((connection) => ({ connection, peerId: userId }));
+    await sendPresenceStatuses(targets, true);
+  }
+
+  async function notifyNewlyVisiblePair(firstId: string, secondId: string) {
+    const targets: PresenceTarget[] = [];
+    for (const connection of connections) {
+      if (connection.userId === firstId && connection.peerIds.has(secondId))
+        targets.push({ connection, peerId: secondId });
+      else if (
+        connection.userId === secondId &&
+        connection.peerIds.has(firstId)
+      )
+        targets.push({ connection, peerId: firstId });
+    }
+    await sendPresenceStatuses(targets, true);
+  }
+
+  async function persistLastSeen(userId: string): Promise<string> {
+    const online = (perUser.get(userId)?.size ?? 0) > 0;
+    if (online) lastSeenWrites.set(userId, Date.now());
+    const result = await pool.query<{ last_seen_at: Date }>(
+      `INSERT INTO presence(user_id,last_seen_at) VALUES($1,now())
+       ON CONFLICT(user_id) DO UPDATE SET last_seen_at=now()
+       RETURNING last_seen_at`,
+      [userId],
+    );
+    if (!online) lastSeenWrites.delete(userId);
+    return result.rows[0]!.last_seen_at.toISOString();
+  }
 
   function remove(connection: Connection) {
     connections.delete(connection);
+    connection.peerIds.clear();
     hub.unregister(connection.socket, connection.userId);
     const userSockets = perUser.get(connection.userId);
     userSockets?.delete(connection);
     if (userSockets?.size === 0) {
       perUser.delete(connection.userId);
       readWindows.delete(connection.userId);
+      presenceWindows.delete(connection.userId);
+      void persistLastSeen(connection.userId)
+        .then(async () => {
+          if ((perUser.get(connection!.userId)?.size ?? 0) === 0)
+            await publishPresence(connection!.userId);
+        })
+        .catch((error: unknown) =>
+          app.log.error(
+            { errorType: error instanceof Error ? error.name : typeof error },
+            "Presence update failed",
+          ),
+        );
     }
     const tokenSockets = perToken.get(connection.tokenHash);
     tokenSockets?.delete(connection);
@@ -140,11 +276,17 @@ export async function registerWebSocket(
     }
   }
   app.addHook("onClose", async () => {
-    for (const connection of connections)
+    for (const userId of perUser.keys()) {
+      await persistLastSeen(userId);
+    }
+    for (const connection of connections) {
+      connection.peerIds.clear();
       connection.socket.close(1001, "server closing");
+    }
     connections.clear();
     perUser.clear();
     perToken.clear();
+    lastSeenWrites.clear();
   });
 
   await app.register(websocket, {
@@ -228,6 +370,7 @@ export async function registerWebSocket(
           }
           return;
         }
+        const frameClientMsgId = clientMsgIdFromFrame(frame);
 
         try {
           if (!authenticated) {
@@ -264,7 +407,14 @@ export async function registerWebSocket(
             }
             authenticated = true;
             clearTimeout(authTimer);
-            connection = { socket, userId, tokenHash: hash, alive: true };
+            connection = {
+              socket,
+              userId,
+              tokenHash: hash,
+              alive: true,
+              peerIds: new Set(),
+            };
+            const wasOnline = userConnections.size > 0;
             connections.add(connection);
             hub.register(socket, userId);
             userConnections.add(connection);
@@ -273,6 +423,20 @@ export async function registerWebSocket(
               perToken.get(hash) ?? new Set<Connection>();
             tokenConnections.add(connection);
             perToken.set(hash, tokenConnections);
+            if (!wasOnline) {
+              await persistLastSeen(userId);
+              try {
+                await publishPresence(userId);
+              } catch (error) {
+                app.log.error(
+                  {
+                    errorType:
+                      error instanceof Error ? error.name : typeof error,
+                  },
+                  "Presence update failed",
+                );
+              }
+            }
             socket.send(JSON.stringify({ type: "auth_ok", userId }));
             await hub.sendMailbox(socket, userId);
             return;
@@ -288,6 +452,32 @@ export async function registerWebSocket(
           }
 
           const type = (frame as { type: string }).type;
+          if (type === "presence_subscribe") {
+            const parsed = presenceSubscribeSchema.safeParse(frame);
+            if (!parsed.success) {
+              errorFrame(socket, "invalid_frame");
+              return;
+            }
+            const time = Date.now();
+            const recent = (
+              presenceWindows.get(connection!.userId) ?? []
+            ).filter((at) => time - at < 60_000);
+            if (recent.length >= 30) {
+              presenceWindows.set(connection!.userId, recent);
+              errorFrame(socket, "rate_limited");
+              return;
+            }
+            recent.push(time);
+            presenceWindows.set(connection!.userId, recent);
+            connection!.peerIds = new Set(parsed.data.peerIds);
+            await sendPresenceStatuses(
+              parsed.data.peerIds.map((peerId) => ({
+                connection: connection!,
+                peerId,
+              })),
+            );
+            return;
+          }
           if (type === "read") {
             const parsed = readSchema.safeParse(frame);
             if (!parsed.success) {
@@ -353,6 +543,12 @@ export async function registerWebSocket(
               errorFrame(socket, "recipient_not_found", input.clientMsgId);
               return;
             }
+            const visibilityBefore = await getPresenceVisibility([
+              { connection: connection!, peerId: input.to },
+            ]);
+            const wasVisible =
+              visibilityBefore.get(`${connection!.userId}:${input.to}`) ??
+              false;
 
             const inserted = await pool.query<MessageRow>(
               `INSERT INTO messages(sender_id, recipient_id, client_msg_id, ciphertext, sender_copy)
@@ -402,6 +598,8 @@ export async function registerWebSocket(
                 createdAt,
                 seq: row.seq,
               });
+              if (!wasVisible)
+                await notifyNewlyVisiblePair(row.sender_id, row.recipient_id);
             }
             return;
           }
@@ -441,7 +639,7 @@ export async function registerWebSocket(
             { event: "ws_frame_error", errorType, errorMessage },
             "WebSocket frame processing failed",
           );
-          errorFrame(socket, "internal_error", clientMsgIdFromFrame(frame));
+          errorFrame(socket, "internal_error", frameClientMsgId);
         }
       }
 
@@ -476,6 +674,20 @@ export async function registerWebSocket(
       }
       connection.alive = false;
       connection.socket.ping();
+    }
+    const current = Date.now();
+    for (const [userId, userSockets] of perUser) {
+      if (
+        userSockets.size &&
+        current - (lastSeenWrites.get(userId) ?? 0) >= 60_000
+      ) {
+        void persistLastSeen(userId).catch((error: unknown) =>
+          app.log.error(
+            { errorType: error instanceof Error ? error.name : typeof error },
+            "Presence heartbeat update failed",
+          ),
+        );
+      }
     }
   }, 30_000);
   heartbeat.unref();

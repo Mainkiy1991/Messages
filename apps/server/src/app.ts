@@ -16,6 +16,7 @@ import {
 import { z } from "zod";
 import { loadConfig } from "./config.js";
 import { closeWebSocketsForToken, registerWebSocket } from "./ws.js";
+import { MAX_CONVERSATIONS } from "@messages/shared";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -315,8 +316,8 @@ export async function buildApp(options: {
                 max(seq::bigint) AS last_seq, (array_agg(created_at ORDER BY seq::bigint DESC))[1] AS last_created_at
          FROM messages WHERE sender_id=$1 OR recipient_id=$1
          GROUP BY CASE WHEN sender_id=$1 THEN recipient_id ELSE sender_id END
-       ) conversations ORDER BY last_seq::bigint DESC LIMIT 500`,
-      [request.userId],
+       ) conversations ORDER BY last_seq::bigint DESC LIMIT $2`,
+      [request.userId, MAX_CONVERSATIONS],
     );
     return { conversations: result.rows };
   });

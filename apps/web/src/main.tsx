@@ -27,6 +27,7 @@ import {
   type ChatControllerState,
 } from "./lib/chat-controller.js";
 import type { ChatMessage } from "./lib/chat-controller.js";
+import { formatPresence } from "./lib/presence.js";
 import "./style.css";
 
 type Screen = "welcome" | "create" | "verify" | "login" | "home";
@@ -51,6 +52,7 @@ function App() {
     error: "",
     contacts: {},
     contactsError: false,
+    presence: {},
   });
   const [peerInput, setPeerInput] = useState("");
   const [newContactName, setNewContactName] = useState("");
@@ -61,12 +63,21 @@ function App() {
   const [idExpanded, setIdExpanded] = useState(false);
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
+  const [presenceClock, setPresenceClock] = useState(Date.now());
   const profileRef = useRef<HTMLDivElement | null>(null);
   const controllerRef = useRef<ChatController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const wasNearBottomRef = useRef(true);
   const previousPeerRef = useRef("");
   const preserveScrollRef = useRef(false);
+
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => setPresenceClock(Date.now()),
+      60_000,
+    );
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!profileOpen) return;
@@ -121,6 +132,7 @@ function App() {
       error: "",
       contacts: {},
       contactsError: false,
+      presence: {},
     });
     setPhrase("");
     setScreen("home");
@@ -181,6 +193,7 @@ function App() {
       error: "",
       contacts: {},
       contactsError: false,
+      presence: {},
     });
     setPhrase("");
     setShowLogoutConfirmation(false);
@@ -555,6 +568,14 @@ function App() {
                       <span className="chat-item-copy">
                         <strong>
                           {contactLabel(chat.peerId, chatState.contacts)}
+                          {socketState === "connected" &&
+                            chatState.presence[chat.peerId]?.online && (
+                              <span
+                                className="presence-dot"
+                                aria-label={t.presenceOnline}
+                                data-testid="presence-dot"
+                              />
+                            )}
                         </strong>
                         <span>{chatPreview(chat, t)}</span>
                       </span>
@@ -606,6 +627,28 @@ function App() {
                             {contactLabel(activePeer, chatState.contacts)}
                           </strong>
                           <small>{activePeer.slice(-10)}</small>
+                          {socketState === "connected" &&
+                            formatPresence(
+                              chatState.presence[activePeer]?.online ?? false,
+                              chatState.presence[activePeer]?.lastSeenAt ??
+                                null,
+                              language,
+                              presenceClock,
+                            ) && (
+                              <small
+                                className="presence-label"
+                                data-testid="presence-label"
+                              >
+                                {formatPresence(
+                                  chatState.presence[activePeer]?.online ??
+                                    false,
+                                  chatState.presence[activePeer]?.lastSeenAt ??
+                                    null,
+                                  language,
+                                  presenceClock,
+                                )}
+                              </small>
+                            )}
                           <span aria-hidden="true">✎</span>
                         </button>
                       ) : (

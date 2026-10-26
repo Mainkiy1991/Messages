@@ -162,6 +162,8 @@ test.describe("real browser chat", () => {
     const b = await openUser(browser);
     const alice = await createAccount(a.page);
     const bob = await createAccount(b.page);
+    let pageLoads = 0;
+    a.page.on("load", () => pageLoads++);
 
     await openChat(a.page, bob.id);
     await send(a.page, "Read this while online");
@@ -195,6 +197,57 @@ test.describe("real browser chat", () => {
         .locator('[data-testid="message"][data-direction="out"]')
         .filter({ hasText: "Read this after reconnecting" }),
     ).toHaveAttribute("data-status", "read");
+  });
+
+  test("shows presence only after two-way chat and updates after reconnect", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    let b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+
+    await openChat(a.page, bob.id);
+    await expect(a.page.getByTestId("presence-label")).toHaveCount(0);
+    await send(a.page, "Hello Bob");
+    await openChat(b.page, alice.id);
+    await send(b.page, "Hello Alice");
+
+    await expect(a.page.getByTestId("presence-label")).toHaveText("online");
+    await expect(
+      chatWith(a.page, bob.id).getByTestId("presence-dot"),
+    ).toBeVisible();
+
+    await b.context.close();
+    await expect(a.page.getByTestId("presence-label")).toContainText(
+      "last seen",
+    );
+    b = await openUser(browser);
+    await signIn(b.page, bob.phrase);
+    await expect(a.page.getByTestId("presence-label")).toHaveText("online");
+  });
+
+  test("updates presence after the first reply without reloading", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    let pageLoads = 0;
+    a.page.on("load", () => pageLoads++);
+
+    await openChat(a.page, bob.id);
+    await expect(a.page.getByTestId("presence-label")).toHaveCount(0);
+    await send(a.page, "First message from Alice");
+    await openChat(b.page, alice.id);
+    await send(b.page, "First reply from Bob");
+
+    await expect(a.page.getByTestId("presence-label")).toHaveText("online");
+    expect(pageLoads).toBe(0);
+    await expect(
+      chatWith(a.page, bob.id).getByTestId("presence-dot"),
+    ).toBeVisible();
   });
 
   test.afterEach(async () => {
