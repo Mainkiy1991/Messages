@@ -698,12 +698,17 @@ suite("server authentication (PostgreSQL)", () => {
       onlineSocket,
       buffered.filter((frame) => frame.type !== "message"),
     );
+    const expectedOrder = Array.from({ length: 10 }, (_, index) =>
+      Buffer.from([index + 1]).toString("base64"),
+    );
     const onlineReceived = new Promise<void>((resolve) => {
       onlineSocket.on("message", (data) => {
         const frame = JSON.parse(data.toString());
         if (frame.type !== "message") return;
         onlineOrder.push(frame.ciphertext);
-        if (onlineOrder.length === 10) resolve();
+        const received = new Set(onlineOrder);
+        if (expectedOrder.every((ciphertext) => received.has(ciphertext)))
+          resolve();
       });
     });
     const sendPromises = Array.from({ length: 10 }, (_, index) =>
@@ -732,9 +737,6 @@ suite("server authentication (PostgreSQL)", () => {
     }
     await Promise.all(sendPromises);
     await onlineReceived;
-    const expectedOrder = Array.from({ length: 10 }, (_, index) =>
-      Buffer.from([index + 1]).toString("base64"),
-    );
     expect(new Set(onlineOrder)).toEqual(new Set(expectedOrder));
 
     const offlineSocket = connect(url);

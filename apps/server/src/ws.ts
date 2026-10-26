@@ -349,6 +349,7 @@ export async function registerWebSocket(
           }
           return;
         }
+        const frameClientMsgId = clientMsgIdFromFrame(frame);
 
         try {
           if (!authenticated) {
@@ -600,7 +601,7 @@ export async function registerWebSocket(
             { event: "ws_frame_error", errorType, errorMessage },
             "WebSocket frame processing failed",
           );
-          errorFrame(socket, "internal_error", clientMsgIdFromFrame(frame));
+          errorFrame(socket, "internal_error", frameClientMsgId);
         }
       }
 
