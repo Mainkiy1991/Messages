@@ -33,6 +33,7 @@ export class ChatConnection {
   private readonly seen = new Set<string>();
   private presencePeerIds: string[] = [];
   private presenceConfigured = false;
+  private sendingPaused = false;
   private session: ServerSession | null;
   private sessionRequest: Promise<ServerSession> | null = null;
   private receiveQueue: Promise<void> = Promise.resolve();
@@ -119,8 +120,22 @@ export class ChatConnection {
   send(frame: OutgoingFrame): void {
     if (!this.outbox.has(frame.clientMsgId))
       this.outbox.set(frame.clientMsgId, { frame, timer: null });
-    if (this.authenticated)
+    if (this.authenticated && !this.sendingPaused)
       this.sendPending(this.outbox.get(frame.clientMsgId)!);
+  }
+
+  setSendingPaused(paused: boolean): void {
+    this.sendingPaused = paused;
+    if (paused || !this.authenticated) return;
+    for (const pending of this.outbox.values()) this.sendPending(pending);
+  }
+
+  clearPeer(peerId: string): void {
+    for (const [clientMsgId, pending] of this.outbox) {
+      if (pending.frame.to !== peerId) continue;
+      this.clearPendingTimer(pending);
+      this.outbox.delete(clientMsgId);
+    }
   }
 
   sendRead(peerId: string, upToSeq: string): void {
@@ -240,7 +255,8 @@ export class ChatConnection {
       this.unauthorizedRetries = 0;
       this.setState("connected");
       this.sendPresenceSubscriptions();
-      for (const pending of this.outbox.values()) this.sendPending(pending);
+      if (!this.sendingPaused)
+        for (const pending of this.outbox.values()) this.sendPending(pending);
       return;
     }
     if (frame.type === "message" && typeof frame.id === "string") {
@@ -278,7 +294,13 @@ export class ChatConnection {
   }
 
   private sendPending(pending: PendingFrame): void {
-    if (!this.authenticated || !this.socket || !this.active) return;
+    if (
+      !this.authenticated ||
+      this.sendingPaused ||
+      !this.socket ||
+      !this.active
+    )
+      return;
     this.clearPendingTimer(pending);
     try {
       this.socket.send(JSON.stringify(pending.frame));

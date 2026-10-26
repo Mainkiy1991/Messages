@@ -33,6 +33,15 @@ export const strings = {
       "Выйти? Ключи будут стёрты с этого устройства. Войти снова можно только по сид-фразе. Убедитесь, что она сохранена.",
     confirm: "Выйти",
     cancel: "Отмена",
+    deleteChatMenu: "Удалить чат",
+    chatActions: "Действия чата",
+    confirmDeleteChat:
+      "Переписка будет удалена только у вас, на всех ваших устройствах. У собеседника она останется. Неотправленные сообщения этого чата тоже будут удалены. Это нельзя отменить.",
+    deleteChatFailed:
+      "Не удалось удалить переписку. Проверьте соединение и попробуйте ещё раз.",
+    outboxClearFailed:
+      "Чат скрыт, но не удалось очистить очередь сообщений. Перезагрузите страницу и попробуйте снова.",
+    delete: "Удалить",
     back: "Назад",
     language: "Язык",
     serverUnavailable: "Сервер недоступен, попробуйте позже",
@@ -100,6 +109,15 @@ export const strings = {
       "Sign out? Keys will be erased from this device. You can sign in again only with your seed phrase. Make sure you have saved it.",
     confirm: "Sign out",
     cancel: "Cancel",
+    deleteChatMenu: "Delete chat",
+    chatActions: "Chat actions",
+    confirmDeleteChat:
+      "The conversation will be deleted only for you, on all your devices. It will remain with the other person. Unsent messages in this chat will also be deleted. This cannot be undone.",
+    deleteChatFailed:
+      "Could not delete the conversation. Check your connection and try again.",
+    outboxClearFailed:
+      "The chat was hidden, but its queued messages could not be cleared. Reload the page and try again.",
+    delete: "Delete",
     back: "Back",
     language: "Language",
     serverUnavailable: "Server unavailable, try again later",

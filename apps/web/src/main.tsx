@@ -48,6 +48,8 @@ function App() {
   const [hasError, setHasError] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showLogoutConfirmation, setShowLogoutConfirmation] = useState(false);
+  const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
+  const [chatMenuOpen, setChatMenuOpen] = useState(false);
   const [chatState, setChatState] = useState<ChatControllerState>({
     chats: [],
     activePeer: "",
@@ -209,6 +211,12 @@ function App() {
   const socketState = chatState.connectionState;
   const activeChat = chats.find((chat) => chat.peerId === activePeer);
   const activeMessages = activeChat?.messages ?? [];
+  useEffect(() => {
+    if (!activePeer) {
+      setChatMenuOpen(false);
+      setShowDeleteConfirmation(false);
+    }
+  }, [activePeer]);
   useLayoutEffect(() => {
     const list = messageListRef.current;
     if (!list) return;
@@ -242,6 +250,7 @@ function App() {
       if (cancelled) return;
       const controller = new ChatController(keys, userId, session, {
         onChange: setChatState,
+        deferOutgoingUntilConversations: true,
       });
       controllerRef.current = controller;
       controller.start();
@@ -285,6 +294,20 @@ function App() {
   function retryMessage(message: ChatMessage) {
     if (!message.clientMsgId || !activePeer) return;
     controllerRef.current?.retryMessage(activePeer, message.clientMsgId);
+  }
+
+  async function confirmDeleteChat() {
+    if (!activePeer) return;
+    const deleted = await controllerRef.current?.deleteChat(activePeer);
+    if (deleted) {
+      setShowDeleteConfirmation(false);
+      setChatMenuOpen(false);
+      setEditingName(false);
+      setDraft("");
+      setChatError("");
+    } else {
+      setChatError(t.deleteChatFailed);
+    }
   }
   return (
     <main className="shell">
@@ -684,6 +707,34 @@ function App() {
                           </button>
                         </form>
                       )}
+                      <div className="conversation-menu">
+                        <button
+                          type="button"
+                          className="secondary conversation-menu-toggle"
+                          aria-label={t.chatActions}
+                          aria-expanded={chatMenuOpen}
+                          data-testid="chat-menu"
+                          onClick={() => setChatMenuOpen(!chatMenuOpen)}
+                        >
+                          ⋯
+                        </button>
+                        {chatMenuOpen && (
+                          <div className="conversation-menu-panel">
+                            <button
+                              type="button"
+                              className="danger"
+                              data-testid="delete-chat"
+                              onClick={() => {
+                                setChatMenuOpen(false);
+                                setChatError("");
+                                setShowDeleteConfirmation(true);
+                              }}
+                            >
+                              {t.deleteChatMenu}
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
                     <div
                       className="message-list"
@@ -806,6 +857,9 @@ function App() {
             {chatState.contactsError && (
               <p className="error">{t.contactsDecryptError}</p>
             )}
+            {chatState.error === "outbox_clear_failed" && (
+              <p className="error">{t.outboxClearFailed}</p>
+            )}
             {showLogoutConfirmation && (
               <div
                 className="confirm-panel"
@@ -823,6 +877,34 @@ function App() {
                 <button
                   className="secondary"
                   onClick={() => setShowLogoutConfirmation(false)}
+                >
+                  {t.cancel}
+                </button>
+              </div>
+            )}
+            {showDeleteConfirmation && (
+              <div
+                className="confirm-panel"
+                role="alertdialog"
+                aria-labelledby="delete-chat-message"
+                aria-describedby="delete-chat-description"
+              >
+                <h2 id="delete-chat-message">{t.deleteChatMenu}</h2>
+                <p id="delete-chat-description">{t.confirmDeleteChat}</p>
+                {chatError && <p className="error">{chatError}</p>}
+                <button
+                  data-testid="confirm-delete-chat"
+                  className="danger"
+                  onClick={() => void confirmDeleteChat()}
+                >
+                  {t.delete}
+                </button>
+                <button
+                  className="secondary"
+                  onClick={() => {
+                    setShowDeleteConfirmation(false);
+                    setChatError("");
+                  }}
                 >
                   {t.cancel}
                 </button>

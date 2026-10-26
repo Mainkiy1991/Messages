@@ -34,7 +34,13 @@ export function createMessageHub(pool: Pool, batchSize = 200): MessageHub {
     const result = await pool.query<MessageRow>(
       `SELECT id, seq::text AS seq, sender_id, recipient_id, client_msg_id, ciphertext,
               sender_copy, created_at, delivered_at
-       FROM messages WHERE recipient_id=$1 AND delivered_at IS NULL
+       FROM messages
+       WHERE recipient_id=$1 AND delivered_at IS NULL
+         AND seq::bigint > COALESCE(
+           (SELECT cleared_before_seq FROM conversation_clears
+            WHERE user_id=$1 AND peer_id=messages.sender_id),
+           0::bigint
+         )
        ORDER BY seq::bigint ASC LIMIT $2`,
       [userId, batchSize],
     );

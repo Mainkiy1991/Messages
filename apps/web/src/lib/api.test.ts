@@ -8,7 +8,12 @@ import {
   verifyKeyBinding,
 } from "@messages/crypto";
 import { clearSession, restoreServerSession } from "../session.js";
-import { getUserKeys, loginToServer, verifyUserKeys } from "./api.js";
+import {
+  deleteConversation,
+  getUserKeys,
+  loginToServer,
+  verifyUserKeys,
+} from "./api.js";
 
 const keys = deriveKeys(
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
@@ -103,5 +108,29 @@ describe("API request timeout", () => {
     });
     await vi.advanceTimersByTimeAsync(10_000);
     await assertion;
+  });
+});
+
+describe("delete conversation API", () => {
+  it("sends an authenticated DELETE and returns the server clear boundary", async () => {
+    let requestUrl = "";
+    let requestInit: RequestInit | undefined;
+    const result = await deleteConversation(
+      "ab".repeat(32),
+      "session-token",
+      async (input, init) => {
+        requestUrl = String(input);
+        requestInit = init;
+        return Response.json({ clearedBeforeSeq: "100" });
+      },
+    );
+    expect(requestUrl).toBe(
+      `http://localhost:3000/conversations/${"ab".repeat(32)}`,
+    );
+    expect(requestInit?.method).toBe("DELETE");
+    expect(new Headers(requestInit?.headers).get("Authorization")).toBe(
+      "Bearer session-token",
+    );
+    expect(result).toEqual({ clearedBeforeSeq: "100" });
   });
 });

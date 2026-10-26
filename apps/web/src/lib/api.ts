@@ -20,6 +20,10 @@ export type ConversationSummary = {
   lastSeq: string;
   lastCreatedAt: string;
 };
+export type ConversationClear = {
+  peerId: string;
+  clearedBeforeSeq: string;
+};
 export type HistoryMessage = {
   id: string;
   seq: string;
@@ -151,10 +155,22 @@ export async function logoutFromServer(
 }
 
 export function getConversations(token: string, fetcher: FetchLike = fetch) {
-  return request<{ conversations: ConversationSummary[] }>(
+  return request<{
+    conversations: ConversationSummary[];
+    cleared: ConversationClear[];
+  }>(fetcher, "/conversations", token);
+}
+
+export function deleteConversation(
+  peerId: string,
+  token: string,
+  fetcher: FetchLike = fetch,
+) {
+  return request<{ clearedBeforeSeq: string }>(
     fetcher,
-    "/conversations",
+    `/conversations/${peerId}`,
     token,
+    { method: "DELETE" },
   );
 }
 

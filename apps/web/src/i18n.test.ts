@@ -18,6 +18,16 @@ describe("localization", () => {
   });
   it("provides translated visible labels", () => {
     expect(strings.ru.login).not.toBe(strings.en.login);
+    expect(strings.ru.deleteChatMenu).toBe("Удалить чат");
+    expect(strings.ru.delete).toBe("Удалить");
+    expect(strings.ru.cancel).toBe("Отмена");
+    expect(strings.ru.confirmDeleteChat).toContain(
+      "Неотправленные сообщения этого чата тоже будут удалены.",
+    );
+    expect(strings.en.confirmDeleteChat).toContain(
+      "Unsent messages in this chat will also be deleted.",
+    );
+    expect(strings.en.deleteChatFailed).toContain("try again");
   });
 });
 
