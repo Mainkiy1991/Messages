@@ -119,7 +119,7 @@ suite("server authentication (PostgreSQL)", () => {
     console.log("Test cleanup: app closed");
     await pool?.end();
     console.log("Test cleanup: pool closed");
-  });
+  }, 30_000);
 
   async function createChallenge(target = app, forwardedFor?: string) {
     const response = await target.inject({
