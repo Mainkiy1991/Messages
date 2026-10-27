@@ -32,6 +32,7 @@ if (!databaseUrl) {
 const { Pool } = pg;
 const pool = databaseUrl ? new Pool({ connectionString: databaseUrl }) : null;
 const suite = databaseUrl ? describe : describe.skip;
+const testSockets = new Set<WebSocket>();
 const phrase =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const keys = deriveKeys(phrase);
@@ -112,6 +113,17 @@ suite("server authentication (PostgreSQL)", () => {
   });
 
   afterAll(async () => {
+    await Promise.all(
+      [...testSockets].map(
+        (socket) =>
+          new Promise<void>((resolve) => {
+            if (socket.readyState === WebSocket.CLOSED) return resolve();
+            socket.once("close", () => resolve());
+            if (socket.readyState === WebSocket.CONNECTING) socket.terminate();
+            else socket.close();
+          }),
+      ),
+    );
     await app?.close();
     await pool?.end();
   });
@@ -216,6 +228,8 @@ suite("server authentication (PostgreSQL)", () => {
         "x-forwarded-for": forwardedFor,
       },
     });
+    testSockets.add(socket);
+    socket.once("close", () => testSockets.delete(socket));
     frameBuffers.set(socket, []);
     socket.on("message", (data) => {
       try {
