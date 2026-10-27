@@ -28,8 +28,8 @@ describe("loadConfig", () => {
   });
   it("accepts an explicit host", () => {
     expect(
-      loadConfig({ DATABASE_URL: databaseUrl, HOST: "0.0.0.0" }).HOST,
-    ).toBe("0.0.0.0");
+      loadConfig({ DATABASE_URL: databaseUrl, HOST: "0.0.0.0", PORT: "8080" }),
+    ).toMatchObject({ HOST: "0.0.0.0", PORT: 8080 });
   });
   it.each(["DATABASE_URL", "ALLOWED_ORIGINS"])(
     "requires %s in production without exposing values",

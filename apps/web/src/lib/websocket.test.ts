@@ -14,6 +14,7 @@ describe("WebSocket server address", () => {
     expect(resolveWebSocketUrl("https://messages-server.onrender.com")).toBe(
       "wss://messages-server.onrender.com/ws",
     );
+    expect(resolveWebSocketUrl()).toBe("ws://localhost:3000/ws");
   });
 });
 
