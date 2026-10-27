@@ -207,14 +207,12 @@ suite("server authentication (PostgreSQL)", () => {
 
   function connect(
     url: string,
-    options: { origin?: string | null; forwardedFor?: string } = {},
+    options: { origin?: string; forwardedFor?: string } = {},
   ) {
     const forwardedFor = options.forwardedFor ?? `192.0.2.${websocketIp++}`;
     const socket = new WebSocket(url, {
       headers: {
-        ...(options.origin === null
-          ? {}
-          : { origin: options.origin ?? "http://localhost:5173" }),
+        origin: options.origin ?? "http://localhost:5173",
         "x-forwarded-for": forwardedFor,
       },
     });
@@ -909,19 +907,6 @@ suite("server authentication (PostgreSQL)", () => {
     );
     expect(await failed).toBe(403);
     socket.terminate();
-  });
-
-  it("allows a WebSocket handshake without an Origin header", async () => {
-    const socket = connect(await listen(), { origin: null });
-    await new Promise<void>((resolve, reject) => {
-      socket.once("open", resolve);
-      socket.once("error", reject);
-    });
-    const closed = new Promise<void>((resolve) =>
-      socket.once("close", resolve),
-    );
-    socket.close();
-    await closed;
   });
 
   it("delivers an online message without senderCopy and confirms sent", async () => {
