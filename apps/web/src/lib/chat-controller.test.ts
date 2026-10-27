@@ -17,6 +17,7 @@ import {
   type ChatControllerDependencies,
   type ChatMessage,
 } from "./chat-controller.js";
+import type { IncomingFrame } from "./websocket.js";
 import type { ServerSession } from "../session.js";
 
 const alice = deriveKeys(
@@ -91,14 +92,17 @@ function makeController(
     login?: () => Promise<ServerSession>;
     socketFactory?: (url: string) => TestSocket;
     sendTimeoutMs?: number;
+    deferOutgoingUntilConversations?: boolean;
     setTimer?: typeof setTimeout;
     clearTimer?: typeof clearTimeout;
     random?: () => number;
     logout?: (token: string) => Promise<void>;
     getConversations?: ChatControllerDependencies["getConversations"];
+    deleteConversation?: ChatControllerDependencies["deleteConversation"];
     getContacts?: ChatControllerDependencies["getContacts"];
     getHistory?: ChatControllerDependencies["getHistory"];
     getHistoryAfter?: ChatControllerDependencies["getHistoryAfter"];
+    outbox?: ChatControllerDependencies["outbox"];
     isVisible?: () => boolean;
   } = {},
 ) {
@@ -128,14 +132,17 @@ function makeController(
         return socket;
       },
       sendTimeoutMs: options.sendTimeoutMs,
+      deferOutgoingUntilConversations: options.deferOutgoingUntilConversations,
       setTimer: options.setTimer,
       clearTimer: options.clearTimer,
       random: options.random,
       logout: options.logout,
       getConversations: options.getConversations,
+      deleteConversation: options.deleteConversation,
       getContacts: options.getContacts,
       getHistory: options.getHistory,
       getHistoryAfter: options.getHistoryAfter,
+      outbox: options.outbox,
       isVisible: options.isVisible,
     },
   );
@@ -916,6 +923,193 @@ describe("ChatController", () => {
       bobId.slice(-10),
     );
     controller.stop();
+  });
+
+  it("applies server clears, filters old history and live frames, and removes only that peer's outbox items", async () => {
+    vi.stubGlobal("window", {});
+    const queued = [bobId, charlieId].map((peerId, index) => {
+      const clientMsgId = (index + 20).toString(16).padStart(32, "0");
+      return {
+        type: "send" as const,
+        clientMsgId,
+        to: peerId,
+        ciphertext: "Y2lwaGVy",
+        senderCopy: encryptHistoryEntry({
+          historyKey: alice.historyKey,
+          clientMsgId,
+          peerId,
+          text: `queued ${index}`,
+          sentAt: Date.now(),
+        }),
+      };
+    });
+    const outbox = {
+      list: async () => queued.slice(),
+      put: async () => undefined,
+      remove: async (_userId: string, id: string) => {
+        const index = queued.findIndex((frame) => frame.clientMsgId === id);
+        if (index >= 0) queued.splice(index, 1);
+      },
+      removeForPeer: async (_userId: string, peerId: string) => {
+        for (let index = queued.length - 1; index >= 0; index--)
+          if (queued[index]?.to === peerId) queued.splice(index, 1);
+      },
+      clear: async () => undefined,
+    };
+    const historyEntry = (seq: string) => {
+      const clientMsgId = seq.padStart(32, "0");
+      return {
+        id: `history-${seq}`,
+        seq,
+        direction: "out" as const,
+        clientMsgId,
+        payload: encryptHistoryEntry({
+          historyKey: alice.historyKey,
+          clientMsgId,
+          peerId: bobId,
+          text: `history ${seq}`,
+          sentAt: Date.now(),
+        }),
+        createdAt: new Date().toISOString(),
+        deliveredAt: null,
+      };
+    };
+    const f = makeController({
+      initialSession: session("token-clear"),
+      deferOutgoingUntilConversations: true,
+      outbox,
+      getConversations: async () => ({
+        conversations: [
+          { peerId: bobId, lastSeq: "100", lastCreatedAt: future() },
+        ],
+        cleared: [{ peerId: bobId, clearedBeforeSeq: "99" }],
+      }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () => ({
+        hasMore: false,
+        messages: [historyEntry("98"), historyEntry("100")],
+      }),
+    });
+    f.controller.start();
+    await waitFor(() => f.sockets.length === 1);
+    f.sockets[0]!.open();
+    f.sockets[0]!.frame({ type: "auth_ok", userId: aliceId });
+    await waitFor(
+      () =>
+        f.controller.getSnapshot().chats.find((chat) => chat.peerId === bobId)
+          ?.historyLoaded === true,
+    );
+    expect(
+      f.controller
+        .getSnapshot()
+        .chats.find((chat) => chat.peerId === bobId)
+        ?.messages.map((message) => message.seq),
+    ).toEqual(["100"]);
+    expect(queued.map((frame) => frame.to)).toEqual([charlieId]);
+
+    f.sockets[0]!.frame({
+      type: "conversation_cleared",
+      peerId: bobId,
+      clearedBeforeSeq: "100",
+    });
+    await waitFor(
+      () =>
+        !f.controller.getSnapshot().chats.some((chat) => chat.peerId === bobId),
+    );
+    const oldCiphertext = encryptTextMessage({
+      senderEncryptionPrivateKey: bob.encryption.privateKey,
+      recipientEncryptionPublicKey: alice.encryption.publicKey,
+      senderId: bobId,
+      recipientId: aliceId,
+      text: "old",
+      sentAt: Date.now(),
+    });
+    const handleFrame = (
+      f.controller as unknown as {
+        handleFrame(frame: IncomingFrame): Promise<void>;
+      }
+    ).handleFrame.bind(f.controller);
+    await handleFrame({
+      type: "message",
+      id: "cleared-live",
+      from: bobId,
+      seq: "100",
+      ciphertext: oldCiphertext,
+      createdAt: new Date().toISOString(),
+    });
+    expect(
+      f.controller.getSnapshot().chats.some((chat) => chat.peerId === bobId),
+    ).toBe(false);
+    const newCiphertext = encryptTextMessage({
+      senderEncryptionPrivateKey: bob.encryption.privateKey,
+      recipientEncryptionPublicKey: alice.encryption.publicKey,
+      senderId: bobId,
+      recipientId: aliceId,
+      text: "new after clear",
+      sentAt: Date.now(),
+    });
+    await handleFrame({
+      type: "message",
+      id: "new-live",
+      from: bobId,
+      seq: "101",
+      ciphertext: newCiphertext,
+      createdAt: new Date().toISOString(),
+    });
+    expect(
+      f.controller.getSnapshot().chats.find((chat) => chat.peerId === bobId)
+        ?.messages[0]?.text,
+    ).toBe("new after clear");
+    f.controller.stop();
+  });
+
+  it("keeps the chat unchanged when deleting it fails", async () => {
+    const f = makeController({
+      initialSession: session("token-delete-failure"),
+      deleteConversation: async () => {
+        throw new TypeError("offline");
+      },
+      getHistory: async () => ({ hasMore: false, messages: [] }),
+    });
+    await f.controller.openChat(bobId);
+    const deleted = await f.controller.deleteChat(bobId);
+    expect(deleted).toBe(false);
+    expect(
+      f.controller.getSnapshot().chats.map((chat) => chat.peerId),
+    ).toContain(bobId);
+    expect(f.controller.getSnapshot().error).toBe("delete_failed");
+    f.controller.stop();
+  });
+
+  it("drops stale server chats on refresh but keeps a chat created this session", async () => {
+    let conversations = [
+      { peerId: bobId, lastSeq: "1", lastCreatedAt: future() },
+    ];
+    const f = makeController({
+      initialSession: session("token-refresh-clear"),
+      getConversations: async () => ({ conversations, cleared: [] }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () => ({ hasMore: false, messages: [] }),
+    });
+    await (
+      f.controller as unknown as {
+        loadConversations(token: string): Promise<void>;
+      }
+    ).loadConversations("token-refresh-clear");
+    expect(
+      f.controller.getSnapshot().chats.some((chat) => chat.peerId === bobId),
+    ).toBe(true);
+    await f.controller.openChat(charlieId);
+    conversations = [];
+    await (
+      f.controller as unknown as {
+        refreshHistoryHeads(): Promise<void>;
+      }
+    ).refreshHistoryHeads();
+    expect(f.controller.getSnapshot().chats.map((chat) => chat.peerId)).toEqual(
+      [charlieId],
+    );
+    f.controller.stop();
   });
 
   it("loads previews from history with at most three requests and twenty chats", async () => {

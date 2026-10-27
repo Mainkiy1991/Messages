@@ -416,6 +416,8 @@ select {
   border: 0;
   background: transparent;
   padding: 4px;
+  flex: 1;
+  min-width: 0;
 }
 .contact-name-trigger small {
   grid-column: 1;
@@ -450,6 +452,32 @@ select {
   flex: 0 0 auto;
   margin: 0;
   white-space: nowrap;
+}
+.conversation-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+.conversation-menu-toggle {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  font-size: 1.4rem;
+  line-height: 1;
+}
+.conversation-menu-panel {
+  position: absolute;
+  z-index: 10;
+  top: 42px;
+  right: 0;
+  width: max-content;
+  padding: 6px;
+  border: 1px solid #e4e6ee;
+  border-radius: 8px;
+  background: white;
+  box-shadow: 0 8px 24px #252a4020;
+}
+.conversation-menu-panel button {
+  min-height: 38px;
 }
 .message-list {
   padding: 14px;

@@ -55,6 +55,16 @@ const presenceSubscribeSchema = z
       .max(MAX_CONVERSATIONS),
   })
   .strict();
+export const conversationClearedSchema = z
+  .object({
+    type: z.literal("conversation_cleared"),
+    peerId: z.string().regex(/^[0-9a-f]{64}$/u),
+    clearedBeforeSeq: z
+      .string()
+      .regex(/^\d{1,19}$/u)
+      .refine((value) => BigInt(value) <= 9223372036854775807n),
+  })
+  .strict();
 
 type Connection = {
   socket: WebSocket;
@@ -119,7 +129,7 @@ export async function registerWebSocket(
   app: FastifyInstance,
   pool: Pool,
   options: WsOptions,
-): Promise<void> {
+): Promise<ReturnType<typeof createMessageHub>> {
   const maxPayload = options.maxPayload ?? 256 * 1024;
   const batchSize = options.batchSize ?? 200;
   const maxConnections = options.maxConnectionsPerUser ?? 5;
@@ -606,14 +616,24 @@ export async function registerWebSocket(
               seq: row.seq,
             });
             if (isNew) {
-              hub.sendToUser(row.recipient_id, {
-                type: "message",
-                id: row.id,
-                from: row.sender_id,
-                ciphertext: row.ciphertext,
-                createdAt,
-                seq: row.seq,
-              });
+              const clear = await pool.query<{ clearedBeforeSeq: string }>(
+                `SELECT COALESCE(
+                   (SELECT cleared_before_seq::text FROM conversation_clears
+                    WHERE user_id=$1 AND peer_id=$2),
+                   '0'
+                 ) AS "clearedBeforeSeq"`,
+                [row.recipient_id, row.sender_id],
+              );
+              if (BigInt(row.seq) > BigInt(clear.rows[0]!.clearedBeforeSeq)) {
+                hub.sendToUser(row.recipient_id, {
+                  type: "message",
+                  id: row.id,
+                  from: row.sender_id,
+                  ciphertext: row.ciphertext,
+                  createdAt,
+                  seq: row.seq,
+                });
+              }
               if (!wasVisible)
                 await notifyNewlyVisiblePair(row.sender_id, row.recipient_id);
             }
@@ -711,6 +731,7 @@ export async function registerWebSocket(
   (
     app as FastifyInstance & { closeWsToken?: (hash: string) => void }
   ).closeWsToken = closeToken;
+  return hub;
 }
 
 export function getWebSocketMemoryState(app: FastifyInstance) {

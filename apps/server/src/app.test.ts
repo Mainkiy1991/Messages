@@ -45,7 +45,7 @@ suite("server authentication (PostgreSQL)", () => {
 
   beforeAll(async () => {
     await pool!.query(
-      "DROP TABLE IF EXISTS presence, read_markers, contact_books, messages, sessions, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS conversation_clears, presence, read_markers, contact_books, messages, sessions, users, schema_migrations CASCADE",
     );
     await pool!.query(
       await readFile(
@@ -90,6 +90,17 @@ suite("server authentication (PostgreSQL)", () => {
     await pool!.query(
       await readFile(
         join(import.meta.dirname, "..", "migrations", "006_presence.sql"),
+        "utf8",
+      ),
+    );
+    await pool!.query(
+      await readFile(
+        join(
+          import.meta.dirname,
+          "..",
+          "migrations",
+          "007_conversation_clears.sql",
+        ),
         "utf8",
       ),
     );
@@ -467,7 +478,7 @@ suite("server authentication (PostgreSQL)", () => {
     socket.close();
   });
 
-  it("applies migration 006 on a clean schema and after 005 without losing rows", async () => {
+  it("applies migration 007 on a clean schema and after 006 without losing rows", async () => {
     const migrationFiles = [
       "001_initial.sql",
       "002_messages.sql",
@@ -475,6 +486,7 @@ suite("server authentication (PostgreSQL)", () => {
       "004_history_contacts.sql",
       "005_read_markers.sql",
       "006_presence.sql",
+      "007_conversation_clears.sql",
     ];
     async function applyInSchema(schema: string, count: number) {
       const client = await pool!.connect();
@@ -500,6 +512,31 @@ suite("server authentication (PostgreSQL)", () => {
           { column_name: "user_id", is_nullable: "NO" },
           { column_name: "last_seen_at", is_nullable: "NO" },
         ]);
+        const clearColumns = await client.query<{
+          column_name: string;
+          is_nullable: string;
+          column_default: string | null;
+        }>(
+          `SELECT column_name, is_nullable, column_default
+           FROM information_schema.columns
+           WHERE table_schema=$1 AND table_name='conversation_clears'
+           ORDER BY ordinal_position`,
+          [schema],
+        );
+        expect(clearColumns.rows).toHaveLength(4);
+        expect(clearColumns.rows.map((row) => row.column_name)).toEqual([
+          "user_id",
+          "peer_id",
+          "cleared_before_seq",
+          "updated_at",
+        ]);
+        expect(clearColumns.rows.map((row) => row.is_nullable)).toEqual([
+          "NO",
+          "NO",
+          "NO",
+          "NO",
+        ]);
+        expect(clearColumns.rows[3]?.column_default).toContain("now()");
       } finally {
         await client.query("SET search_path TO public");
         await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
@@ -507,7 +544,7 @@ suite("server authentication (PostgreSQL)", () => {
       }
     }
 
-    await applyInSchema(`presence_clean_${randomBytes(5).toString("hex")}`, 6);
+    await applyInSchema(`presence_clean_${randomBytes(5).toString("hex")}`, 7);
 
     const schema = `presence_upgrade_${randomBytes(5).toString("hex")}`;
     const client = await pool!.connect();
@@ -538,6 +575,17 @@ suite("server authentication (PostgreSQL)", () => {
           "utf8",
         ),
       );
+      await client.query(
+        await readFile(
+          join(
+            import.meta.dirname,
+            "..",
+            "migrations",
+            "007_conversation_clears.sql",
+          ),
+          "utf8",
+        ),
+      );
       expect(
         (await client.query("SELECT count(*)::int AS count FROM messages"))
           .rows[0]?.count,
@@ -545,6 +593,13 @@ suite("server authentication (PostgreSQL)", () => {
       expect(
         (await client.query("SELECT count(*)::int AS count FROM presence"))
           .rows[0]?.count,
+      ).toBe(0);
+      expect(
+        (
+          await client.query(
+            "SELECT count(*)::int AS count FROM conversation_clears",
+          )
+        ).rows[0]?.count,
       ).toBe(0);
     } finally {
       await client.query("SET search_path TO public");
@@ -561,6 +616,11 @@ suite("server authentication (PostgreSQL)", () => {
        VALUES($1,$2,$3,'YQ==','YQ=='),($2,$1,$4,'Yg==','Yg==')`,
       [a.userId, b.userId, randomId(), randomId()],
     );
+    await app.inject({
+      method: "DELETE",
+      url: `/conversations/${b.userId}`,
+      headers: { authorization: `Bearer ${a.token}` },
+    });
     const url = await listen();
     const viewer = (await connectAuth(a.token, url)).socket;
     const initial = nextFrame(viewer, (frame) => frame.type === "presence");
@@ -881,6 +941,98 @@ suite("server authentication (PostgreSQL)", () => {
     expect((await delivered).clientMsgId).toBe(sentFrame.clientMsgId);
     a.close();
     b.close();
+  });
+
+  it("broadcasts conversation clearing to the user's other sockets, not the peer", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    await pool!.query(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'a','a'),($2,$1,$4,'b','b')`,
+      [alice.userId, bob.userId, randomId(), randomId()],
+    );
+    const url = await listen();
+    const first = (await connectAuth(alice.token, url)).socket;
+    const second = (await connectAuth(alice.token, url)).socket;
+    const peer = (await connectAuth(bob.token, url)).socket;
+    const firstClear = nextFrame(
+      first,
+      (frame) => frame.type === "conversation_cleared",
+    );
+    const secondClear = nextFrame(
+      second,
+      (frame) => frame.type === "conversation_cleared",
+    );
+    const response = await app.inject({
+      method: "DELETE",
+      url: `/conversations/${bob.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    const frames = await Promise.all([firstClear, secondClear]);
+    expect(frames).toEqual(
+      expect.arrayContaining([
+        {
+          type: "conversation_cleared",
+          peerId: bob.userId,
+          clearedBeforeSeq: response.json().clearedBeforeSeq,
+        },
+      ]),
+    );
+    expect(
+      (frameBuffers.get(peer) ?? []).some(
+        (frame) => frame.type === "conversation_cleared",
+      ),
+    ).toBe(false);
+    first.close();
+    second.close();
+    peer.close();
+  });
+
+  it("suppresses cleared offline mail but delivers new live messages as sent, not delivered", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const url = await listen();
+    const sender = (await connectAuth(bob.token, url)).socket;
+    const sent = nextFrame(sender, (frame) => frame.type === "sent");
+    sendFrame(sender, payload(alice.userId));
+    const oldSent = await sent;
+    expect(oldSent).toHaveProperty("type", "sent");
+    const oldRow = await pool!.query<{ seq: string }>(
+      "SELECT seq::text AS seq FROM messages WHERE id=$1",
+      [oldSent.id],
+    );
+    const clear = await app.inject({
+      method: "DELETE",
+      url: `/conversations/${bob.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: { clearedBeforeSeq: "9223372036854775807" },
+    });
+    expect(BigInt(clear.json().clearedBeforeSeq)).toBe(
+      BigInt(oldRow.rows[0]!.seq),
+    );
+    const recipient = (await connectAuth(alice.token, url)).socket;
+    const live = nextFrame(recipient, (frame) => frame.type === "message");
+    const newSent = nextFrame(
+      sender,
+      (frame) =>
+        frame.type === "sent" &&
+        frame.clientMsgId === "00000000000000000000000000000001",
+    );
+    sendFrame(
+      sender,
+      payload(alice.userId, "00000000000000000000000000000001"),
+    );
+    const [incoming, sentFrame] = await Promise.all([live, newSent]);
+    expect(BigInt(incoming.seq as string)).toBeGreaterThan(
+      BigInt(clear.json().clearedBeforeSeq),
+    );
+    expect(incoming.id).toBe(sentFrame.id);
+    const oldStillUndelivered = await pool!.query<{
+      delivered_at: Date | null;
+    }>("SELECT delivered_at FROM messages WHERE id=$1", [oldSent.id]);
+    expect(oldStillUndelivered.rows[0]?.delivered_at).toBeNull();
+    sender.close();
+    recipient.close();
   });
 
   it("delivers every online send and preserves sequential mailbox order", async () => {
@@ -1404,6 +1556,189 @@ suite("server authentication (PostgreSQL)", () => {
     });
   });
 
+  it("clears history and previews for one user while preserving the peer's messages", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'a1','a1'),($2,$1,$4,'b1','b1'),($1,$2,$5,'a2','a2')
+       RETURNING seq::text AS seq`,
+      [alice.userId, bob.userId, randomId(), randomId(), randomId()],
+    );
+    const clear = await app.inject({
+      method: "DELETE",
+      url: `/conversations/${bob.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(clear.statusCode).toBe(200);
+    expect(clear.json()).toEqual({
+      clearedBeforeSeq: inserted.rows[2]!.seq,
+    });
+    const repeated = await app.inject({
+      method: "DELETE",
+      url: `/conversations/${bob.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(repeated.json()).toEqual(clear.json());
+    const aliceHistory = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(aliceHistory.json().messages).toEqual([]);
+    const bobHistory = await app.inject({
+      method: "GET",
+      url: `/history/${alice.userId}`,
+      headers: { authorization: `Bearer ${bob.token}` },
+    });
+    expect(bobHistory.json().messages).toHaveLength(3);
+    const hiddenConversations = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(hiddenConversations.json().conversations).toEqual([]);
+    expect(hiddenConversations.json().cleared).toEqual([
+      {
+        peerId: bob.userId,
+        clearedBeforeSeq: inserted.rows[2]!.seq,
+      },
+    ]);
+
+    const newMessage = await pool!.query<{ seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'new','new') RETURNING seq::text AS seq`,
+      [bob.userId, alice.userId, randomId()],
+    );
+    const visibleHistory = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}?after=${inserted.rows[2]!.seq}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(
+      visibleHistory
+        .json()
+        .messages.map((message: { seq: string }) => message.seq),
+    ).toEqual([newMessage.rows[0]!.seq]);
+    const visibleConversations = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(visibleConversations.json().conversations).toMatchObject([
+      { peerId: bob.userId, lastSeq: newMessage.rows[0]!.seq },
+    ]);
+    expect(
+      (
+        await pool!.query(
+          `SELECT count(*)::int AS count FROM messages
+           WHERE (sender_id=$1 AND recipient_id=$2) OR (sender_id=$2 AND recipient_id=$1)`,
+          [alice.userId, bob.userId],
+        )
+      ).rows[0]?.count,
+    ).toBe(4);
+    expect(bobHistory.json().messages).toHaveLength(3);
+  });
+
+  it("does not create a clear for an empty chat or lower an existing clear", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const empty = await app.inject({
+      method: "DELETE",
+      url: `/conversations/${bob.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(empty.json()).toEqual({ clearedBeforeSeq: "0" });
+    expect(
+      (
+        await pool!.query(
+          "SELECT count(*)::int AS count FROM conversation_clears WHERE user_id=$1 AND peer_id=$2",
+          [alice.userId, bob.userId],
+        )
+      ).rows[0]?.count,
+    ).toBe(0);
+
+    await pool!.query(
+      `INSERT INTO conversation_clears(user_id,peer_id,cleared_before_seq)
+       VALUES($1,$2,9999)`,
+      [alice.userId, bob.userId],
+    );
+    await pool!.query(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'old','old')`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const repeated = await app.inject({
+      method: "DELETE",
+      url: `/conversations/${bob.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(repeated.json()).toEqual({ clearedBeforeSeq: "9999" });
+  });
+
+  it("clears numeric 99 and 999 boundaries without hiding sequence 100 or 1000", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const insertAt = async (previous: number, expected: string) => {
+      await pool!.query(
+        "SELECT setval(pg_get_serial_sequence('messages','seq'), $1, true)",
+        [previous],
+      );
+      const inserted = await pool!.query<{ seq: string }>(
+        `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+         VALUES($1,$2,$3,'cipher','copy') RETURNING seq::text AS seq`,
+        [alice.userId, bob.userId, randomId()],
+      );
+      expect(inserted.rows[0]?.seq).toBe(expected);
+    };
+    const clear = async (expected: string) => {
+      const response = await app.inject({
+        method: "DELETE",
+        url: `/conversations/${bob.userId}`,
+        headers: { authorization: `Bearer ${alice.token}` },
+      });
+      expect(response.json()).toEqual({ clearedBeforeSeq: expected });
+    };
+
+    await insertAt(98, "99");
+    await clear("99");
+    await insertAt(99, "100");
+    const after99 = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}?after=99`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(
+      after99.json().messages.map((message: { seq: string }) => message.seq),
+    ).toEqual(["100"]);
+    const before100 = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}?before=100`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(before100.json().messages).toEqual([]);
+
+    await insertAt(998, "999");
+    await clear("999");
+    await insertAt(999, "1000");
+    const after999 = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}?after=999`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(
+      after999.json().messages.map((message: { seq: string }) => message.seq),
+    ).toEqual(["1000"]);
+    const preview = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(preview.json().conversations).toMatchObject([
+      { peerId: bob.userId, lastSeq: "1000" },
+    ]);
+  });
+
   it("returns the newest history page first and paginates every message exactly once", async () => {
     const a = await createAccount();
     const b = await createAccount();
@@ -1862,6 +2197,24 @@ suite("server authentication (PostgreSQL)", () => {
       (await app.inject({ method: "GET", url: `/history/${id}?x=1` }))
         .statusCode,
     ).toBe(401);
+    const account = await createAccount();
+    expect(
+      (
+        await app.inject({
+          method: "DELETE",
+          url: `/conversations/${id}`,
+        })
+      ).statusCode,
+    ).toBe(401);
+    expect(
+      (
+        await app.inject({
+          method: "DELETE",
+          url: "/conversations/not-a-peer",
+          headers: { authorization: `Bearer ${account.token}` },
+        })
+      ).statusCode,
+    ).toBe(400);
   });
 
   it("allows the contacts PUT preflight only from the configured web origin", async () => {

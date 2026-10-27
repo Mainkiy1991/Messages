@@ -181,6 +181,63 @@ describe("websocket chat connection", () => {
     connection.stop();
   });
 
+  it("pauses queued sends until clear metadata loads and drops cleared-peer retries", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const keys = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    const connection = new ChatConnection(
+      keys,
+      {
+        token: "a".repeat(43),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+      },
+      { onState: vi.fn(), onFrame: vi.fn() },
+      {
+        socketFactory: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+        random: () => 0,
+      },
+    );
+    const outgoing: OutgoingFrame = {
+      type: "send",
+      clientMsgId: "03".repeat(16),
+      to: "04".repeat(32),
+      ciphertext: "cipher",
+      senderCopy: "copy",
+    };
+    connection.setSendingPaused(true);
+    connection.send(outgoing);
+    connection.start();
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.open();
+    sockets[0]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sockets[0]!.sent.map((value) => JSON.parse(value).type)).toEqual([
+      "auth",
+    ]);
+
+    connection.setSendingPaused(false);
+    expect(JSON.parse(sockets[0]!.sent[1]!)).toEqual(outgoing);
+    connection.clearPeer(outgoing.to);
+    sockets[0]!.close();
+    await vi.advanceTimersByTimeAsync(800);
+    expect(sockets).toHaveLength(2);
+    sockets[1]!.open();
+    sockets[1]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sockets[1]!.sent.map((value) => JSON.parse(value).type)).toEqual([
+      "auth",
+    ]);
+    connection.stop();
+    vi.useRealTimers();
+  });
+
   it("acks duplicate inbound ids without rendering them twice", async () => {
     const socket = new FakeSocket();
     const socketFactory = vi.fn(() => socket as never);

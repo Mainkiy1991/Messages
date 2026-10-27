@@ -6,6 +6,7 @@ export interface OutboxStore {
   list(userId: string): Promise<OutgoingFrame[]>;
   put(userId: string, frame: OutgoingFrame): Promise<void>;
   remove(userId: string, clientMsgId: string): Promise<void>;
+  removeForPeer?(userId: string, peerId: string): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -57,6 +58,12 @@ export const indexedDbOutbox: OutboxStore =
         async remove(userId, id) {
           memory.delete(`${userId}:${id}`);
         },
+        async removeForPeer(userId, peerId) {
+          for (const [key, frame] of memory) {
+            if (key.startsWith(`${userId}:`) && frame.to === peerId)
+              memory.delete(key);
+          }
+        },
         async clear() {
           memory.clear();
         },
@@ -77,6 +84,35 @@ export const indexedDbOutbox: OutboxStore =
         },
         async remove(userId, clientMsgId) {
           await transact((store) => store.delete(`${userId}:${clientMsgId}`));
+        },
+        async removeForPeer(userId, peerId) {
+          const db = await openDb();
+          await new Promise<void>((resolve, reject) => {
+            const tx = db.transaction(STORE, "readwrite");
+            const store = tx.objectStore(STORE);
+            const request = store.getAll() as IDBRequest<
+              Array<{
+                key: string;
+                userId: string;
+                frame: OutgoingFrame;
+              }>
+            >;
+            request.onsuccess = () => {
+              for (const item of request.result) {
+                if (item.userId === userId && item.frame.to === peerId)
+                  store.delete(item.key);
+              }
+            };
+            request.onerror = () => reject(request.error);
+            tx.oncomplete = () => {
+              db.close();
+              resolve();
+            };
+            tx.onerror = () => {
+              db.close();
+              reject(tx.error);
+            };
+          });
         },
         async clear() {
           await new Promise<void>((resolve, reject) => {

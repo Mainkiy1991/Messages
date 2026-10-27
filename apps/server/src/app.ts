@@ -15,7 +15,11 @@ import {
 } from "@messages/crypto";
 import { z } from "zod";
 import { loadConfig } from "./config.js";
-import { closeWebSocketsForToken, registerWebSocket } from "./ws.js";
+import {
+  closeWebSocketsForToken,
+  conversationClearedSchema,
+  registerWebSocket,
+} from "./ws.js";
 import { MAX_CONVERSATIONS } from "@messages/shared";
 
 declare module "fastify" {
@@ -146,7 +150,7 @@ export async function buildApp(options: {
         requestOrigin === config.WEB_ORIGIN ? config.WEB_ORIGIN : false,
       );
     },
-    methods: ["GET", "HEAD", "POST", "PUT"],
+    methods: ["GET", "HEAD", "POST", "PUT", "DELETE"],
     allowedHeaders: ["Authorization", "Content-Type"],
   });
   await app.register(rateLimit, { global: false });
@@ -202,7 +206,7 @@ export async function buildApp(options: {
     await pool.end();
   });
 
-  await registerWebSocket(app, pool, {
+  const messageHub = await registerWebSocket(app, pool, {
     origin: config.WEB_ORIGIN,
     authTimeoutMs: options.wsAuthTimeoutMs,
     batchSize: options.wsBatchSize,
@@ -319,15 +323,61 @@ export async function buildApp(options: {
     const result = await pool.query(
       `SELECT peer_id AS "peerId", last_seq::text AS "lastSeq", last_created_at AS "lastCreatedAt"
        FROM (
-         SELECT CASE WHEN sender_id=$1 THEN recipient_id ELSE sender_id END AS peer_id,
-                max(seq::bigint) AS last_seq, (array_agg(created_at ORDER BY seq::bigint DESC))[1] AS last_created_at
-         FROM messages WHERE sender_id=$1 OR recipient_id=$1
-         GROUP BY CASE WHEN sender_id=$1 THEN recipient_id ELSE sender_id END
+         SELECT CASE WHEN m.sender_id=$1 THEN m.recipient_id ELSE m.sender_id END AS peer_id,
+                max(m.seq::bigint) AS last_seq, (array_agg(m.created_at ORDER BY m.seq::bigint DESC))[1] AS last_created_at
+         FROM messages m
+         LEFT JOIN conversation_clears c
+           ON c.user_id=$1 AND c.peer_id=CASE WHEN m.sender_id=$1 THEN m.recipient_id ELSE m.sender_id END
+         WHERE (m.sender_id=$1 OR m.recipient_id=$1)
+           AND m.seq::bigint > COALESCE(c.cleared_before_seq, 0::bigint)
+         GROUP BY CASE WHEN m.sender_id=$1 THEN m.recipient_id ELSE m.sender_id END
        ) conversations ORDER BY last_seq::bigint DESC LIMIT $2`,
       [request.userId, MAX_CONVERSATIONS],
     );
-    return { conversations: result.rows };
+    const cleared = await pool.query(
+      `SELECT peer_id AS "peerId", cleared_before_seq::text AS "clearedBeforeSeq"
+       FROM conversation_clears WHERE user_id=$1
+       ORDER BY updated_at DESC LIMIT 500`,
+      [request.userId],
+    );
+    return { conversations: result.rows, cleared: cleared.rows };
   });
+  app.delete<{
+    Params: { peerId: string };
+  }>(
+    "/conversations/:peerId",
+    {
+      preHandler: authenticate,
+      config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      if (!/^[0-9a-f]{64}$/u.test(request.params.peerId))
+        return reply.code(400).send({ error: "invalid_request" });
+      const result = await pool.query<{ clearedBeforeSeq: string }>(
+        `WITH maximum AS (
+           SELECT max(seq::bigint) AS seq FROM messages
+           WHERE (sender_id=$1 AND recipient_id=$2) OR (sender_id=$2 AND recipient_id=$1)
+         ), cleared AS (
+           INSERT INTO conversation_clears(user_id, peer_id, cleared_before_seq)
+           SELECT $1, $2, seq FROM maximum WHERE seq IS NOT NULL
+           ON CONFLICT(user_id, peer_id) DO UPDATE
+             SET cleared_before_seq=GREATEST(conversation_clears.cleared_before_seq, EXCLUDED.cleared_before_seq),
+                 updated_at=now()
+           RETURNING cleared_before_seq::text AS "clearedBeforeSeq"
+         )
+         SELECT COALESCE((SELECT "clearedBeforeSeq" FROM cleared), '0') AS "clearedBeforeSeq"`,
+        [request.userId, request.params.peerId],
+      );
+      const clearedBeforeSeq = result.rows[0]!.clearedBeforeSeq;
+      const frame = conversationClearedSchema.parse({
+        type: "conversation_cleared",
+        peerId: request.params.peerId,
+        clearedBeforeSeq,
+      });
+      messageHub.sendToUser(request.userId!, frame);
+      return { clearedBeforeSeq };
+    },
+  );
   app.get<{
     Params: { peerId: string };
     Querystring: { before?: string; after?: string; limit?: string };
@@ -349,6 +399,10 @@ export async function buildApp(options: {
                 CASE WHEN sender_id=$1 THEN sender_copy ELSE ciphertext END AS payload,
                 created_at AS "createdAt", delivered_at AS "deliveredAt"
          FROM messages WHERE ((sender_id=$1 AND recipient_id=$2) OR (sender_id=$2 AND recipient_id=$1))
+           AND seq::bigint > COALESCE(
+             (SELECT cleared_before_seq FROM conversation_clears WHERE user_id=$1 AND peer_id=$2),
+             0::bigint
+           )
            AND ($3::bigint IS NULL OR seq::bigint < $3::bigint)
            AND ($4::bigint IS NULL OR seq::bigint > $4::bigint)
          ORDER BY seq::bigint ${forward ? "ASC" : "DESC"} LIMIT $5`,

@@ -12,6 +12,7 @@ type User = {
   errors: string[];
   expectedDisconnect: boolean;
   expectedContactsFailure: boolean;
+  expectedDeleteFailure: boolean;
 };
 type Fixtures = {
   serverControl: { stop(): Promise<void>; start(): Promise<void> };
@@ -42,6 +43,7 @@ async function openUser(browser: Browser): Promise<User> {
     errors: [],
     expectedDisconnect: false,
     expectedContactsFailure: false,
+    expectedDeleteFailure: false,
   };
   page.on("pageerror", (error) =>
     user.errors.push(`pageerror: ${error.message}`),
@@ -61,11 +63,16 @@ async function openUser(browser: Browser): Promise<User> {
       /Failed to load resource: the server responded with a status of 500/u.test(
         message.text(),
       );
+    // Chromium reports the intentionally aborted DELETE route as a console error.
+    const expectedDeleteFailure =
+      user.expectedDeleteFailure &&
+      message.text() === "Failed to load resource: net::ERR_FAILED";
     // Chromium emits this network diagnostic during the deliberately stopped-server window.
     if (
       !expectedSocketRefusal &&
       !expectedApiRefusal &&
-      !expectedContactsFailure
+      !expectedContactsFailure &&
+      !expectedDeleteFailure
     )
       user.errors.push(`console.error: ${message.text()}`);
   });
@@ -197,6 +204,117 @@ test.describe("real browser chat", () => {
         .locator('[data-testid="message"][data-direction="out"]')
         .filter({ hasText: "Read this after reconnecting" }),
     ).toHaveAttribute("data-status", "read");
+  });
+
+  test("deletes a chat only for Alice, keeps it deleted after reload, and shows Bob's new message", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+
+    await openChat(a.page, bob.id);
+    await send(a.page, "Old conversation");
+    await openChat(b.page, alice.id);
+    await expect(b.page.locator(".message-list .message-text")).toContainText(
+      "Old conversation",
+    );
+
+    await a.page.getByTestId("chat-menu").click();
+    await a.page.getByTestId("delete-chat").click();
+    await expect(a.page.getByRole("alertdialog")).toContainText(
+      "The conversation will be deleted only for you, on all your devices.",
+    );
+    await a.page.getByRole("button", { name: "Cancel" }).click();
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
+    await expect(a.page.locator(".message-list .message-text")).toContainText(
+      "Old conversation",
+    );
+
+    await a.page.getByTestId("chat-menu").click();
+    await a.page.getByTestId("delete-chat").click();
+    await a.page.getByTestId("confirm-delete-chat").click();
+    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
+    await expect(b.page.locator(".message-list .message-text")).toContainText(
+      "Old conversation",
+    );
+
+    await a.page.reload();
+    await expect(a.page.getByTestId("connection-status")).toHaveAttribute(
+      "data-state",
+      "connected",
+    );
+    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
+    await send(b.page, "A new conversation");
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
+    await chatWith(a.page, bob.id).click();
+    await expect(a.page.locator(".message-list .message-text")).toHaveText([
+      "A new conversation",
+    ]);
+  });
+
+  test("keeps the chat on network failure and allows retry from the confirmation dialog", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(a.page, bob.id);
+    await send(a.page, "Keep me if deletion fails");
+
+    const deleteRoute = async (route: import("@playwright/test").Route) => {
+      if (route.request().method() === "DELETE") await route.abort();
+      else await route.continue();
+    };
+    await a.page.route("**/conversations/**", deleteRoute);
+    a.expectedDeleteFailure = true;
+    await a.page.getByTestId("chat-menu").click();
+    await a.page.getByTestId("delete-chat").click();
+    await a.page.getByTestId("confirm-delete-chat").click();
+    await expect(a.page.getByRole("alertdialog")).toContainText(
+      "Could not delete the conversation. Check your connection and try again.",
+    );
+    a.expectedDeleteFailure = false;
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
+    await expect(a.page.locator(".message-list .message-text")).toContainText(
+      "Keep me if deletion fails",
+    );
+
+    await a.page.unroute("**/conversations/**", deleteRoute);
+    await a.page.getByTestId("confirm-delete-chat").click();
+    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
+  });
+
+  test("removes a cleared chat from another window without reloading at 360px", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(a.page, bob.id);
+    await send(a.page, "Across Alice's windows");
+
+    const secondWindow = await a.context.newPage();
+    await secondWindow.goto("/");
+    await expect(secondWindow.getByTestId("connection-status")).toHaveAttribute(
+      "data-state",
+      "connected",
+    );
+    await expect(chatWith(secondWindow, bob.id)).toBeVisible();
+    await a.page.setViewportSize({ width: 360, height: 780 });
+    await a.page.getByTestId("chat-menu").click();
+    await expect(a.page.getByTestId("chat-menu")).toBeVisible();
+    expect(
+      await a.page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBeLessThanOrEqual(360);
+    await a.page.getByTestId("delete-chat").click();
+    await a.page.getByTestId("confirm-delete-chat").click();
+    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
+    await expect(chatWith(secondWindow, bob.id)).toHaveCount(0);
+    await expect(a.page.locator(".messenger")).not.toHaveClass(/show-chat/u);
   });
 
   test("shows presence only after two-way chat and updates after reconnect", async ({

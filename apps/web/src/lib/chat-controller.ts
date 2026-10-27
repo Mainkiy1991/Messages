@@ -14,8 +14,10 @@ import {
   getConversations,
   getHistory,
   getHistoryAfter,
+  deleteConversation,
   putContacts,
   type ContactBookResponse,
+  type ConversationClear,
   type ConversationSummary,
   type HistoryMessage,
 } from "./api.js";
@@ -97,12 +99,18 @@ export type ChatControllerDependencies = {
   clearTimer?: typeof clearTimeout;
   sendTimeoutMs?: number;
   isVisible?: () => boolean;
+  deferOutgoingUntilConversations?: boolean;
   now?: () => number;
   makeClientMsgId?: () => string;
   onChange?: (state: ChatControllerState) => void;
-  getConversations?: (
+  getConversations?: (token: string) => Promise<{
+    conversations: ConversationSummary[];
+    cleared?: ConversationClear[];
+  }>;
+  deleteConversation?: (
+    peerId: string,
     token: string,
-  ) => Promise<{ conversations: ConversationSummary[] }>;
+  ) => Promise<{ clearedBeforeSeq: string }>;
   getHistory?: (
     peerId: string,
     token: string,
@@ -151,11 +159,15 @@ export class ChatController {
   private stopped = false;
   private readonly sentReadMarkers = new Map<string, string>();
   private readonly peerReadMarkers = new Map<string, string>();
+  private readonly clearedBeforeSeqs = new Map<string, string>();
+  private readonly sessionLocalPeers = new Set<string>();
+  private serverConversationPeers = new Set<string>();
   private readTimer: ReturnType<typeof setTimeout> | null = null;
   private historyRequests = new Map<string, Promise<boolean>>();
   private historyCatchupRequests = new Map<string, Promise<void>>();
   private presencePeerSignature = "";
   private hasConnected = false;
+  private readonly deferOutgoingUntilConversations: boolean;
   private state: ChatControllerState = {
     chats: [],
     activePeer: "",
@@ -172,11 +184,15 @@ export class ChatController {
     session: ServerSession | null = null,
     private readonly deps: ChatControllerDependencies = {},
   ) {
+    this.deferOutgoingUntilConversations =
+      deps.deferOutgoingUntilConversations ?? false;
     this.connection = new ChatConnection(
       keys,
       session,
       {
         onState: (connectionState) => {
+          if (connectionState !== "connected" && this.hasConnected)
+            this.connection.setSendingPaused(true);
           this.update({
             connectionState,
             ...(connectionState === "connected" ? {} : { presence: {} }),
@@ -219,6 +235,7 @@ export class ChatController {
         sendTimeoutMs: deps.sendTimeoutMs,
       },
     );
+    this.connection.setSendingPaused(this.deferOutgoingUntilConversations);
   }
 
   getSnapshot(): ChatControllerState {
@@ -236,43 +253,9 @@ export class ChatController {
   private async loadAccountData(): Promise<void> {
     if (this.accountDataLoading) return this.accountDataLoading;
     this.accountDataLoading = (async () => {
-      if (!this.outboxLoaded) {
-        try {
-          const queued = await (this.deps.outbox ?? indexedDbOutbox).list(
-            this.userId,
-          );
-          for (const frame of queued) {
-            let text = "";
-            let decryptFailed = false;
-            try {
-              text = decryptHistoryEntry({
-                historyKey: this.keys.historyKey,
-                clientMsgId: frame.clientMsgId,
-                peerId: frame.to,
-                entry: frame.senderCopy,
-              }).text;
-            } catch {
-              decryptFailed = true;
-            }
-            this.upsertMessage(frame.to, {
-              id: frame.clientMsgId,
-              clientMsgId: frame.clientMsgId,
-              text,
-              createdAt: new Date().toISOString(),
-              direction: "out",
-              status: "sending",
-              frame,
-              ...(decryptFailed ? { decryptFailed: true } : {}),
-              arrivalOrder: this.arrivalOrder++,
-            });
-            this.connection.send(frame);
-          }
-          this.outboxLoaded = true;
-        } catch {
-          this.update({ error: "server_unavailable" });
-        }
-      }
-      if (this.conversationsLoaded && this.contactsLoaded) return;
+      if (!this.outboxLoaded) await this.loadOutbox();
+      if (this.conversationsLoaded && this.contactsLoaded && this.outboxLoaded)
+        return;
       let session: ServerSession;
       try {
         session = await this.connection.ensureSession();
@@ -284,15 +267,76 @@ export class ChatController {
         }
         return;
       }
-      const tasks: Promise<void>[] = [];
       if (!this.conversationsLoaded)
-        tasks.push(this.loadConversations(session.token));
-      if (!this.contactsLoaded) tasks.push(this.loadContacts(session.token));
-      await Promise.allSettled(tasks);
+        await this.loadConversations(session.token);
+      if (!this.contactsLoaded) await this.loadContacts(session.token);
+      if (this.conversationsLoaded) {
+        await this.flushOutbox();
+        this.connection.setSendingPaused(false);
+      }
     })().finally(() => {
       this.accountDataLoading = null;
     });
     return this.accountDataLoading;
+  }
+
+  private async loadOutbox(): Promise<void> {
+    try {
+      const queued = await (this.deps.outbox ?? indexedDbOutbox).list(
+        this.userId,
+      );
+      for (const frame of queued) {
+        let text = "";
+        let decryptFailed = false;
+        try {
+          text = decryptHistoryEntry({
+            historyKey: this.keys.historyKey,
+            clientMsgId: frame.clientMsgId,
+            peerId: frame.to,
+            entry: frame.senderCopy,
+          }).text;
+        } catch {
+          decryptFailed = true;
+        }
+        this.upsertMessage(frame.to, {
+          id: frame.clientMsgId,
+          clientMsgId: frame.clientMsgId,
+          text,
+          createdAt: new Date().toISOString(),
+          direction: "out",
+          status: "sending",
+          frame,
+          ...(decryptFailed ? { decryptFailed: true } : {}),
+          arrivalOrder: this.arrivalOrder++,
+        });
+      }
+      this.outboxLoaded = true;
+    } catch {
+      this.update({ error: "server_unavailable" });
+    }
+  }
+
+  private async flushOutbox(): Promise<void> {
+    try {
+      const queued = await (this.deps.outbox ?? indexedDbOutbox).list(
+        this.userId,
+      );
+      for (const frame of queued) this.connection.send(frame);
+    } catch {
+      this.update({ error: "server_unavailable" });
+    }
+  }
+
+  private reconcileConversations(summaries: Chat[]): Chat[] {
+    const serverPeers = new Set(summaries.map((chat) => chat.peerId));
+    const existingChats = this.state.chats.filter(
+      (chat) =>
+        serverPeers.has(chat.peerId) ||
+        (this.sessionLocalPeers.has(chat.peerId) &&
+          !this.serverConversationPeers.has(chat.peerId)),
+    );
+    this.serverConversationPeers = serverPeers;
+    return sortChats(mergeChats(existingChats, summaries));
   }
 
   private async loadConversations(token: string): Promise<void> {
@@ -302,6 +346,12 @@ export class ChatController {
     try {
       const result = await this.withFreshSession(token, get);
       if (this.stopped) return;
+      for (const cleared of result.cleared ?? []) {
+        await this.applyConversationClear(
+          cleared.peerId,
+          cleared.clearedBeforeSeq,
+        );
+      }
       const chats = result.conversations.map((item) => ({
         peerId: item.peerId,
         messages: [],
@@ -309,7 +359,7 @@ export class ChatController {
         hasMore: true,
         lastCreatedAt: item.lastCreatedAt,
       }));
-      this.update({ chats: sortChats(mergeChats(this.state.chats, chats)) });
+      this.update({ chats: this.reconcileConversations(chats) });
       this.conversationsLoaded = true;
       this.resetAccountRetry("conversations");
       void this.loadRecentPreviews(chats.map((chat) => chat.peerId));
@@ -462,6 +512,20 @@ export class ChatController {
           ((token) => getConversations(token, this.deps.fetcher)),
       );
       this.resetAccountRetry("conversations");
+      for (const cleared of result.cleared ?? []) {
+        await this.applyConversationClear(
+          cleared.peerId,
+          cleared.clearedBeforeSeq,
+        );
+      }
+      const summaries = result.conversations.map((conversation) => ({
+        peerId: conversation.peerId,
+        messages: [],
+        unreadCount: 0,
+        hasMore: true,
+        lastCreatedAt: conversation.lastCreatedAt,
+      }));
+      const mergedChats = this.reconcileConversations(summaries);
       const lastSeq = new Map(
         result.conversations.map((conversation) => [
           conversation.peerId,
@@ -469,7 +533,7 @@ export class ChatController {
         ]),
       );
       this.update({
-        chats: this.state.chats.map((chat) => {
+        chats: mergedChats.map((chat) => {
           if (!chat.historyLoaded) return chat;
           const known = chat.messages
             .map((message) => message.seq)
@@ -479,6 +543,8 @@ export class ChatController {
           return { ...chat, historyStale: BigInt(server) > BigInt(known) };
         }),
       });
+      this.connection.setSendingPaused(false);
+      void this.loadRecentPreviews(summaries.map((chat) => chat.peerId));
       const activePeer = this.state.activePeer;
       const activeChat = this.state.chats.find(
         (chat) => chat.peerId === activePeer,
@@ -575,8 +641,12 @@ export class ChatController {
           ),
         });
       }
+      const threshold = this.clearedBeforeSeqs.get(peerId);
+      const visibleMessages = threshold
+        ? page.messages.filter((entry) => BigInt(entry.seq) > BigInt(threshold))
+        : page.messages;
       const messages = await Promise.all(
-        page.messages.map(async (entry) => {
+        visibleMessages.map(async (entry) => {
           try {
             const text =
               entry.direction === "out"
@@ -792,6 +862,11 @@ export class ChatController {
       this.setError(this.peerKeyError(error));
       return;
     }
+    if (
+      !this.serverConversationPeers.has(peerId) &&
+      !this.state.chats.some((chat) => chat.peerId === peerId)
+    )
+      this.sessionLocalPeers.add(peerId);
     try {
       const now = new Date((this.deps.now ?? Date.now)()).toISOString();
       const chats = this.state.chats.some((chat) => chat.peerId === peerId)
@@ -842,6 +917,81 @@ export class ChatController {
 
   closeActiveChat(): void {
     this.update({ activePeer: "" });
+  }
+
+  async deleteChat(peerId: string): Promise<boolean> {
+    let result: { clearedBeforeSeq: string };
+    try {
+      const session = await this.connection.ensureSession();
+      const remove =
+        this.deps.deleteConversation ??
+        ((id: string, token: string) =>
+          deleteConversation(id, token, this.deps.fetcher));
+      result = await this.withFreshSession(session.token, (token) =>
+        remove(peerId, token),
+      );
+    } catch {
+      this.update({ error: "delete_failed" });
+      return false;
+    }
+    try {
+      await this.applyConversationClear(peerId, result.clearedBeforeSeq);
+      this.update({ error: "" });
+      return true;
+    } catch {
+      this.update({ error: "outbox_clear_failed" });
+      return false;
+    }
+  }
+
+  private async applyConversationClear(
+    peerId: string,
+    clearedBeforeSeq: string,
+  ): Promise<void> {
+    if (!/^\d{1,19}$/u.test(clearedBeforeSeq)) return;
+    const previous = this.clearedBeforeSeqs.get(peerId) ?? "0";
+    const threshold =
+      BigInt(clearedBeforeSeq) > BigInt(previous) ? clearedBeforeSeq : previous;
+    this.clearedBeforeSeqs.set(peerId, threshold);
+    this.sessionLocalPeers.delete(peerId);
+    this.connection.clearPeer(peerId);
+    const chats = this.state.chats
+      .map((chat) =>
+        chat.peerId === peerId
+          ? {
+              ...chat,
+              unreadCount: 0,
+              messages: chat.messages.filter(
+                (message) =>
+                  !!message.seq && BigInt(message.seq) > BigInt(threshold),
+              ),
+            }
+          : chat,
+      )
+      .filter((chat) => chat.peerId !== peerId || chat.messages.length > 0);
+    this.update({
+      chats,
+      ...(this.state.activePeer === peerId &&
+      !chats.some((chat) => chat.peerId === peerId)
+        ? { activePeer: "" }
+        : {}),
+    });
+    const outbox = this.deps.outbox ?? indexedDbOutbox;
+    try {
+      if (outbox.removeForPeer) {
+        await outbox.removeForPeer(this.userId, peerId);
+      } else {
+        const queued = await outbox.list(this.userId);
+        await Promise.all(
+          queued
+            .filter((frame) => frame.to === peerId)
+            .map((frame) => outbox.remove(this.userId, frame.clientMsgId)),
+        );
+      }
+    } catch (error) {
+      this.update({ error: "outbox_clear_failed" });
+      throw error;
+    }
   }
 
   async sendText(text: string): Promise<void> {
@@ -954,6 +1104,14 @@ export class ChatController {
   }
 
   private async handleFrame(frame: IncomingFrame): Promise<void> {
+    if (
+      frame.type === "conversation_cleared" &&
+      typeof frame.peerId === "string" &&
+      typeof frame.clearedBeforeSeq === "string"
+    ) {
+      await this.applyConversationClear(frame.peerId, frame.clearedBeforeSeq);
+      return;
+    }
     if (frame.type === "presence" && Array.isArray(frame.presences)) {
       const presence = { ...this.state.presence };
       for (const item of frame.presences) {
@@ -980,6 +1138,14 @@ export class ChatController {
       typeof frame.ciphertext === "string" &&
       typeof frame.createdAt === "string"
     ) {
+      const clearedBeforeSeq = this.clearedBeforeSeqs.get(frame.from);
+      if (
+        typeof frame.seq === "string" &&
+        /^\d+$/u.test(frame.seq) &&
+        clearedBeforeSeq &&
+        BigInt(frame.seq) <= BigInt(clearedBeforeSeq)
+      )
+        return;
       let text = "";
       let decryptFailed = false;
       try {
