@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import type { Socket } from "node:net";
 import pg from "pg";
 import WebSocket from "ws";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -33,6 +34,7 @@ const { Pool } = pg;
 const pool = databaseUrl ? new Pool({ connectionString: databaseUrl }) : null;
 const suite = databaseUrl ? describe : describe.skip;
 const testSockets = new Set<WebSocket>();
+const serverSockets = new Set<Socket>();
 const phrase =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const keys = deriveKeys(phrase);
@@ -110,13 +112,18 @@ suite("server authentication (PostgreSQL)", () => {
       now: () => clock,
       trustProxy: true,
     });
+    app.server.on("connection", (socket: Socket) => {
+      serverSockets.add(socket);
+      socket.once("close", () => serverSockets.delete(socket));
+    });
   });
 
   afterAll(async () => {
     for (const socket of testSockets) socket.terminate();
+    for (const socket of serverSockets) socket.destroy();
     await app?.close();
     await pool?.end();
-  }, 30_000);
+  });
 
   async function createChallenge(target = app, forwardedFor?: string) {
     const response = await target.inject({
