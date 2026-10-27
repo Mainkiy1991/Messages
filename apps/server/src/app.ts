@@ -208,17 +208,17 @@ export async function buildApp(options: {
     }
   }, 15_000);
   cleanupChallenges.unref();
-  const messageHub = await registerWebSocket(app, pool, {
-    origins: config.ALLOWED_ORIGINS,
-    authTimeoutMs: options.wsAuthTimeoutMs,
-    batchSize: options.wsBatchSize,
-  });
   app.addHook("onClose", async () => {
     clearInterval(sessionCleanup);
     clearInterval(cleanupChallenges);
     await pool.end();
   });
 
+  const messageHub = await registerWebSocket(app, pool, {
+    origins: config.ALLOWED_ORIGINS,
+    authTimeoutMs: options.wsAuthTimeoutMs,
+    batchSize: options.wsBatchSize,
+  });
   app.get(
     "/health",
     { config: { rateLimit: false }, logLevel: "silent" },

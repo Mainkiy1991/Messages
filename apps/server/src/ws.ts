@@ -302,9 +302,7 @@ export async function registerWebSocket(
     }
   }
   app.addHook("onClose", async () => {
-    for (const userId of perUser.keys()) {
-      await persistLastSeen(userId);
-    }
+    const userIds = [...perUser.keys()];
     for (const connection of connections) {
       connection.peerIds.clear();
       connection.socket.close(1001, "server closing");
@@ -313,6 +311,16 @@ export async function registerWebSocket(
     perUser.clear();
     perToken.clear();
     lastSeenWrites.clear();
+    await Promise.all(
+      userIds.map((userId) =>
+        persistLastSeen(userId).catch((error: unknown) => {
+          app.log.error(
+            { errorType: error instanceof Error ? error.name : typeof error },
+            "Could not persist presence during shutdown",
+          );
+        }),
+      ),
+    );
   });
 
   await app.register(websocket, {
