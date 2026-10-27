@@ -113,17 +113,7 @@ suite("server authentication (PostgreSQL)", () => {
   });
 
   afterAll(async () => {
-    await Promise.all(
-      [...testSockets].map(
-        (socket) =>
-          new Promise<void>((resolve) => {
-            if (socket.readyState === WebSocket.CLOSED) return resolve();
-            socket.once("close", () => resolve());
-            if (socket.readyState === WebSocket.CONNECTING) socket.terminate();
-            else socket.close();
-          }),
-      ),
-    );
+    for (const socket of testSockets) socket.terminate();
     await app?.close();
     await pool?.end();
   });
