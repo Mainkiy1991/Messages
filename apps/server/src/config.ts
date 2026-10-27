@@ -12,6 +12,28 @@ const schema = z.object({
     .transform((value) => value === "true"),
 });
 
+const allowedOriginError =
+  "ALLOWED_ORIGINS must contain origins like https://example.com";
+
+function normalizeOrigin(value: string): string {
+  const trimmed = value.trim();
+  if (!/^https?:\/\/[^/?#]+\/?$/iu.test(trimmed))
+    throw new Error(allowedOriginError);
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw new Error(allowedOriginError);
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.href !== `${url.origin}/`
+  ) {
+    throw new Error(allowedOriginError);
+  }
+  return url.origin;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const result = schema.safeParse(env);
   if (!result.success) {
@@ -26,26 +48,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     throw new Error(
       "Invalid server configuration: DATABASE_URL is required in production",
     );
-  const origins = (
-    parsed.ALLOWED_ORIGINS ?? (production ? "" : "http://localhost:5173")
-  )
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean);
+  const origins = [
+    ...new Set(
+      (parsed.ALLOWED_ORIGINS ?? (production ? "" : "http://localhost:5173"))
+        .split(",")
+        .map((origin) => origin.trim())
+        .filter(Boolean)
+        .map(normalizeOrigin),
+    ),
+  ];
   if (production && origins.length === 0)
     throw new Error(
       "Invalid server configuration: ALLOWED_ORIGINS is required in production",
-    );
-  const validatedOrigins = z.array(z.string().url()).safeParse(origins);
-  if (!validatedOrigins.success)
-    throw new Error(
-      "Invalid server configuration: ALLOWED_ORIGINS must contain valid URLs",
     );
   return {
     HOST: parsed.HOST ?? (production ? "0.0.0.0" : "127.0.0.1"),
     PORT: parsed.PORT,
     DATABASE_URL: parsed.DATABASE_URL ?? "",
-    ALLOWED_ORIGINS: validatedOrigins.data,
+    ALLOWED_ORIGINS: origins,
     TRUST_PROXY: parsed.TRUST_PROXY,
   };
 }

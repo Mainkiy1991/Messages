@@ -2228,6 +2228,29 @@ suite("server authentication (PostgreSQL)", () => {
     ).toBe(400);
   });
 
+  it("matches a browser Origin when the configured allowlist ends with a slash", async () => {
+    const originalAllowedOrigins = process.env.ALLOWED_ORIGINS;
+    process.env.ALLOWED_ORIGINS = "https://site.onrender.com/";
+    let originApp: Awaited<ReturnType<typeof buildApp>> | undefined;
+    try {
+      originApp = await buildApp({ databaseUrl: databaseUrl! });
+    } finally {
+      if (originalAllowedOrigins === undefined)
+        delete process.env.ALLOWED_ORIGINS;
+      else process.env.ALLOWED_ORIGINS = originalAllowedOrigins;
+    }
+    try {
+      const response = await originApp!.inject({
+        method: "GET",
+        url: "/health",
+        headers: { origin: "https://site.onrender.com" },
+      });
+      expect(response.statusCode).toBe(200);
+    } finally {
+      await originApp?.close();
+    }
+  });
+
   it("allows the contacts PUT preflight only from the configured web origin", async () => {
     const allowed = await app.inject({
       method: "OPTIONS",
