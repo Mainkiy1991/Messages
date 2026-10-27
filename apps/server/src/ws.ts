@@ -305,7 +305,7 @@ export async function registerWebSocket(
     const userIds = [...perUser.keys()];
     for (const connection of connections) {
       connection.peerIds.clear();
-      connection.socket.close(1001, "server closing");
+      connection.socket.terminate();
     }
     connections.clear();
     perUser.clear();

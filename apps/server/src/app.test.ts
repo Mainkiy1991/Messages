@@ -114,11 +114,8 @@ suite("server authentication (PostgreSQL)", () => {
 
   afterAll(async () => {
     for (const socket of testSockets) socket.terminate();
-    console.log("Test cleanup: closing app");
     await app?.close();
-    console.log("Test cleanup: app closed");
     await pool?.end();
-    console.log("Test cleanup: pool closed");
   }, 30_000);
 
   async function createChallenge(target = app, forwardedFor?: string) {
