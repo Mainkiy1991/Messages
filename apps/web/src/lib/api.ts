@@ -34,9 +34,17 @@ export type HistoryMessage = {
   deliveredAt: string | null;
 };
 export type ContactBookResponse = { version: string; blob: string | null };
-export const API_URL = (
-  import.meta.env.VITE_API_URL || "http://localhost:3000"
-).replace(/\/$/u, "");
+export function resolveApiUrl(
+  value?: string,
+  fallback = import.meta.env.DEV ? "http://localhost:3000" : "",
+): string {
+  return (value || fallback).replace(/\/$/u, "");
+}
+
+export const API_URL = resolveApiUrl(
+  import.meta.env.VITE_API_URL,
+  import.meta.env.DEV ? "http://localhost:3000" : "",
+);
 
 export class ApiError extends Error {
   constructor(

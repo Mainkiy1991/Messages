@@ -1,9 +1,17 @@
 import { userIdFromPublicKey, type DerivedKeys } from "@messages/crypto";
 import { MAX_CONVERSATIONS } from "@messages/shared";
-import { API_URL, type FetchLike, loginToServer } from "./api.js";
+import {
+  API_URL,
+  type FetchLike,
+  loginToServer,
+  resolveApiUrl,
+} from "./api.js";
 import type { ServerSession } from "../session.js";
 
 export type SocketState = "connected" | "connecting" | "offline";
+export function resolveWebSocketUrl(apiUrl = API_URL): string {
+  return `${resolveApiUrl(apiUrl).replace(/^http/u, "ws")}/ws`;
+}
 export type OutgoingFrame = {
   type: "send";
   clientMsgId: string;
@@ -190,7 +198,7 @@ export class ChatConnection {
   }
 
   private url(): string {
-    return `${API_URL.replace(/^http/u, "ws")}/ws`;
+    return resolveWebSocketUrl();
   }
 
   private async connect(): Promise<void> {

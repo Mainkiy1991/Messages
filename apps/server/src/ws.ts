@@ -74,7 +74,7 @@ type Connection = {
   peerIds: Set<string>;
 };
 type WsOptions = {
-  origin: string;
+  origins: string[];
   authTimeoutMs?: number;
   batchSize?: number;
   maxConnectionsPerUser?: number;
@@ -302,17 +302,25 @@ export async function registerWebSocket(
     }
   }
   app.addHook("onClose", async () => {
-    for (const userId of perUser.keys()) {
-      await persistLastSeen(userId);
-    }
+    const userIds = [...perUser.keys()];
     for (const connection of connections) {
       connection.peerIds.clear();
-      connection.socket.close(1001, "server closing");
+      connection.socket.terminate();
     }
     connections.clear();
     perUser.clear();
     perToken.clear();
     lastSeenWrites.clear();
+    await Promise.all(
+      userIds.map((userId) =>
+        persistLastSeen(userId).catch((error: unknown) => {
+          app.log.error(
+            { errorType: error instanceof Error ? error.name : typeof error },
+            "Could not persist presence during shutdown",
+          );
+        }),
+      ),
+    );
   });
 
   await app.register(websocket, {
@@ -325,7 +333,7 @@ export async function registerWebSocket(
       config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
       preValidation: async (request: FastifyRequest, reply: FastifyReply) => {
         const origin = request.headers.origin;
-        if (origin && origin !== options.origin) {
+        if (origin && !options.origins.includes(origin)) {
           return reply.code(403).send({ error: "origin_forbidden" });
         }
       },

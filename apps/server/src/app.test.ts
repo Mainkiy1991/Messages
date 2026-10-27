@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import type { Socket } from "node:net";
 import pg from "pg";
 import WebSocket from "ws";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -32,6 +33,8 @@ if (!databaseUrl) {
 const { Pool } = pg;
 const pool = databaseUrl ? new Pool({ connectionString: databaseUrl }) : null;
 const suite = databaseUrl ? describe : describe.skip;
+const testSockets = new Set<WebSocket>();
+const serverSockets = new Set<Socket>();
 const phrase =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 const keys = deriveKeys(phrase);
@@ -109,9 +112,15 @@ suite("server authentication (PostgreSQL)", () => {
       now: () => clock,
       trustProxy: true,
     });
+    app.server.on("connection", (socket: Socket) => {
+      serverSockets.add(socket);
+      socket.once("close", () => serverSockets.delete(socket));
+    });
   });
 
   afterAll(async () => {
+    for (const socket of testSockets) socket.terminate();
+    for (const socket of serverSockets) socket.destroy();
     await app?.close();
     await pool?.end();
   });
@@ -216,6 +225,8 @@ suite("server authentication (PostgreSQL)", () => {
         "x-forwarded-for": forwardedFor,
       },
     });
+    testSockets.add(socket);
+    socket.once("close", () => testSockets.delete(socket));
     frameBuffers.set(socket, []);
     socket.on("message", (data) => {
       try {
@@ -2217,6 +2228,29 @@ suite("server authentication (PostgreSQL)", () => {
     ).toBe(400);
   });
 
+  it("matches a browser Origin when the configured allowlist ends with a slash", async () => {
+    const originalAllowedOrigins = process.env.ALLOWED_ORIGINS;
+    process.env.ALLOWED_ORIGINS = "https://site.onrender.com/";
+    let originApp: Awaited<ReturnType<typeof buildApp>> | undefined;
+    try {
+      originApp = await buildApp({ databaseUrl: databaseUrl! });
+    } finally {
+      if (originalAllowedOrigins === undefined)
+        delete process.env.ALLOWED_ORIGINS;
+      else process.env.ALLOWED_ORIGINS = originalAllowedOrigins;
+    }
+    try {
+      const response = await originApp!.inject({
+        method: "GET",
+        url: "/health",
+        headers: { origin: "https://site.onrender.com" },
+      });
+      expect(response.statusCode).toBe(200);
+    } finally {
+      await originApp?.close();
+    }
+  });
+
   it("allows the contacts PUT preflight only from the configured web origin", async () => {
     const allowed = await app.inject({
       method: "OPTIONS",
@@ -2249,9 +2283,29 @@ suite("server authentication (PostgreSQL)", () => {
         "access-control-request-headers": "authorization,content-type",
       },
     });
+    expect(denied.statusCode).toBe(403);
     expect(denied.headers["access-control-allow-origin"]).toBeUndefined();
     expect(denied.headers["access-control-allow-methods"]).toBeUndefined();
     expect(denied.headers["access-control-allow-headers"]).toBeUndefined();
+  });
+
+  it("allows requests without Origin and rejects foreign HTTP Origins", async () => {
+    expect(
+      (await app.inject({ method: "GET", url: "/health" })).json(),
+    ).toEqual({ status: "ok" });
+    const allowed = await app.inject({
+      method: "GET",
+      url: "/health",
+      headers: { origin: "http://localhost:5173" },
+    });
+    expect(allowed.statusCode).toBe(200);
+    const denied = await app.inject({
+      method: "GET",
+      url: "/health",
+      headers: { origin: "https://evil.example" },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toEqual({ error: "origin_forbidden" });
   });
 
   it("stores contacts with optimistic locking, atomic conflicts, and user isolation", async () => {

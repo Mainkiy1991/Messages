@@ -1,6 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 import { deriveKeys, userIdFromPublicKey } from "@messages/crypto";
-import { ChatConnection, type OutgoingFrame } from "./websocket.js";
+import {
+  ChatConnection,
+  resolveWebSocketUrl,
+  type OutgoingFrame,
+} from "./websocket.js";
+
+describe("WebSocket server address", () => {
+  it("converts configured HTTP addresses and defaults to localhost in development", () => {
+    expect(resolveWebSocketUrl("http://localhost:3000/")).toBe(
+      "ws://localhost:3000/ws",
+    );
+    expect(resolveWebSocketUrl("https://messages-server.onrender.com")).toBe(
+      "wss://messages-server.onrender.com/ws",
+    );
+    expect(resolveWebSocketUrl()).toBe("ws://localhost:3000/ws");
+  });
+});
 
 class FakeSocket extends EventTarget {
   sent: string[] = [];
