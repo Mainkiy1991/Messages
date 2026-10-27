@@ -917,7 +917,11 @@ suite("server authentication (PostgreSQL)", () => {
       socket.once("open", resolve);
       socket.once("error", reject);
     });
+    const closed = new Promise<void>((resolve) =>
+      socket.once("close", resolve),
+    );
     socket.close();
+    await closed;
   });
 
   it("delivers an online message without senderCopy and confirms sent", async () => {
