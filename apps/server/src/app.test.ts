@@ -207,12 +207,14 @@ suite("server authentication (PostgreSQL)", () => {
 
   function connect(
     url: string,
-    options: { origin?: string; forwardedFor?: string } = {},
+    options: { origin?: string | null; forwardedFor?: string } = {},
   ) {
     const forwardedFor = options.forwardedFor ?? `192.0.2.${websocketIp++}`;
     const socket = new WebSocket(url, {
       headers: {
-        origin: options.origin ?? "http://localhost:5173",
+        ...(options.origin === null
+          ? {}
+          : { origin: options.origin ?? "http://localhost:5173" }),
         "x-forwarded-for": forwardedFor,
       },
     });
@@ -907,6 +909,15 @@ suite("server authentication (PostgreSQL)", () => {
     );
     expect(await failed).toBe(403);
     socket.terminate();
+  });
+
+  it("allows a WebSocket handshake without an Origin header", async () => {
+    const socket = connect(await listen(), { origin: null });
+    await new Promise<void>((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    socket.close();
   });
 
   it("delivers an online message without senderCopy and confirms sent", async () => {
@@ -2249,9 +2260,29 @@ suite("server authentication (PostgreSQL)", () => {
         "access-control-request-headers": "authorization,content-type",
       },
     });
+    expect(denied.statusCode).toBe(403);
     expect(denied.headers["access-control-allow-origin"]).toBeUndefined();
     expect(denied.headers["access-control-allow-methods"]).toBeUndefined();
     expect(denied.headers["access-control-allow-headers"]).toBeUndefined();
+  });
+
+  it("allows requests without Origin and rejects foreign HTTP Origins", async () => {
+    expect(
+      (await app.inject({ method: "GET", url: "/health" })).json(),
+    ).toEqual({ status: "ok" });
+    const allowed = await app.inject({
+      method: "GET",
+      url: "/health",
+      headers: { origin: "http://localhost:5173" },
+    });
+    expect(allowed.statusCode).toBe(200);
+    const denied = await app.inject({
+      method: "GET",
+      url: "/health",
+      headers: { origin: "https://evil.example" },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toEqual({ error: "origin_forbidden" });
   });
 
   it("stores contacts with optimistic locking, atomic conflicts, and user isolation", async () => {

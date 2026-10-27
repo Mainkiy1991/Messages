@@ -74,7 +74,7 @@ type Connection = {
   peerIds: Set<string>;
 };
 type WsOptions = {
-  origin: string;
+  origins: string[];
   authTimeoutMs?: number;
   batchSize?: number;
   maxConnectionsPerUser?: number;
@@ -325,7 +325,7 @@ export async function registerWebSocket(
       config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
       preValidation: async (request: FastifyRequest, reply: FastifyReply) => {
         const origin = request.headers.origin;
-        if (origin && origin !== options.origin) {
+        if (origin && !options.origins.includes(origin)) {
           return reply.code(403).send({ error: "origin_forbidden" });
         }
       },

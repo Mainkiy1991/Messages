@@ -143,11 +143,19 @@ export async function buildApp(options: {
               : "request_error";
     return reply.code(statusCode).send({ error: errorCode });
   });
+  app.addHook("onRequest", async (request, reply) => {
+    const origin = request.headers.origin;
+    if (origin && !config.ALLOWED_ORIGINS.includes(origin)) {
+      return reply.code(403).send({ error: "origin_forbidden" });
+    }
+  });
   await app.register(cors, {
     origin: (requestOrigin, callback) => {
       callback(
         null,
-        requestOrigin === config.WEB_ORIGIN ? config.WEB_ORIGIN : false,
+        requestOrigin && config.ALLOWED_ORIGINS.includes(requestOrigin)
+          ? requestOrigin
+          : false,
       );
     },
     methods: ["GET", "HEAD", "POST", "PUT", "DELETE"],
@@ -207,12 +215,16 @@ export async function buildApp(options: {
   });
 
   const messageHub = await registerWebSocket(app, pool, {
-    origin: config.WEB_ORIGIN,
+    origins: config.ALLOWED_ORIGINS,
     authTimeoutMs: options.wsAuthTimeoutMs,
     batchSize: options.wsBatchSize,
   });
 
-  app.get("/health", async () => ({ status: "ok" }));
+  app.get(
+    "/health",
+    { config: { rateLimit: false }, logLevel: "silent" },
+    async () => ({ status: "ok" }),
+  );
   app.post(
     "/auth/challenge",
     { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },

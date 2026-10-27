@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: messages-server
+    runtime: node
+    plan: free
+    branch: main
+    autoDeployTrigger: checksPass
+    buildCommand: corepack pnpm install --frozen-lockfile && corepack pnpm build
+    startCommand: node apps/server/dist/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: TRUST_PROXY
+        value: "true"
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+
+  - type: web
+    name: messages-web
+    runtime: static
+    branch: main
+    autoDeployTrigger: checksPass
+    buildCommand: corepack pnpm install --frozen-lockfile && corepack pnpm build
+    staticPublishPath: apps/web/dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

@@ -14,6 +14,16 @@ import {
   loginToServer,
   verifyUserKeys,
 } from "./api.js";
+import { resolveApiUrl } from "./api.js";
+
+describe("API server address", () => {
+  it("uses the configured API URL and keeps localhost as the development default", () => {
+    expect(resolveApiUrl("https://messages-server.onrender.com/")).toBe(
+      "https://messages-server.onrender.com",
+    );
+    expect(resolveApiUrl(undefined)).toBe("http://localhost:3000");
+  });
+});
 
 const keys = deriveKeys(
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",

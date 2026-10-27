@@ -33,9 +33,7 @@ try {
         process.exitCode = 1;
       }),
   );
-  console.log(
-    `Server listening. Сервер запущен: http://${config.HOST}:${config.PORT}`,
-  );
+  console.log(`Server listening on port ${config.PORT}`);
 } catch (error) {
   console.error(
     error instanceof Error ? error.message : "Server startup failed",
