@@ -925,6 +925,107 @@ describe("ChatController", () => {
     controller.stop();
   });
 
+  it("shows waking before the deadline and reveals a real contacts error after 90 seconds", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", {});
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => {
+        throw new ApiError(500, "internal_error");
+      },
+    });
+    await (
+      controller as unknown as { loadContacts(token: string): Promise<void> }
+    ).loadContacts("token");
+    expect(controller.getSnapshot().contactsError).toBe(true);
+    (
+      controller as unknown as {
+        scheduleAccountRetry(resource: "contacts"): void;
+      }
+    ).scheduleAccountRetry("contacts");
+    expect(controller.getSnapshot().waking).toBe(true);
+    await vi.advanceTimersByTimeAsync(89_999);
+    expect(controller.getSnapshot().waking).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(controller.getSnapshot().waking).toBe(false);
+    expect(controller.getSnapshot().contactsError).toBe(true);
+    controller.stop();
+  });
+
+  it("keeps waking expired after the next account retry", async () => {
+    vi.useFakeTimers();
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => {
+        throw new ApiError(500, "internal_error");
+      },
+    });
+    const internals = controller as unknown as {
+      scheduleAccountRetry(resource: "contacts"): void;
+      resetAccountRetry(resource: "contacts"): void;
+      loadContacts(token: string): Promise<void>;
+    };
+    await internals.loadContacts("token");
+    expect(controller.getSnapshot().contactsError).toBe(true);
+    internals.resetAccountRetry("contacts");
+    vi.advanceTimersByTime(90_000);
+    expect(controller.getSnapshot().waking).toBe(false);
+
+    internals.scheduleAccountRetry("contacts");
+
+    expect(controller.getSnapshot().waking).toBe(false);
+    expect(controller.getSnapshot().contactsError).toBe(true);
+    controller.stop();
+  });
+
+  it("ends waking immediately after an account endpoint responds", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", {});
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => ({ version: "0", blob: null }),
+    });
+    (
+      controller as unknown as {
+        scheduleAccountRetry(resource: "contacts"): void;
+      }
+    ).scheduleAccountRetry("contacts");
+    expect(controller.getSnapshot().waking).toBe(true);
+    await (
+      controller as unknown as { loadContacts(token: string): Promise<void> }
+    ).loadContacts("token");
+    expect(controller.getSnapshot().waking).toBe(false);
+    controller.stop();
+  });
+
+  it("does not show waking after the server has responded once", () => {
+    vi.useFakeTimers();
+    const controller = new ChatController(alice, aliceId, session("token"));
+    const internals = controller as unknown as {
+      markServerResponded(): void;
+      scheduleAccountRetry(resource: "contacts"): void;
+    };
+    internals.markServerResponded();
+    internals.scheduleAccountRetry("contacts");
+    expect(controller.getSnapshot().waking).toBe(false);
+    controller.stop();
+  });
+
+  it("clears the waking timeout on stop", () => {
+    vi.useFakeTimers();
+    const clearTimer = vi.fn(globalThis.clearTimeout);
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      clearTimer,
+    });
+    (
+      controller as unknown as {
+        scheduleAccountRetry(resource: "contacts"): void;
+      }
+    ).scheduleAccountRetry("contacts");
+    const count = vi.getTimerCount();
+    expect(count).toBeGreaterThan(0);
+    controller.stop();
+    expect(clearTimer).toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("applies server clears, filters old history and live frames, and removes only that peer's outbox items", async () => {
     vi.stubGlobal("window", {});
     const queued = [bobId, charlieId].map((peerId, index) => {

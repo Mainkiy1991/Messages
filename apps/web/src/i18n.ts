@@ -73,6 +73,7 @@ export const strings = {
     contactSaveFailed: "Не удалось сохранить имя",
     contactsDecryptError:
       "Не удалось загрузить контакты. Для чатов показаны ID.",
+    serverWaking: "Сервер просыпается, подождите до минуты…",
     loadMore: "Загрузить ещё",
     loading: "Загрузка…",
     presenceOnline: "в сети",
@@ -148,6 +149,7 @@ export const strings = {
     saveName: "Save name",
     contactSaveFailed: "Could not save contact name",
     contactsDecryptError: "Could not load contacts. Chats are shown with IDs.",
+    serverWaking: "The server is waking up, please wait up to a minute…",
     loadMore: "Load more",
     loading: "Loading…",
     presenceOnline: "online",

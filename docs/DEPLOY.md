@@ -9,15 +9,15 @@
 Перед первым запуском примените миграции 001–007 к production-базе с компьютера. Откройте PowerShell в папке репозитория и выполните:
 
 ```powershell
-$secureUrl = Read-Host "Введите строку подключения Neon" -AsSecureString
-$credential = [System.Management.Automation.PSCredential]::new("Neon", $secureUrl)
-$env:DATABASE_URL = $credential.GetNetworkCredential().Password
-Remove-Variable secureUrl, credential
+$env:DATABASE_URL = Read-Host "Вставьте строку подключения боевой базы"
+$db = [uri]$env:DATABASE_URL
+Write-Output "Хост: $($db.Host); база: $($db.AbsolutePath.TrimStart('/'))"
 pnpm --filter @messages/server migrate
 Remove-Item Env:DATABASE_URL
+Clear-Host
 ```
 
-Не делайте снимки экрана с этой строкой и не пересылайте её. Ввод скрыт, команда не сохраняет строку в файле или историю PowerShell. Переменная окружения доступна только процессам из этого окна и удаляется последней командой. Если миграции завершились ошибкой, не продолжайте настройку до исправления причины.
+Команда проверки выводит только хост и имя базы, без пароля. До запуска убедитесь, что они соответствуют production-базе. Если на новой или пустой базе команда сообщает «Все миграции уже применены», значит, она подключилась НЕ к той базе: остановитесь и перепроверьте строку подключения. Если миграции завершились ошибкой, не продолжайте настройку до исправления причины. Никогда не пересылайте строку подключения или пароли в чат. Если строка попала в чат или историю команд PowerShell, сразу замените пароль в Neon (Reset password) и обновите строку подключения.
 
 ## Создать сервисы
 
@@ -34,7 +34,7 @@ Remove-Item Env:DATABASE_URL
 
 ## Проверка
 
-Откройте адрес сервера с путём `/health`: должно отобразиться `{"status":"ok"}`. Откройте адрес сайта, войдите с одной сид-фразой в двух разных браузерах/профилях, создайте два аккаунта и обменяйтесь сообщениями. Начальный вход или подключение может занять время, пока бесплатный сервер просыпается.
+Откройте адрес сервера с путём `/health`: должно отобразиться `{"status":"ok"}`. Откройте адрес сайта, войдите с одной сид-фразой в двух разных браузерах/профилях, создайте два аккаунта и обменяйтесь сообщениями. Начальный вход или подключение может занять время, пока бесплатный сервер просыпается. После пробуждения бесплатный сервер может отвечать около минуты — это нормально.
 
 ## Сон бесплатного сервиса
 
@@ -48,8 +48,8 @@ Remove-Item Env:DATABASE_URL
 
 ## English quick guide
 
-1. Create a separate production PostgreSQL database in Neon. In PowerShell, use `Read-Host -AsSecureString` to enter the Neon URL without echoing it, temporarily set `$env:DATABASE_URL`, run `pnpm --filter @messages/server migrate`, then run `Remove-Item Env:DATABASE_URL`. Do not save or share the connection string.
+1. Create a separate production PostgreSQL database in Neon. In PowerShell, enter the URL with `$env:DATABASE_URL = Read-Host "Paste the production database connection string"`, verify only its host and database name with `$db = [uri]$env:DATABASE_URL; Write-Output "Host: $($db.Host); database: $($db.AbsolutePath.TrimStart('/'))"`, run `pnpm --filter @messages/server migrate`, then clear the variable with `Remove-Item Env:DATABASE_URL` and the window with `Clear-Host`. Never share connection strings or passwords in chat. If the string appears in chat or PowerShell history, reset the Neon password immediately. If a new or empty database reports that all migrations are already applied, stop and verify the connection string; it points to the wrong database.
 2. Connect the GitHub repository to Render and create a Blueprint from `render.yaml` on `main`.
 3. Enter `DATABASE_URL` and `ALLOWED_ORIGINS` in the server's Render settings. Copy the complete server and site addresses from the browser address bar, including `https://` and any trailing slash. A trailing slash is fine for `ALLOWED_ORIGINS`; the server removes it. Deploy the server first and verify its `/health` URL.
 4. Set the web Static Site's `VITE_API_URL` to the server's public HTTPS URL and rebuild the site. `resolveApiUrl` removes a trailing slash during the build. Then set the server's `ALLOWED_ORIGINS` to the site's full public origin.
-5. Open the site, create two accounts in separate browser profiles, and exchange messages. The free server sleeps after 15 minutes without requests; waking it can take about a minute. Check each service's **Logs** in Render if setup fails. CORS errors in the browser's Console (F12) or a 403 `origin_forbidden` response mean you should compare the site's full address with the server's `ALLOWED_ORIGINS` setting.
+5. Open the site, create two accounts in separate browser profiles, and exchange messages. The free server sleeps after 15 minutes without requests; waking it and responding for about a minute is normal. Check each service's **Logs** in Render if setup fails. CORS errors in the browser's Console (F12) or a 403 `origin_forbidden` response mean you should compare the site's full address with the server's `ALLOWED_ORIGINS` setting.
