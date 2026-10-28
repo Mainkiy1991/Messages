@@ -57,6 +57,7 @@ function App() {
     error: "",
     contacts: {},
     contactsError: false,
+    waking: false,
     presence: {},
   });
   const [peerInput, setPeerInput] = useState("");
@@ -137,6 +138,7 @@ function App() {
       error: "",
       contacts: {},
       contactsError: false,
+      waking: false,
       presence: {},
     });
     setPhrase("");
@@ -198,6 +200,7 @@ function App() {
       error: "",
       contacts: {},
       contactsError: false,
+      waking: false,
       presence: {},
     });
     setPhrase("");
@@ -854,8 +857,13 @@ function App() {
                 )}
               </section>
             </section>
-            {chatState.contactsError && (
+            {chatState.contactsError && !chatState.waking && (
               <p className="error">{t.contactsDecryptError}</p>
+            )}
+            {chatState.waking && (
+              <p className="muted" role="status">
+                {t.serverWaking}
+              </p>
             )}
             {chatState.error === "outbox_clear_failed" && (
               <p className="error">{t.outboxClearFailed}</p>

@@ -26,6 +26,7 @@ import type { ServerSession } from "../session.js";
 import {
   ApiError,
   getUserKeys,
+  loginToServer,
   logoutFromServer,
   verifyUserKeys,
   type FetchLike,
@@ -71,6 +72,7 @@ export type ChatControllerState = {
   error: string;
   contacts: Record<string, string>;
   contactsError: boolean;
+  waking: boolean;
   presence: Record<string, { online: boolean; lastSeenAt: string | null }>;
 };
 export type ChatError =
@@ -98,6 +100,7 @@ export type ChatControllerDependencies = {
   setTimer?: typeof setTimeout;
   clearTimer?: typeof clearTimeout;
   sendTimeoutMs?: number;
+  wakingTimeoutMs?: number;
   isVisible?: () => boolean;
   deferOutgoingUntilConversations?: boolean;
   now?: () => number;
@@ -157,6 +160,8 @@ export class ChatController {
     number
   >();
   private stopped = false;
+  private serverResponded = false;
+  private wakingTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly sentReadMarkers = new Map<string, string>();
   private readonly peerReadMarkers = new Map<string, string>();
   private readonly clearedBeforeSeqs = new Map<string, string>();
@@ -175,6 +180,7 @@ export class ChatController {
     error: "",
     contacts: {},
     contactsError: false,
+    waking: false,
     presence: {},
   };
 
@@ -191,6 +197,8 @@ export class ChatController {
       session,
       {
         onState: (connectionState) => {
+          if (connectionState === "connected") this.markServerResponded();
+          else if (connectionState === "offline") this.beginWaking();
           if (connectionState !== "connected" && this.hasConnected)
             this.connection.setSendingPaused(true);
           this.update({
@@ -227,7 +235,11 @@ export class ChatController {
       },
       {
         fetcher: deps.fetcher,
-        login: deps.login,
+        login: async (...args) => {
+          const session = await (deps.login ?? loginToServer)(...args);
+          this.markServerResponded();
+          return session;
+        },
         socketFactory: deps.socketFactory,
         random: deps.random,
         setTimer: deps.setTimer,
@@ -433,12 +445,35 @@ export class ChatController {
     request: (token: string) => Promise<T>,
   ): Promise<T> {
     try {
-      return await request(token);
+      const result = await request(token);
+      this.markServerResponded();
+      return result;
     } catch (error) {
       if (!(error instanceof ApiError) || error.status !== 401) throw error;
       const session = await this.connection.refreshSession();
-      return request(session.token);
+      const result = await request(session.token);
+      this.markServerResponded();
+      return result;
     }
+  }
+
+  private beginWaking(): void {
+    if (this.stopped || this.serverResponded || this.state.waking) return;
+    this.update({ waking: true });
+    const setTimer = this.deps.setTimer ?? globalThis.setTimeout;
+    this.wakingTimer = setTimer(() => {
+      this.wakingTimer = null;
+      if (!this.stopped && !this.serverResponded)
+        this.update({ waking: false });
+    }, this.deps.wakingTimeoutMs ?? WAKING_TIMEOUT_MS);
+  }
+
+  private markServerResponded(): void {
+    this.serverResponded = true;
+    if (this.wakingTimer)
+      (this.deps.clearTimer ?? globalThis.clearTimeout)(this.wakingTimer);
+    this.wakingTimer = null;
+    if (this.state.waking) this.update({ waking: false });
   }
 
   private isRetryableAccountError(error: unknown): boolean {
@@ -449,6 +484,7 @@ export class ChatController {
 
   private scheduleAccountRetry(resource: "conversations" | "contacts"): void {
     if (this.stopped || this.accountDataRetryTimers.has(resource)) return;
+    this.beginWaking();
     const attempt = this.accountDataRetryAttempts.get(resource) ?? 0;
     const delay = Math.min(60_000, 2_000 * 2 ** attempt);
     this.accountDataRetryAttempts.set(resource, attempt + 1);
@@ -618,6 +654,7 @@ export class ChatController {
             ((id, token, before) =>
               getHistory(id, token, before, this.deps.fetcher))
           )(peerId, session.token, oldest);
+      this.markServerResponded();
       if (page.peerReadUpToSeq) {
         const marker = page.peerReadUpToSeq;
         this.peerReadMarkers.set(peerId, marker);
@@ -821,6 +858,9 @@ export class ChatController {
 
   stop(): void {
     this.stopped = true;
+    if (this.wakingTimer)
+      (this.deps.clearTimer ?? globalThis.clearTimeout)(this.wakingTimer);
+    this.wakingTimer = null;
     for (const timer of this.accountDataRetryTimers.values())
       (this.deps.clearTimer ?? globalThis.clearTimeout)(timer);
     this.accountDataRetryTimers.clear();
@@ -1094,11 +1134,13 @@ export class ChatController {
     let session = await this.connection.ensureSession();
     try {
       const value = await fetchKeys(peerId, session.token, this.deps.fetcher);
+      this.markServerResponded();
       return verifyUserKeys(peerId, value);
     } catch (error) {
       if (!(error instanceof ApiError) || error.status !== 401) throw error;
       session = await this.connection.refreshSession();
       const value = await fetchKeys(peerId, session.token, this.deps.fetcher);
+      this.markServerResponded();
       return verifyUserKeys(peerId, value);
     }
   }
@@ -1368,6 +1410,8 @@ export class ChatController {
     this.deps.onChange?.(this.getSnapshot());
   }
 }
+
+export const WAKING_TIMEOUT_MS = 90_000;
 
 function compareMessages(a: ChatMessage, b: ChatMessage): number {
   if (a.seq && b.seq && a.seq !== b.seq)
