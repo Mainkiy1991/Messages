@@ -161,6 +161,7 @@ export class ChatController {
   >();
   private stopped = false;
   private serverResponded = false;
+  private wakingExpired = false;
   private wakingTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly sentReadMarkers = new Map<string, string>();
   private readonly peerReadMarkers = new Map<string, string>();
@@ -458,18 +459,27 @@ export class ChatController {
   }
 
   private beginWaking(): void {
-    if (this.stopped || this.serverResponded || this.state.waking) return;
+    if (
+      this.stopped ||
+      this.serverResponded ||
+      this.wakingExpired ||
+      this.state.waking
+    )
+      return;
     this.update({ waking: true });
     const setTimer = this.deps.setTimer ?? globalThis.setTimeout;
     this.wakingTimer = setTimer(() => {
       this.wakingTimer = null;
-      if (!this.stopped && !this.serverResponded)
+      if (!this.stopped && !this.serverResponded) {
+        this.wakingExpired = true;
         this.update({ waking: false });
+      }
     }, this.deps.wakingTimeoutMs ?? WAKING_TIMEOUT_MS);
   }
 
   private markServerResponded(): void {
     this.serverResponded = true;
+    this.wakingExpired = false;
     if (this.wakingTimer)
       (this.deps.clearTimer ?? globalThis.clearTimeout)(this.wakingTimer);
     this.wakingTimer = null;

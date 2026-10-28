@@ -951,6 +951,31 @@ describe("ChatController", () => {
     controller.stop();
   });
 
+  it("keeps waking expired after the next account retry", async () => {
+    vi.useFakeTimers();
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => {
+        throw new ApiError(500, "internal_error");
+      },
+    });
+    const internals = controller as unknown as {
+      scheduleAccountRetry(resource: "contacts"): void;
+      resetAccountRetry(resource: "contacts"): void;
+      loadContacts(token: string): Promise<void>;
+    };
+    await internals.loadContacts("token");
+    expect(controller.getSnapshot().contactsError).toBe(true);
+    internals.resetAccountRetry("contacts");
+    vi.advanceTimersByTime(90_000);
+    expect(controller.getSnapshot().waking).toBe(false);
+
+    internals.scheduleAccountRetry("contacts");
+
+    expect(controller.getSnapshot().waking).toBe(false);
+    expect(controller.getSnapshot().contactsError).toBe(true);
+    controller.stop();
+  });
+
   it("ends waking immediately after an account endpoint responds", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("window", {});
