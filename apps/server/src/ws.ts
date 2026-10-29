@@ -8,6 +8,7 @@ import { createMessageHub, type MessageRow } from "./messages.js";
 import { MAX_CONVERSATIONS } from "@messages/shared";
 
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/u;
+const HEARTBEAT_RESPONSE_INTERVAL_MS = 4_000;
 const sendSchema = z
   .object({
     type: z.literal("send"),
@@ -31,6 +32,7 @@ const ackSchema = z
     ids: z.array(z.string().uuid()).max(200),
   })
   .strict();
+const pingSchema = z.object({ type: z.literal("ping") }).strict();
 const readSchema = z
   .object({
     type: z.literal("read"),
@@ -345,6 +347,7 @@ export async function registerWebSocket(
       let lastWindow = Date.now();
       let frameCount = 0;
       let frameQueue: Promise<void> = Promise.resolve();
+      let lastHeartbeatResponseAt = 0;
 
       const authTimer = setTimeout(() => {
         if (!authenticated && !closed) {
@@ -405,6 +408,15 @@ export async function registerWebSocket(
           return;
         }
         const frameClientMsgId = clientMsgIdFromFrame(frame);
+
+        if (
+          !authenticated &&
+          frame &&
+          typeof frame === "object" &&
+          (frame as { type?: unknown }).type === "ping" &&
+          pingSchema.safeParse(frame).success
+        )
+          return;
 
         try {
           if (!authenticated) {
@@ -486,6 +498,22 @@ export async function registerWebSocket(
           }
 
           const type = (frame as { type: string }).type;
+          if (type === "ping") {
+            const parsed = pingSchema.safeParse(frame);
+            if (!parsed.success) {
+              errorFrame(socket, "invalid_frame");
+              return;
+            }
+            const time = Date.now();
+            if (
+              lastHeartbeatResponseAt &&
+              time - lastHeartbeatResponseAt < HEARTBEAT_RESPONSE_INTERVAL_MS
+            )
+              return;
+            lastHeartbeatResponseAt = time;
+            socket.send(JSON.stringify({ type: "pong" }));
+            return;
+          }
           if (type === "presence_subscribe") {
             const parsed = presenceSubscribeSchema.safeParse(frame);
             if (!parsed.success) {
