@@ -71,23 +71,36 @@ header {
   gap: 12px;
   margin-left: auto;
 }
-.language {
+.welcome-language,
+.profile-language {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 8px;
   color: #687083;
-  font-size: 0.85rem;
+  font-size: 0.9rem;
 }
-.language button {
-  border: 0;
-  background: transparent;
-  padding: 6px;
-  cursor: pointer;
-  color: inherit;
+.welcome-language {
+  justify-content: flex-end;
+  margin: 0 0 16px auto;
 }
-.language button[aria-pressed="true"] {
-  color: #5145cd;
-  font-weight: 700;
+.welcome-language select,
+.profile-language select {
+  min-width: 120px;
+  min-height: 38px;
+  border: 1px solid #d8dbe5;
+  border-radius: 8px;
+  background: white;
+  color: #202333;
+  padding: 6px 28px 6px 9px;
+}
+.profile-language {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 5px;
+  padding: 4px 8px 10px;
+}
+.profile-language select {
+  width: 100%;
 }
 .connection-dot {
   width: 11px;
@@ -639,6 +652,9 @@ button:disabled {
   }
   .card:not(:has(.messenger)) {
     padding: 24px 18px;
+  }
+  .welcome-language {
+    margin-bottom: 14px;
   }
   .seed-list {
     grid-template-columns: repeat(2, 1fr);

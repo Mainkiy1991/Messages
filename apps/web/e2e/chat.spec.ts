@@ -34,7 +34,7 @@ let activeUsers: User[] = [];
 async function openUser(browser: Browser): Promise<User> {
   const context = await browser.newContext();
   await context.addInitScript(() => {
-    localStorage.setItem("messages-language", "en");
+    localStorage.setItem("messages-lang", "en");
   });
   const page = await context.newPage();
   const user: User = {
@@ -820,6 +820,25 @@ test.describe("real browser chat", () => {
   }, testInfo) => {
     const a = await openUser(browser);
     const b = await openUser(browser);
+    await expect(a.page.getByLabel("Language")).toHaveValue("en");
+    await a.page.getByLabel("Language").selectOption("ru");
+    await expect(
+      a.page.getByRole("heading", { name: "Добро пожаловать" }),
+    ).toBeVisible();
+    await expect(a.page.locator("html")).toHaveAttribute("lang", "ru");
+    await expect(a.page.locator("header")).not.toContainText("RU");
+    await a.page.getByLabel("Язык").selectOption("en");
+    await expect(
+      a.page.getByRole("heading", { name: "Welcome" }),
+    ).toBeVisible();
+    await expect(a.page.locator("html")).toHaveAttribute("lang", "en");
+    expect(
+      await a.page.evaluate(() => localStorage.getItem("messages-lang")),
+    ).toBe("en");
+    await a.page.reload();
+    await expect(
+      a.page.getByRole("heading", { name: "Welcome" }),
+    ).toBeVisible();
     const alice = await createAccount(a.page);
     const bob = await createAccount(b.page);
     await openChat(a.page, bob.id);
@@ -907,14 +926,20 @@ test.describe("real browser chat", () => {
         .evaluate((el) => el.getBoundingClientRect().right),
     ).toBeLessThanOrEqual(360);
     await a.page.getByRole("button", { name: "Cancel" }).click();
-    await a.page.getByRole("button", { name: "RU" }).click();
+    await a.page.getByTestId("profile").click();
+    await a.page.getByLabel("Language").selectOption("ru");
+    await expect(a.page.locator("html")).toHaveAttribute("lang", "ru");
+    await a.page.getByTestId("profile").click();
     await a.page.locator(".contact-name-trigger").click();
     await a.page.getByLabel("Имя контакта (необязательно)").fill("Боб");
     await expect(
       a.page.getByRole("button", { name: "Сохранить имя" }),
     ).toBeVisible();
     await a.page.getByRole("button", { name: "Отмена" }).click();
-    await a.page.getByRole("button", { name: "EN" }).click();
+    await a.page.getByTestId("profile").click();
+    await a.page.getByLabel("Язык").selectOption("en");
+    await expect(a.page.locator("html")).toHaveAttribute("lang", "en");
+    await a.page.getByTestId("profile").click();
     await a.page.screenshot({
       path: testInfo.outputPath("chat-mobile.png"),
       fullPage: true,
@@ -936,7 +961,8 @@ test.describe("real browser chat", () => {
       "Profile",
     );
     expect(await a.page.getByTestId("profile").innerText()).toBe("");
-    await a.page.getByRole("button", { name: "RU" }).click();
+    await expect(a.page.getByLabel("Language")).toHaveValue("en");
+    await a.page.getByLabel("Language").selectOption("ru");
     await expect(a.page.getByTestId("profile")).toHaveAttribute(
       "aria-label",
       "Профиль",
@@ -945,8 +971,7 @@ test.describe("real browser chat", () => {
       "title",
       "Профиль",
     );
-    await a.page.getByRole("button", { name: "EN" }).click();
-    await a.page.getByTestId("profile").click();
+    await a.page.getByLabel("Язык").selectOption("en");
     await expect(a.page.getByTestId("user-id")).toHaveCount(0);
     await a.page.getByRole("button", { name: "User ID" }).click();
     await expect(a.page.getByTestId("user-id")).toBeVisible();
