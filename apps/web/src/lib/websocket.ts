@@ -20,6 +20,9 @@ export type OutgoingFrame = {
   senderCopy: string;
 };
 export type IncomingFrame = Record<string, unknown> & { type: string };
+export const HEARTBEAT_IDLE_MS = 25_000;
+export const HEARTBEAT_TIMEOUT_MS = 10_000;
+export const HEARTBEAT_MIN_INTERVAL_MS = 5_000;
 type SocketLike = Pick<WebSocket, "send" | "close" | "addEventListener">;
 type SocketFactory = (url: string) => SocketLike;
 type PendingFrame = {
@@ -47,6 +50,17 @@ export class ChatConnection {
   private receiveQueue: Promise<void> = Promise.resolve();
   private readonly setTimer: typeof setTimeout;
   private readonly clearTimer: typeof clearTimeout;
+  private heartbeatIdleTimer: ReturnType<typeof setTimeout> | null = null;
+  private heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastPingAt = 0;
+  private readonly heartbeatDocument:
+    | Pick<
+        Document,
+        "visibilityState" | "addEventListener" | "removeEventListener"
+      >
+    | undefined;
+  private readonly heartbeatWindow:
+    Pick<Window, "addEventListener" | "removeEventListener"> | undefined;
 
   constructor(
     private readonly keys: DerivedKeys,
@@ -69,12 +83,24 @@ export class ChatConnection {
       setTimer?: typeof setTimeout;
       clearTimer?: typeof clearTimeout;
       sendTimeoutMs?: number;
+      heartbeatIdleMs?: number;
+      heartbeatTimeoutMs?: number;
+      heartbeatMinIntervalMs?: number;
+      document?: Pick<
+        Document,
+        "visibilityState" | "addEventListener" | "removeEventListener"
+      >;
+      window?: Pick<Window, "addEventListener" | "removeEventListener">;
     } = {},
   ) {
     const nativeSetTimer = globalThis.setTimeout;
     const nativeClearTimer = globalThis.clearTimeout;
     this.setTimer = deps.setTimer ?? nativeSetTimer;
     this.clearTimer = deps.clearTimer ?? nativeClearTimer;
+    this.heartbeatDocument =
+      deps.document ?? (typeof document === "undefined" ? undefined : document);
+    this.heartbeatWindow =
+      deps.window ?? (typeof window === "undefined" ? undefined : window);
     this.session =
       session?.userId === userIdFromPublicKey(keys.identity.publicKey)
         ? session
@@ -94,6 +120,7 @@ export class ChatConnection {
     this.timer = null;
     this.ackTimer = null;
     this.authenticated = false;
+    this.stopHeartbeat();
     for (const pending of this.outbox.values()) this.clearPendingTimer(pending);
     const socket = this.socket;
     this.socket = null;
@@ -219,6 +246,7 @@ export class ChatConnection {
       });
       socket.addEventListener("message", (event) => {
         if (this.active && this.socket === socket) {
+          this.heartbeatFrameReceived();
           this.receiveQueue = this.receiveQueue
             .then(() => this.receive(event.data))
             .catch(() => undefined);
@@ -226,6 +254,7 @@ export class ChatConnection {
       });
       socket.addEventListener("close", (event) => {
         if (this.socket !== socket) return;
+        this.stopHeartbeat();
         this.socket = null;
         this.authenticated = false;
         if (!this.active) return;
@@ -262,11 +291,13 @@ export class ChatConnection {
       this.retry = 0;
       this.unauthorizedRetries = 0;
       this.setState("connected");
+      this.startHeartbeat();
       this.sendPresenceSubscriptions();
       if (!this.sendingPaused)
         for (const pending of this.outbox.values()) this.sendPending(pending);
       return;
     }
+    if (frame.type === "pong") return;
     if (frame.type === "message" && typeof frame.id === "string") {
       if (!this.seen.has(frame.id)) {
         this.seen.add(frame.id);
@@ -388,6 +419,140 @@ export class ChatConnection {
         })();
       },
       jittered,
+    );
+  }
+
+  private isHeartbeatVisible(): boolean {
+    return this.heartbeatDocument?.visibilityState === "visible";
+  }
+
+  private startHeartbeat(): void {
+    if (!this.authenticated || !this.active || !this.socket) return;
+    this.stopHeartbeat();
+    if (typeof this.heartbeatDocument?.addEventListener === "function")
+      this.heartbeatDocument.addEventListener(
+        "visibilitychange",
+        this.onVisibilityChange,
+      );
+    if (typeof this.heartbeatWindow?.addEventListener === "function")
+      this.heartbeatWindow.addEventListener("online", this.onOnline);
+    if (this.isHeartbeatVisible()) this.scheduleHeartbeatIdle();
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatIdleTimer)
+      callClearTimer(this.clearTimer, this.heartbeatIdleTimer);
+    if (this.heartbeatTimeoutTimer)
+      callClearTimer(this.clearTimer, this.heartbeatTimeoutTimer);
+    this.heartbeatIdleTimer = null;
+    this.heartbeatTimeoutTimer = null;
+    if (typeof this.heartbeatDocument?.removeEventListener === "function")
+      this.heartbeatDocument.removeEventListener(
+        "visibilitychange",
+        this.onVisibilityChange,
+      );
+    if (typeof this.heartbeatWindow?.removeEventListener === "function")
+      this.heartbeatWindow.removeEventListener("online", this.onOnline);
+  }
+
+  private readonly onVisibilityChange = (): void => {
+    if (!this.isHeartbeatVisible()) {
+      if (this.heartbeatIdleTimer)
+        callClearTimer(this.clearTimer, this.heartbeatIdleTimer);
+      if (this.heartbeatTimeoutTimer)
+        callClearTimer(this.clearTimer, this.heartbeatTimeoutTimer);
+      this.heartbeatIdleTimer = null;
+      this.heartbeatTimeoutTimer = null;
+      return;
+    }
+    this.sendHeartbeat();
+  };
+
+  private readonly onOnline = (): void => {
+    if (this.isHeartbeatVisible()) this.sendHeartbeat();
+  };
+
+  private heartbeatFrameReceived(): void {
+    if (!this.authenticated || !this.isHeartbeatVisible()) return;
+    if (this.heartbeatTimeoutTimer)
+      callClearTimer(this.clearTimer, this.heartbeatTimeoutTimer);
+    this.heartbeatTimeoutTimer = null;
+    this.scheduleHeartbeatIdle();
+  }
+
+  private scheduleHeartbeatIdle(): void {
+    if (
+      !this.authenticated ||
+      !this.isHeartbeatVisible() ||
+      this.heartbeatTimeoutTimer
+    )
+      return;
+    if (this.heartbeatIdleTimer)
+      callClearTimer(this.clearTimer, this.heartbeatIdleTimer);
+    const minInterval =
+      this.deps.heartbeatMinIntervalMs ?? HEARTBEAT_MIN_INTERVAL_MS;
+    const elapsed = Date.now() - this.lastPingAt;
+    const wait = Math.max(
+      this.deps.heartbeatIdleMs ?? HEARTBEAT_IDLE_MS,
+      this.lastPingAt ? minInterval - elapsed : 0,
+    );
+    this.heartbeatIdleTimer = callSetTimer(
+      this.setTimer,
+      () => {
+        this.heartbeatIdleTimer = null;
+        this.sendHeartbeat();
+      },
+      wait,
+    );
+  }
+
+  private sendHeartbeat(): void {
+    if (
+      !this.authenticated ||
+      !this.active ||
+      !this.socket ||
+      !this.isHeartbeatVisible() ||
+      this.heartbeatTimeoutTimer
+    )
+      return;
+    if (this.heartbeatIdleTimer)
+      callClearTimer(this.clearTimer, this.heartbeatIdleTimer);
+    this.heartbeatIdleTimer = null;
+    const minInterval =
+      this.deps.heartbeatMinIntervalMs ?? HEARTBEAT_MIN_INTERVAL_MS;
+    const remaining = minInterval - (Date.now() - this.lastPingAt);
+    if (this.lastPingAt && remaining > 0) {
+      this.heartbeatIdleTimer = callSetTimer(
+        this.setTimer,
+        () => {
+          this.heartbeatIdleTimer = null;
+          this.sendHeartbeat();
+        },
+        remaining,
+      );
+      return;
+    }
+    try {
+      this.socket.send(JSON.stringify({ type: "ping" }));
+    } catch {
+      this.socket.close();
+      return;
+    }
+    this.lastPingAt = Date.now();
+    this.heartbeatTimeoutTimer = callSetTimer(
+      this.setTimer,
+      () => {
+        this.heartbeatTimeoutTimer = null;
+        if (!this.active || !this.authenticated || !this.socket) return;
+        this.stopHeartbeat();
+        this.authenticated = false;
+        const socket = this.socket;
+        this.socket = null;
+        socket.close();
+        this.setState("offline");
+        this.schedule();
+      },
+      this.deps.heartbeatTimeoutMs ?? HEARTBEAT_TIMEOUT_MS,
     );
   }
 }

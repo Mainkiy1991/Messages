@@ -20,10 +20,12 @@ describe("WebSocket server address", () => {
 
 class FakeSocket extends EventTarget {
   sent: string[] = [];
+  closed = false;
   send(data: string) {
     this.sent.push(data);
   }
   close() {
+    this.closed = true;
     this.dispatchEvent(new Event("close"));
   }
   open() {
@@ -45,6 +47,119 @@ async function waitFor(check: () => boolean): Promise<void> {
 }
 
 describe("websocket chat connection", () => {
+  it("pings after idle and closes after the heartbeat timeout", async () => {
+    vi.useFakeTimers();
+    const socket = new FakeSocket();
+    const states: string[] = [];
+    const doc = Object.assign(new EventTarget(), {
+      visibilityState: "visible" as DocumentVisibilityState,
+    });
+    const keys = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    const connection = new ChatConnection(
+      keys,
+      {
+        token: "a".repeat(43),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+      },
+      { onState: (state) => states.push(state), onFrame: vi.fn() },
+      {
+        socketFactory: () => socket,
+        heartbeatIdleMs: 25,
+        heartbeatTimeoutMs: 10,
+        document: doc,
+      },
+    );
+    connection.start();
+    await vi.advanceTimersByTimeAsync(0);
+    socket.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(24);
+    expect(socket.sent.map((value) => JSON.parse(value).type)).not.toContain(
+      "ping",
+    );
+    await vi.advanceTimersByTimeAsync(1);
+    expect(socket.sent.map((value) => JSON.parse(value).type)).toContain(
+      "ping",
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    expect(socket.closed).toBe(true);
+    expect(states).toContain("offline");
+    connection.stop();
+    vi.useRealTimers();
+  });
+
+  it("resets heartbeat on any frame and pauses while hidden until visibility returns", async () => {
+    vi.useFakeTimers();
+    const socket = new FakeSocket();
+    const doc = Object.assign(new EventTarget(), {
+      visibilityState: "visible" as DocumentVisibilityState,
+    });
+    const win = new EventTarget();
+    const removeVisibilityListener = vi.spyOn(doc, "removeEventListener");
+    const removeOnlineListener = vi.spyOn(win, "removeEventListener");
+    const keys = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    const connection = new ChatConnection(
+      keys,
+      {
+        token: "a".repeat(43),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+      },
+      { onState: vi.fn(), onFrame: vi.fn() },
+      {
+        socketFactory: () => socket,
+        heartbeatIdleMs: 25,
+        heartbeatTimeoutMs: 10,
+        heartbeatMinIntervalMs: 5,
+        document: doc,
+        window: win,
+      },
+    );
+    connection.start();
+    await vi.advanceTimersByTimeAsync(0);
+    socket.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(20);
+    socket.frame({ type: "unrelated" });
+    await vi.advanceTimersByTimeAsync(20);
+    expect(socket.sent.map((value) => JSON.parse(value).type)).not.toContain(
+      "ping",
+    );
+    doc.visibilityState = "hidden";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(60);
+    expect(socket.sent.map((value) => JSON.parse(value).type)).not.toContain(
+      "ping",
+    );
+    doc.visibilityState = "visible";
+    doc.dispatchEvent(new Event("visibilitychange"));
+    expect(
+      socket.sent
+        .map((value) => JSON.parse(value).type)
+        .filter((type) => type === "ping"),
+    ).toHaveLength(1);
+    win.dispatchEvent(new Event("online"));
+    expect(
+      socket.sent
+        .map((value) => JSON.parse(value).type)
+        .filter((type) => type === "ping"),
+    ).toHaveLength(1);
+    connection.stop();
+    expect(removeVisibilityListener).toHaveBeenCalledWith(
+      "visibilitychange",
+      expect.any(Function),
+    );
+    expect(removeOnlineListener).toHaveBeenCalledWith(
+      "online",
+      expect.any(Function),
+    );
+    vi.useRealTimers();
+  });
+
   it("calls injected timers without a receiver for ack, send timeout, reconnect, and stop", async () => {
     vi.useFakeTimers();
     const nativeSet = globalThis.setTimeout;
