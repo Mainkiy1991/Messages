@@ -8,6 +8,7 @@ import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
+import { argon2idAsync } from "@noble/hashes/argon2.js";
 
 export type KeyPair = { publicKey: Uint8Array; privateKey: Uint8Array };
 
@@ -88,6 +89,94 @@ export function hexToBytes(hex: string): Uint8Array {
   return Uint8Array.from(hex.match(/.{2}/gu) ?? [], (byte) =>
     Number.parseInt(byte, 16),
   );
+}
+
+export type WrappedSecrets = {
+  v: 1;
+  kdf: "argon2id";
+  mem: 65536;
+  iters: 3;
+  salt: string;
+  nonce: string;
+  ciphertext: string;
+};
+
+/** Encrypt opaque session-secret bytes using the production Argon2id parameters. */
+export async function wrapSecrets(
+  secretsBytes: Uint8Array,
+  pin: string,
+): Promise<WrappedSecrets> {
+  if (!(secretsBytes instanceof Uint8Array) || secretsBytes.length === 0)
+    throw new TypeError("Secret data is required");
+  if (typeof pin !== "string" || !/^[a-z0-9]{6,}$/iu.test(pin))
+    throw new TypeError("PIN must contain at least 6 characters");
+  const salt = randomBytes(16);
+  const nonce = randomBytes(24);
+  const key = await argon2idAsync(encoder.encode(pin), salt, {
+    t: 3,
+    m: 65536,
+    p: 1,
+    dkLen: 32,
+    maxmem: 65536 * 1024 + 1024 * 1024,
+  });
+  try {
+    const aad = encoder.encode("messages/v1/pin-secrets");
+    const ciphertext = xchacha20poly1305(key, nonce, aad).encrypt(secretsBytes);
+    return {
+      v: 1,
+      kdf: "argon2id",
+      mem: 65536,
+      iters: 3,
+      salt: bytesToBase64(salt),
+      nonce: bytesToBase64(nonce),
+      ciphertext: bytesToBase64(ciphertext),
+    };
+  } finally {
+    key.fill(0);
+  }
+}
+
+/** Decrypt an authenticated PIN blob; all malformed blobs and wrong PINs share a safe error. */
+export async function unwrapSecrets(
+  blob: unknown,
+  pin: string,
+): Promise<Uint8Array> {
+  try {
+    if (typeof pin !== "string") throw new Error();
+    const value = blob as Partial<WrappedSecrets>;
+    if (
+      !value ||
+      typeof value !== "object" ||
+      value.v !== 1 ||
+      value.kdf !== "argon2id" ||
+      value.mem !== 65536 ||
+      value.iters !== 3
+    )
+      throw new Error();
+    const salt = base64ToBytes(value.salt!);
+    const nonce = base64ToBytes(value.nonce!);
+    const ciphertext = base64ToBytes(value.ciphertext!);
+    if (salt.length !== 16 || nonce.length !== 24 || ciphertext.length < 16)
+      throw new Error();
+    const key = await argon2idAsync(encoder.encode(pin), salt, {
+      t: value.iters,
+      m: value.mem,
+      p: 1,
+      dkLen: 32,
+      maxmem: 65536 * 1024 + 1024 * 1024,
+    });
+    try {
+      return xchacha20poly1305(
+        key,
+        nonce,
+        encoder.encode("messages/v1/pin-secrets"),
+      ).decrypt(ciphertext);
+    } finally {
+      key.fill(0);
+    }
+  } catch {
+    throw new Error("Неверный PIN или повреждённые данные");
+  }
 }
 
 const MESSAGE_INFO = encoder.encode("messages/v1/message");

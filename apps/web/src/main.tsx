@@ -22,6 +22,11 @@ import {
   restoreSession,
   restoreServerSession,
   saveSession,
+  getPinState,
+  unlockWithPin,
+  enablePin,
+  changePin,
+  disablePin,
 } from "./session.js";
 import {
   ChatController,
@@ -36,7 +41,8 @@ import {
 } from "./components/presence-indicators.js";
 import "./style.css";
 
-type Screen = "loading" | "welcome" | "create" | "verify" | "login" | "home";
+type Screen =
+  "loading" | "locked" | "welcome" | "create" | "verify" | "login" | "home";
 function App() {
   const [language, setLanguage] = useState<Language>(() =>
     getInitialLanguage(
@@ -51,6 +57,11 @@ function App() {
   const [keys, setKeys] = useState<DerivedKeys | null>(null);
   const [count, setCount] = useState<12 | 24>(12);
   const [phrase, setPhrase] = useState("");
+  const [pin, setPin] = useState("");
+  const [pinConfirm, setPinConfirm] = useState("");
+  const [oldPin, setOldPin] = useState("");
+  const [pinError, setPinError] = useState("");
+  const [pinEnabled, setPinEnabled] = useState(false);
   const [positions, setPositions] = useState<number[]>([]);
   const [answers, setAnswers] = useState<string[]>(["", "", ""]);
   const [hasError, setHasError] = useState(false);
@@ -124,14 +135,22 @@ function App() {
   }, []);
 
   useEffect(() => {
-    void restoreSession()
+    void getPinState()
+      .then(async (pinState) => {
+        setPinEnabled(Boolean(pinState));
+        if (pinState) {
+          setScreen("locked");
+          return false;
+        }
+        return restoreSession();
+      })
       .then((saved) => {
         if (saved) {
           setKeys(saved);
           setScreen("home");
-        } else setScreen("welcome");
+        } else if (saved !== false) setScreen("welcome");
       })
-      .catch(() => undefined);
+      .catch(() => setScreen("welcome"));
   }, []);
   function changeLanguage(next: Language) {
     setLanguage(next);
@@ -155,6 +174,59 @@ function App() {
     setPhrase("");
     setScreen("home");
     setHasError(false);
+  }
+
+  async function submitPin(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setPinError("");
+    try {
+      const restored = await unlockWithPin(pin);
+      setKeys(restored);
+      setPin("");
+      setScreen("home");
+    } catch (error) {
+      setPinError(
+        error instanceof Error && error.message === "PIN_ATTEMPT_DELAY"
+          ? t.pinWait
+          : t.pinIncorrect,
+      );
+    }
+  }
+  async function managePin(action: "enable" | "change" | "disable") {
+    setPinError("");
+    try {
+      if (!keys) return;
+      if (action === "enable") {
+        if (!/^[a-z0-9]{6,}$/iu.test(pin) || pin !== pinConfirm)
+          throw new Error("PIN_FORM");
+        await enablePin(keys, pin);
+        setPinEnabled(true);
+      } else if (action === "change") {
+        if (!/^[a-z0-9]{6,}$/iu.test(pin) || pin !== pinConfirm)
+          throw new Error("PIN_FORM");
+        await changePin(keys, oldPin, pin);
+      } else {
+        await disablePin(oldPin);
+        setPinEnabled(false);
+      }
+      setPin("");
+      setPinConfirm("");
+      setOldPin("");
+    } catch (error) {
+      setPinError(
+        error instanceof Error && error.message === "PIN_FORM"
+          ? t.pinMismatch
+          : t.pinIncorrect,
+      );
+    }
+  }
+  async function forgotPin() {
+    if (!window.confirm(t.forgotConfirm)) return;
+    await clearSession();
+    setKeys(null);
+    setPinEnabled(false);
+    setPin("");
+    setScreen("welcome");
   }
 
   function beginCreate() {
@@ -436,6 +508,80 @@ function App() {
                       ))}
                     </select>
                   </label>
+                  <div className="pin-settings">
+                    <strong>{t.pinTitle}</strong>
+                    {!pinEnabled ? (
+                      <>
+                        <input
+                          aria-label={t.pinNew}
+                          type="password"
+                          autoComplete="new-password"
+                          value={pin}
+                          onChange={(e) => setPin(e.target.value)}
+                          placeholder={t.pinNew}
+                        />
+                        <input
+                          aria-label={t.pinConfirm}
+                          type="password"
+                          autoComplete="new-password"
+                          value={pinConfirm}
+                          onChange={(e) => setPinConfirm(e.target.value)}
+                          placeholder={t.pinConfirm}
+                        />
+                        <small>{t.pinHint}</small>
+                        <button
+                          className="secondary"
+                          onClick={() => void managePin("enable")}
+                        >
+                          {t.pinEnable}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <input
+                          aria-label={t.pinCurrent}
+                          type="password"
+                          autoComplete="current-password"
+                          value={oldPin}
+                          onChange={(e) => setOldPin(e.target.value)}
+                          placeholder={t.pinCurrent}
+                        />
+                        <input
+                          aria-label={t.pinNew}
+                          type="password"
+                          autoComplete="new-password"
+                          value={pin}
+                          onChange={(e) => setPin(e.target.value)}
+                          placeholder={t.pinNew}
+                        />
+                        <input
+                          aria-label={t.pinConfirm}
+                          type="password"
+                          autoComplete="new-password"
+                          value={pinConfirm}
+                          onChange={(e) => setPinConfirm(e.target.value)}
+                          placeholder={t.pinConfirm}
+                        />
+                        <button
+                          className="secondary"
+                          onClick={() => void managePin("change")}
+                        >
+                          {t.pinChange}
+                        </button>
+                        <button
+                          className="secondary"
+                          onClick={() => void managePin("disable")}
+                        >
+                          {t.pinDisable}
+                        </button>
+                      </>
+                    )}
+                    {pinError && (
+                      <p className="error" role="alert">
+                        {pinError}
+                      </p>
+                    )}
+                  </div>
                   <button
                     className="id-toggle"
                     aria-expanded={idExpanded}
@@ -475,6 +621,36 @@ function App() {
         </div>
       </header>
       <section className="card">
+        {screen === "locked" && (
+          <form onSubmit={submitPin} aria-label={t.pinUnlock}>
+            <h1>{t.pinUnlock}</h1>
+            <label>
+              {t.pinCurrent}
+              <input
+                autoFocus
+                type="password"
+                autoComplete="current-password"
+                value={pin}
+                onChange={(e) => setPin(e.target.value)}
+              />
+            </label>
+            {pinError && (
+              <p className="error" role="alert">
+                {pinError}
+              </p>
+            )}
+            <button className="primary" type="submit">
+              {t.pinUnlock}
+            </button>
+            <button
+              className="text-button"
+              type="button"
+              onClick={() => void forgotPin()}
+            >
+              {t.forgotPin}
+            </button>
+          </form>
+        )}
         {screen === "welcome" && (
           <>
             <label className="welcome-language">

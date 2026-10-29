@@ -88,6 +88,22 @@ export const strings = {
     loadMore: "Загрузить ещё",
     loading: "Загрузка…",
     presenceOnline: "в сети",
+    pinTitle: "PIN",
+    pinNew: "Новый PIN",
+    pinConfirm: "Повторите PIN",
+    pinCurrent: "Текущий PIN",
+    pinHint: "Минимум 6 цифр или букв. Короткий PIN можно подобрать.",
+    pinEnable: "Включить PIN",
+    pinChange: "Сменить PIN",
+    pinDisable: "Отключить PIN",
+    pinUnlock: "Разблокировать",
+    pinIncorrect: "Неверный PIN или повреждённые данные.",
+    pinWait: "Слишком много попыток. Подождите и попробуйте снова.",
+    pinMismatch:
+      "PIN должен содержать минимум 6 символов; оба значения должны совпадать.",
+    forgotPin: "Забыли PIN?",
+    forgotConfirm:
+      "Без PIN данные на этом устройстве восстановить нельзя. Стереть локальные данные и вернуться на старт?",
   },
   en: {
     title: "Messages",
@@ -164,6 +180,22 @@ export const strings = {
     loadMore: "Load more",
     loading: "Loading…",
     presenceOnline: "online",
+    pinTitle: "PIN",
+    pinNew: "New PIN",
+    pinConfirm: "Confirm PIN",
+    pinCurrent: "Current PIN",
+    pinHint: "At least 6 letters or digits. A short PIN can be guessed.",
+    pinEnable: "Enable PIN",
+    pinChange: "Change PIN",
+    pinDisable: "Disable PIN",
+    pinUnlock: "Unlock",
+    pinIncorrect: "Incorrect PIN or damaged data.",
+    pinWait: "Too many attempts. Wait before trying again.",
+    pinMismatch:
+      "PIN must be at least 6 characters and both values must match.",
+    forgotPin: "Forgot PIN?",
+    forgotConfirm:
+      "Without the PIN, this device's data cannot be recovered. Erase local data and return to the start page?",
   },
 } as const;
 
