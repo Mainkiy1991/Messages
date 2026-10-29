@@ -1,5 +1,16 @@
 export type Language = "ru" | "en";
 
+export const supportedLanguages = [
+  { code: "ru", name: "Русский", locale: "ru-RU" },
+  { code: "en", name: "English", locale: "en-US" },
+] as const satisfies readonly {
+  code: Language;
+  name: string;
+  locale: string;
+}[];
+
+export const languageStorageKey = "messages-lang";
+
 export const strings = {
   ru: {
     title: "Messages",
@@ -158,18 +169,43 @@ export const strings = {
 
 export type Strings = (typeof strings)[Language];
 
-export function detectLanguage(browserLanguage: string | undefined): Language {
-  return browserLanguage?.toLowerCase().startsWith("en") ? "en" : "ru";
+export function detectLanguage(browserLanguages: readonly string[]): Language {
+  for (const browserLanguage of browserLanguages) {
+    const code = browserLanguage.trim().toLowerCase().split(/[-_]/u)[0];
+    if (code === "ru" || code === "uk" || code === "be") return "ru";
+    if (code === "en") return "en";
+  }
+  return "en";
 }
 
 export function getInitialLanguage(
-  storage: Pick<Storage, "getItem">,
-  browserLanguage: string | undefined,
+  browserLanguages: readonly string[],
+  storage?: Pick<Storage, "getItem">,
 ): Language {
-  const saved = storage.getItem("messages-language");
-  return saved === "ru" || saved === "en"
-    ? saved
-    : detectLanguage(browserLanguage);
+  try {
+    const saved = (storage ?? globalThis.localStorage).getItem(
+      languageStorageKey,
+    );
+    if (saved === "ru" || saved === "en") return saved;
+  } catch {
+    // Storage can be unavailable in private or restricted browser contexts.
+  }
+  return detectLanguage(browserLanguages);
+}
+
+export function saveLanguagePreference(
+  language: Language,
+  storage?: Pick<Storage, "setItem">,
+): void {
+  try {
+    (storage ?? globalThis.localStorage).setItem(languageStorageKey, language);
+  } catch {
+    // Keep the in-memory language selection when storage is unavailable.
+  }
+}
+
+export function getLanguageLocale(language: Language): string {
+  return supportedLanguages.find((entry) => entry.code === language)!.locale;
 }
 
 export function chooseCheckPositions(

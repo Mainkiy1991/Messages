@@ -10,8 +10,11 @@ import {
 } from "@messages/crypto";
 import {
   chooseCheckPositions,
+  getLanguageLocale,
   getInitialLanguage,
+  saveLanguagePreference,
   strings,
+  supportedLanguages,
   type Language,
 } from "./i18n.js";
 import {
@@ -36,9 +39,14 @@ import "./style.css";
 type Screen = "loading" | "welcome" | "create" | "verify" | "login" | "home";
 function App() {
   const [language, setLanguage] = useState<Language>(() =>
-    getInitialLanguage(localStorage, navigator.language),
+    getInitialLanguage(
+      typeof navigator === "undefined" ? [] : navigator.languages,
+    ),
   );
   const t = strings[language];
+  useEffect(() => {
+    document.documentElement.lang = language;
+  }, [language]);
   const [screen, setScreen] = useState<Screen>("loading");
   const [keys, setKeys] = useState<DerivedKeys | null>(null);
   const [count, setCount] = useState<12 | 24>(12);
@@ -127,7 +135,7 @@ function App() {
   }, []);
   function changeLanguage(next: Language) {
     setLanguage(next);
-    localStorage.setItem("messages-language", next);
+    saveLanguagePreference(next);
   }
 
   async function enter(mnemonic: string) {
@@ -381,20 +389,6 @@ function App() {
           />
         )}
         <div className="header-actions">
-          <div className="language" aria-label={t.language}>
-            <button
-              onClick={() => changeLanguage("ru")}
-              aria-pressed={language === "ru"}
-            >
-              RU
-            </button>
-            <button
-              onClick={() => changeLanguage("en")}
-              aria-pressed={language === "en"}
-            >
-              EN
-            </button>
-          </div>
           {screen === "home" && (
             <div className="profile-wrap" ref={profileRef}>
               <button
@@ -426,6 +420,22 @@ function App() {
               </button>
               {profileOpen && (
                 <div className="profile-panel">
+                  <label className="profile-language">
+                    {t.language}
+                    <select
+                      aria-label={t.language}
+                      value={language}
+                      onChange={(event) =>
+                        changeLanguage(event.target.value as Language)
+                      }
+                    >
+                      {supportedLanguages.map((entry) => (
+                        <option key={entry.code} value={entry.code}>
+                          {entry.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <button
                     className="id-toggle"
                     aria-expanded={idExpanded}
@@ -467,6 +477,22 @@ function App() {
       <section className="card">
         {screen === "welcome" && (
           <>
+            <label className="welcome-language">
+              {t.language}
+              <select
+                aria-label={t.language}
+                value={language}
+                onChange={(event) =>
+                  changeLanguage(event.target.value as Language)
+                }
+              >
+                {supportedLanguages.map((entry) => (
+                  <option key={entry.code} value={entry.code}>
+                    {entry.name}
+                  </option>
+                ))}
+              </select>
+            </label>
             <h1>{t.welcome}</h1>
             <button
               data-testid="create-account"
@@ -653,10 +679,10 @@ function App() {
                           {new Date(
                             chat.messages.at(-1)?.createdAt ??
                               chat.lastCreatedAt!,
-                          ).toLocaleTimeString(
-                            language === "ru" ? "ru-RU" : "en-US",
-                            { hour: "2-digit", minute: "2-digit" },
-                          )}
+                          ).toLocaleTimeString(getLanguageLocale(language), {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
                         </small>
                       )}
                     </button>
@@ -830,7 +856,7 @@ function App() {
                           </div>
                           <small data-testid="message-status">
                             {new Date(message.createdAt).toLocaleTimeString(
-                              language === "ru" ? "ru-RU" : "en-US",
+                              getLanguageLocale(language),
                               { hour: "2-digit", minute: "2-digit" },
                             )}{" "}
                             {message.direction === "out" &&

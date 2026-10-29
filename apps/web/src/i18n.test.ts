@@ -1,20 +1,65 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   chooseCheckPositions,
   detectLanguage,
+  languageStorageKey,
   getInitialLanguage,
+  saveLanguagePreference,
   strings,
 } from "./i18n.js";
 
 describe("localization", () => {
-  it("detects English and defaults other languages to Russian", () => {
-    expect(detectLanguage("en-US")).toBe("en");
-    expect(detectLanguage("ru-RU")).toBe("ru");
-    expect(detectLanguage(undefined)).toBe("ru");
+  it.each([
+    ["ru-RU", "ru"],
+    ["uk", "ru"],
+    ["be", "ru"],
+    ["en-US", "en"],
+    ["de", "en"],
+  ] as const)("detects %s as %s", (browserLanguage, expected) => {
+    expect(detectLanguage([browserLanguage])).toBe(expected);
   });
-  it("uses a saved language preference", () => {
-    expect(getInitialLanguage({ getItem: () => "en" }, "ru-RU")).toBe("en");
-    expect(getInitialLanguage({ getItem: () => null }, "en-GB")).toBe("en");
+  it("uses navigator language order and defaults an empty list to English", () => {
+    expect(detectLanguage(["fr-FR", "ru-RU", "en-US"])).toBe("ru");
+    expect(detectLanguage([])).toBe("en");
+  });
+  it("uses a saved language preference before browser detection", () => {
+    expect(getInitialLanguage(["ru-RU"], { getItem: () => "en" })).toBe("en");
+    expect(getInitialLanguage(["en-US"], { getItem: () => "ru" })).toBe("ru");
+  });
+  it("ignores a damaged saved preference", () => {
+    expect(getInitialLanguage(["ru-RU"], { getItem: () => "uk" })).toBe("ru");
+  });
+  it("falls back to browser detection when local storage is unavailable", () => {
+    expect(
+      getInitialLanguage(["ru-RU"], {
+        getItem: () => {
+          throw new Error("storage disabled");
+        },
+      }),
+    ).toBe("ru");
+    expect(() =>
+      saveLanguagePreference("en", {
+        setItem: () => {
+          throw new Error("storage disabled");
+        },
+      }),
+    ).not.toThrow();
+  });
+  it("keeps Russian and English translation keys in sync", () => {
+    expect(Object.keys(strings.ru).sort()).toEqual(
+      Object.keys(strings.en).sort(),
+    );
+  });
+  it("shows translated text after changing the selected language", () => {
+    let language: "ru" | "en" = "ru";
+    expect(strings[language].create).toBe("Создать аккаунт");
+    language = "en";
+    expect(strings[language].create).toBe("Create account");
+  });
+  it("saves the manual language under the expected preference key", () => {
+    const setItem = vi.fn();
+    saveLanguagePreference("ru", { setItem });
+    expect(setItem).toHaveBeenCalledWith(languageStorageKey, "ru");
   });
   it("provides translated visible labels", () => {
     expect(strings.ru.login).not.toBe(strings.en.login);
