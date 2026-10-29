@@ -380,22 +380,11 @@ export async function registerWebSocket(
           lastWindow = now;
           frameCount = 0;
         }
-        const isHeartbeatPing =
-          !isBinary &&
-          (() => {
-            try {
-              return pingSchema.safeParse(JSON.parse(data.toString())).success;
-            } catch {
-              return false;
-            }
-          })();
-        if (!isHeartbeatPing) {
-          frameCount += 1;
-          if (frameCount > 120) {
-            closed = true;
-            socket.close(4429, "frame rate limit exceeded");
-            return;
-          }
+        frameCount += 1;
+        if (frameCount > 120) {
+          closed = true;
+          socket.close(4429, "frame rate limit exceeded");
+          return;
         }
 
         if (isBinary) {

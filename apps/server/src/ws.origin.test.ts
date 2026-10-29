@@ -25,6 +25,55 @@ function connect(url: string, origin?: string) {
 }
 
 describe("WebSocket Origin policy", () => {
+  it("closes ping floods with code 4429 before and after authentication", async () => {
+    const pool = {
+      async query(sql: string) {
+        if (sql.includes("SELECT user_id FROM sessions"))
+          return { rows: [{ user_id: "a".repeat(64) }], rowCount: 1 };
+        if (sql.includes("RETURNING last_seen_at"))
+          return { rows: [{ last_seen_at: new Date() }], rowCount: 1 };
+        return { rows: [], rowCount: 0 };
+      },
+    } as unknown as Pool;
+    const url = await listen(pool);
+    const authenticated = connect(url);
+    await new Promise<void>((resolve, reject) => {
+      authenticated.once("open", resolve);
+      authenticated.once("error", reject);
+    });
+    authenticated.send(JSON.stringify({ type: "auth", token: "b".repeat(43) }));
+    await new Promise<void>((resolve, reject) => {
+      const onMessage = (data: WebSocket.RawData) => {
+        if (
+          (JSON.parse(data.toString()) as { type?: string }).type !== "auth_ok"
+        )
+          return;
+        authenticated.off("message", onMessage);
+        resolve();
+      };
+      authenticated.on("message", onMessage);
+      authenticated.once("error", reject);
+    });
+    const authenticatedClose = new Promise<number>((resolve) =>
+      authenticated.once("close", (code) => resolve(code)),
+    );
+    for (let i = 0; i < 121; i++)
+      authenticated.send(JSON.stringify({ type: "ping" }));
+    await expect(authenticatedClose).resolves.toBe(4429);
+
+    const unauthenticated = connect(url);
+    await new Promise<void>((resolve, reject) => {
+      unauthenticated.once("open", resolve);
+      unauthenticated.once("error", reject);
+    });
+    const unauthenticatedClose = new Promise<number>((resolve) =>
+      unauthenticated.once("close", (code) => resolve(code)),
+    );
+    for (let i = 0; i < 121; i++)
+      unauthenticated.send(JSON.stringify({ type: "ping" }));
+    await expect(unauthenticatedClose).resolves.toBe(4429);
+  });
+
   it("answers authenticated pings once per four seconds without database writes", async () => {
     const queries: string[] = [];
     const pool = {
