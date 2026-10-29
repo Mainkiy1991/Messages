@@ -771,9 +771,10 @@ describe("ChatController", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(historyCalls).toBe(1);
 
+    expect(conversationCalls).toBe(3);
     await vi.advanceTimersByTimeAsync(1_999);
-    expect(conversationCalls).toBe(2);
-    await vi.advanceTimersByTimeAsync(1);
+    expect(conversationCalls).toBe(3);
+    await f.controller.loadHistory(bobId);
     await vi.waitFor(() => expect(historyCalls).toBe(2));
     expect(conversationCalls).toBe(3);
     expect(f.controller.getSnapshot().connectionState).toBe("connected");
@@ -918,14 +919,14 @@ describe("ChatController", () => {
     expect(controller.getSnapshot().chats.map((chat) => chat.peerId)).toEqual([
       bobId,
     ]);
-    expect(controller.getSnapshot().contactsError).toBe(true);
+    expect(controller.getSnapshot().contactsError).toBe(false);
     expect(contactLabel(bobId, controller.getSnapshot().contacts)).toBe(
       bobId.slice(-10),
     );
     controller.stop();
   });
 
-  it("shows waking before the deadline and reveals a real contacts error after 90 seconds", async () => {
+  it("shows waking before the deadline without a contacts error", async () => {
     vi.useFakeTimers();
     vi.stubGlobal("window", {});
     const controller = new ChatController(alice, aliceId, session("token"), {
@@ -936,7 +937,7 @@ describe("ChatController", () => {
     await (
       controller as unknown as { loadContacts(token: string): Promise<void> }
     ).loadContacts("token");
-    expect(controller.getSnapshot().contactsError).toBe(true);
+    expect(controller.getSnapshot().contactsError).toBe(false);
     (
       controller as unknown as {
         scheduleAccountRetry(resource: "contacts"): void;
@@ -947,7 +948,7 @@ describe("ChatController", () => {
     expect(controller.getSnapshot().waking).toBe(true);
     await vi.advanceTimersByTimeAsync(1);
     expect(controller.getSnapshot().waking).toBe(false);
-    expect(controller.getSnapshot().contactsError).toBe(true);
+    expect(controller.getSnapshot().contactsError).toBe(false);
     controller.stop();
   });
 
@@ -964,7 +965,7 @@ describe("ChatController", () => {
       loadContacts(token: string): Promise<void>;
     };
     await internals.loadContacts("token");
-    expect(controller.getSnapshot().contactsError).toBe(true);
+    expect(controller.getSnapshot().contactsError).toBe(false);
     internals.resetAccountRetry("contacts");
     vi.advanceTimersByTime(90_000);
     expect(controller.getSnapshot().waking).toBe(false);
@@ -972,7 +973,7 @@ describe("ChatController", () => {
     internals.scheduleAccountRetry("contacts");
 
     expect(controller.getSnapshot().waking).toBe(false);
-    expect(controller.getSnapshot().contactsError).toBe(true);
+    expect(controller.getSnapshot().contactsError).toBe(false);
     controller.stop();
   });
 
@@ -992,6 +993,56 @@ describe("ChatController", () => {
       controller as unknown as { loadContacts(token: string): Promise<void> }
     ).loadContacts("token");
     expect(controller.getSnapshot().waking).toBe(false);
+    controller.stop();
+  });
+
+  it("hides the contacts error until two failures after the first server response", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", {});
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => {
+        throw new ApiError(500, "internal_error");
+      },
+    });
+    const internals = controller as unknown as {
+      markServerResponded(): void;
+      loadContacts(token: string): Promise<void>;
+    };
+    internals.markServerResponded();
+    await internals.loadContacts("token");
+    expect(controller.getSnapshot().contactsError).toBe(false);
+    await internals.loadContacts("token");
+    expect(controller.getSnapshot().contactsError).toBe(true);
+    controller.stop();
+  });
+
+  it("cancels pending account retries and reloads immediately on first server response", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", {});
+    let calls = 0;
+    const clearTimer = vi.fn(globalThis.clearTimeout);
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      clearTimer,
+      getConversations: async () => ({ conversations: [] }),
+      getContacts: async () => {
+        calls++;
+        if (calls === 1) throw new ApiError(500, "internal_error");
+        return { version: "0", blob: null };
+      },
+    });
+    const internals = controller as unknown as {
+      accountDataRetryTimers: Map<string, ReturnType<typeof setTimeout>>;
+      scheduleAccountRetry(resource: "contacts"): void;
+    };
+    internals.scheduleAccountRetry("contacts");
+    expect(internals.accountDataRetryTimers.has("contacts")).toBe(true);
+    await (
+      controller as unknown as { loadAccountData(): Promise<void> }
+    ).loadAccountData();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(calls).toBe(2));
+    expect(internals.accountDataRetryTimers.size).toBe(0);
+    expect(clearTimer).toHaveBeenCalled();
     controller.stop();
   });
 
@@ -1396,7 +1447,9 @@ describe("ChatController", () => {
         calls++;
         throw new TypeError("network unavailable");
       },
-      getContacts: async () => ({ version: "0", blob: null }),
+      getContacts: async () => {
+        throw new TypeError("network unavailable");
+      },
     });
     const load = (
       controller as unknown as {

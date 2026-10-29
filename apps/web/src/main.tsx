@@ -33,13 +33,13 @@ import {
 } from "./components/presence-indicators.js";
 import "./style.css";
 
-type Screen = "welcome" | "create" | "verify" | "login" | "home";
+type Screen = "loading" | "welcome" | "create" | "verify" | "login" | "home";
 function App() {
   const [language, setLanguage] = useState<Language>(() =>
     getInitialLanguage(localStorage, navigator.language),
   );
   const t = strings[language];
-  const [screen, setScreen] = useState<Screen>("welcome");
+  const [screen, setScreen] = useState<Screen>("loading");
   const [keys, setKeys] = useState<DerivedKeys | null>(null);
   const [count, setCount] = useState<12 | 24>(12);
   const [phrase, setPhrase] = useState("");
@@ -76,6 +76,7 @@ function App() {
   const wasNearBottomRef = useRef(true);
   const previousPeerRef = useRef("");
   const preserveScrollRef = useRef(false);
+  const chatHistoryRef = useRef(false);
 
   useEffect(() => {
     const timer = window.setInterval(
@@ -115,12 +116,14 @@ function App() {
   }, []);
 
   useEffect(() => {
-    void restoreSession().then(async (saved) => {
-      if (saved) {
-        setKeys(saved);
-        setScreen("home");
-      }
-    });
+    void restoreSession()
+      .then((saved) => {
+        if (saved) {
+          setKeys(saved);
+          setScreen("home");
+        } else setScreen("welcome");
+      })
+      .catch(() => undefined);
   }, []);
   function changeLanguage(next: Language) {
     setLanguage(next);
@@ -192,6 +195,8 @@ function App() {
     await controllerRef.current?.logout();
     controllerRef.current = null;
     await clearSession();
+    window.history.replaceState(null, "", window.location.href);
+    chatHistoryRef.current = false;
     setKeys(null);
     setChatState({
       chats: [],
@@ -214,6 +219,28 @@ function App() {
   const socketState = chatState.connectionState;
   const activeChat = chats.find((chat) => chat.peerId === activePeer);
   const activeMessages = activeChat?.messages ?? [];
+  useEffect(() => {
+    if (screen !== "home") return;
+    const onPopState = (event: PopStateEvent) => {
+      const peerId = (event.state as { chat?: unknown } | null)?.chat;
+      chatHistoryRef.current = false;
+      if (typeof peerId === "string" && /^[0-9a-f]{64}$/u.test(peerId))
+        void controllerRef.current?.openChat(peerId);
+      else controllerRef.current?.closeActiveChat();
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [screen]);
+  useEffect(() => {
+    if (screen !== "home" || !activePeer) return;
+    const state = window.history.state as { chat?: unknown } | null;
+    if (state?.chat === activePeer) {
+      chatHistoryRef.current = true;
+      return;
+    }
+    window.history.pushState({ chat: activePeer }, "", window.location.href);
+    chatHistoryRef.current = true;
+  }, [activePeer, screen]);
   useEffect(() => {
     if (!activePeer) {
       setChatMenuOpen(false);
@@ -257,6 +284,15 @@ function App() {
       });
       controllerRef.current = controller;
       controller.start();
+      const historyPeer = (window.history.state as { chat?: unknown } | null)
+        ?.chat;
+      if (
+        typeof historyPeer === "string" &&
+        /^[0-9a-f]{64}$/u.test(historyPeer)
+      ) {
+        chatHistoryRef.current = true;
+        void controller.openChat(historyPeer);
+      }
     });
     return () => {
       cancelled = true;
@@ -312,6 +348,7 @@ function App() {
       setChatError(t.deleteChatFailed);
     }
   }
+  if (screen === "loading") return <main className="session-loading" />;
   return (
     <main className="shell">
       <header className={screen === "home" ? "app-header" : undefined}>
@@ -634,7 +671,8 @@ function App() {
                         className="text-button mobile-back"
                         aria-label={t.back}
                         onClick={() => {
-                          controllerRef.current?.closeActiveChat();
+                          if (chatHistoryRef.current) window.history.back();
+                          else controllerRef.current?.closeActiveChat();
                         }}
                       >
                         ← {t.back}

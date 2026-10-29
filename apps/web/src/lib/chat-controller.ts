@@ -159,6 +159,11 @@ export class ChatController {
     "conversations" | "contacts",
     number
   >();
+  private readonly accountDataFailuresAfterResponse = new Map<
+    "conversations" | "contacts",
+    number
+  >();
+  private retryAccountDataAfterLoad = false;
   private stopped = false;
   private serverResponded = false;
   private wakingExpired = false;
@@ -289,6 +294,10 @@ export class ChatController {
       }
     })().finally(() => {
       this.accountDataLoading = null;
+      if (this.retryAccountDataAfterLoad && !this.stopped) {
+        this.retryAccountDataAfterLoad = false;
+        void this.loadAccountData();
+      }
     });
     return this.accountDataLoading;
   }
@@ -374,6 +383,7 @@ export class ChatController {
       }));
       this.update({ chats: this.reconcileConversations(chats) });
       this.conversationsLoaded = true;
+      this.accountDataFailuresAfterResponse.delete("conversations");
       this.resetAccountRetry("conversations");
       void this.loadRecentPreviews(chats.map((chat) => chat.peerId));
       const activePeer = this.state.activePeer;
@@ -383,6 +393,7 @@ export class ChatController {
       if (activeChat && !activeChat.historyLoaded)
         void this.loadHistory(activePeer, { silent: true });
     } catch (error) {
+      this.recordAccountFailure("conversations");
       if (this.isRetryableAccountError(error))
         this.scheduleAccountRetry("conversations");
       else this.update({ error: "server_unavailable" });
@@ -431,10 +442,11 @@ export class ChatController {
       this.contactsVersion = book.version;
       this.update({ contacts, contactsError: false });
       this.contactsLoaded = true;
+      this.accountDataFailuresAfterResponse.delete("contacts");
       this.resetAccountRetry("contacts");
     } catch (error) {
       if (this.stopped) return;
-      this.update({ contactsError: true });
+      this.recordAccountFailure("contacts");
       if (this.isRetryableAccountError(error))
         this.scheduleAccountRetry("contacts");
       else this.contactsLoaded = true;
@@ -478,12 +490,32 @@ export class ChatController {
   }
 
   private markServerResponded(): void {
+    const firstResponse = !this.serverResponded;
     this.serverResponded = true;
     this.wakingExpired = false;
     if (this.wakingTimer)
       (this.deps.clearTimer ?? globalThis.clearTimeout)(this.wakingTimer);
     this.wakingTimer = null;
     if (this.state.waking) this.update({ waking: false });
+    if (!firstResponse) return;
+    const hadRetries = this.accountDataRetryTimers.size > 0;
+    for (const resource of ["conversations", "contacts"] as const) {
+      const timer = this.accountDataRetryTimers.get(resource);
+      if (timer) (this.deps.clearTimer ?? globalThis.clearTimeout)(timer);
+      this.accountDataRetryTimers.delete(resource);
+    }
+    if (hadRetries) {
+      if (this.accountDataLoading) this.retryAccountDataAfterLoad = true;
+      else void this.loadAccountData();
+    }
+  }
+
+  private recordAccountFailure(resource: "conversations" | "contacts"): void {
+    if (!this.serverResponded) return;
+    const failures =
+      (this.accountDataFailuresAfterResponse.get(resource) ?? 0) + 1;
+    this.accountDataFailuresAfterResponse.set(resource, failures);
+    if (resource === "contacts") this.update({ contactsError: failures >= 2 });
   }
 
   private isRetryableAccountError(error: unknown): boolean {

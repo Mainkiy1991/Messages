@@ -460,7 +460,9 @@ test.describe("real browser chat", () => {
     await a.page.reload();
     const preview = chatWith(a.page, bob.id);
     await expect(preview).toContainText("Long history message 15");
-    await expect(a.page.locator(".conversation-head")).toHaveCount(0);
+    await expect(a.page.locator(".conversation-head")).toContainText(
+      bob.id.slice(-10),
+    );
     await expect(preview.locator(".chat-item-copy > span")).toHaveCSS(
       "white-space",
       "nowrap",
@@ -542,6 +544,10 @@ test.describe("real browser chat", () => {
     const alice = await createAccount(a.page);
     const bob = await createAccount(b.page);
     await openChat(a.page, bob.id);
+    expect(await a.page.evaluate(() => history.state)).toEqual({
+      chat: bob.id,
+    });
+    expect(a.page.url()).not.toContain(bob.id);
     await logout(b.page);
     await send(a.page, "Queued one");
     await send(a.page, "Queued two");
@@ -583,7 +589,40 @@ test.describe("real browser chat", () => {
     await expect(a.page.locator(".conversation-head")).toContainText(
       "Bob Contact",
     );
+    await a.page.goBack();
+    await expect(a.page.locator(".chat-sidebar")).toBeVisible();
+    await expect(a.page.locator(".empty-chat")).toBeVisible();
+    await chatWith(a.page, bob.id).click();
+    await expect(a.page.locator(".conversation-head")).toContainText(
+      "Bob Contact",
+    );
+    await a.page.addInitScript(() => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        IDBRequest.prototype,
+        "onsuccess",
+      );
+      const get = IDBObjectStore.prototype.get;
+      IDBObjectStore.prototype.get = function (key) {
+        const request = get.call(this, key);
+        if (key === "derivedKeys" && descriptor?.set) {
+          let callback: ((event: Event) => void) | null = null;
+          Object.defineProperty(request, "onsuccess", {
+            configurable: true,
+            get: () => callback,
+            set: (value: ((event: Event) => void) | null) => {
+              callback = value;
+              descriptor.set!.call(request, (event: Event) => {
+                setTimeout(() => callback?.call(request, event), 500);
+              });
+            },
+          });
+        }
+        return request;
+      };
+    });
     await a.page.reload();
+    await expect(a.page.getByTestId("create-account")).toHaveCount(0);
+    await expect(a.page.getByTestId("profile")).toBeVisible();
     await expect(chatWith(a.page, bob.id)).toContainText("Bob Contact");
     await chatWith(a.page, bob.id).click();
     await expect(a.page.locator(".message-list .message-text")).toContainText(
@@ -852,6 +891,30 @@ test.describe("real browser chat", () => {
     await a.page.setViewportSize({ width: 360, height: 640 });
     await expect(a.page.locator(".chat-sidebar")).toBeHidden();
     await expect(a.page.getByTestId("message-input")).toBeInViewport();
+    const mobileNameInput = a.page.getByLabel("Contact name (optional)");
+    await expect(mobileNameInput).toBeInViewport();
+    const inputBox = await mobileNameInput.boundingBox();
+    const saveBox = await a.page
+      .getByRole("button", { name: "Save name" })
+      .boundingBox();
+    expect(inputBox).not.toBeNull();
+    expect(saveBox).not.toBeNull();
+    expect(inputBox!.width).toBeGreaterThan(250);
+    expect(saveBox!.y).toBeGreaterThan(inputBox!.y);
+    expect(
+      await a.page
+        .locator(".conversation-head")
+        .evaluate((el) => el.getBoundingClientRect().right),
+    ).toBeLessThanOrEqual(360);
+    await a.page.getByRole("button", { name: "Cancel" }).click();
+    await a.page.getByRole("button", { name: "RU" }).click();
+    await a.page.locator(".contact-name-trigger").click();
+    await a.page.getByLabel("Имя контакта (необязательно)").fill("Боб");
+    await expect(
+      a.page.getByRole("button", { name: "Сохранить имя" }),
+    ).toBeVisible();
+    await a.page.getByRole("button", { name: "Отмена" }).click();
+    await a.page.getByRole("button", { name: "EN" }).click();
     await a.page.screenshot({
       path: testInfo.outputPath("chat-mobile.png"),
       fullPage: true,
