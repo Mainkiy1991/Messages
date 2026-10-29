@@ -32,6 +32,10 @@ button {
   margin: 0 auto;
   padding: 24px;
 }
+.session-loading {
+  min-height: 100dvh;
+  background: #f7f8fc;
+}
 .shell:has(.messenger) {
   width: 100%;
   max-width: none;
@@ -589,6 +593,22 @@ button:disabled {
   .conversation-head {
     padding-left: 8px;
     gap: 7px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .conversation-head > .contact-name-form {
+    order: 3;
+    flex: 1 0 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    min-width: 0;
+  }
+  .contact-name-form input {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+  .conversation-head > .conversation-menu {
+    margin-left: auto;
   }
   .contact-name-trigger {
     min-width: 0;
