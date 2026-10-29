@@ -271,7 +271,7 @@ export class ChatConnection {
         this.schedule();
       });
       socket.addEventListener("error", () => {
-        if (this.active) this.setState("offline");
+        if (this.active && this.socket === socket) this.setState("offline");
       });
     } catch {
       this.setState("offline");

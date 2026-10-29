@@ -91,6 +91,55 @@ describe("websocket chat connection", () => {
     vi.useRealTimers();
   });
 
+  it("ignores close, error, and message events from the timed-out socket", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const states: string[] = [];
+    const doc = Object.assign(new EventTarget(), {
+      visibilityState: "visible" as DocumentVisibilityState,
+    });
+    const keys = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    const connection = new ChatConnection(
+      keys,
+      {
+        token: "a".repeat(43),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+      },
+      { onState: (state) => states.push(state), onFrame: vi.fn() },
+      {
+        socketFactory: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+        heartbeatIdleMs: 10,
+        heartbeatTimeoutMs: 10,
+        heartbeatMinIntervalMs: 5,
+        document: doc,
+        random: () => 0,
+      },
+    );
+    connection.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const oldSocket = sockets[0]!;
+    oldSocket.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(oldSocket.closed).toBe(true);
+    const statesAfterTimeout = [...states];
+    oldSocket.frame({ type: "message", id: "late-frame" });
+    oldSocket.dispatchEvent(new Event("error"));
+    oldSocket.close();
+    expect(states).toEqual(statesAfterTimeout);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(sockets).toHaveLength(2);
+    connection.stop();
+    vi.useRealTimers();
+  });
+
   it("resets heartbeat on any frame and pauses while hidden until visibility returns", async () => {
     vi.useFakeTimers();
     const socket = new FakeSocket();

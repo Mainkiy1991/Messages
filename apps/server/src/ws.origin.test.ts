@@ -25,7 +25,7 @@ function connect(url: string, origin?: string) {
 }
 
 describe("WebSocket Origin policy", () => {
-  it("answers authenticated pings once per five seconds without database writes", async () => {
+  it("answers authenticated pings once per four seconds without database writes", async () => {
     const queries: string[] = [];
     const pool = {
       async query(sql: string) {
@@ -56,18 +56,26 @@ describe("WebSocket Origin policy", () => {
     await waitUntil(() =>
       frames.some((frame) => (frame as { type?: string }).type === "pong"),
     );
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
     socket.send(JSON.stringify({ type: "ping" }));
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(
       frames.filter((frame) => (frame as { type?: string }).type === "pong"),
     ).toHaveLength(1);
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    socket.send(JSON.stringify({ type: "ping" }));
+    await waitUntil(
+      () =>
+        frames.filter((frame) => (frame as { type?: string }).type === "pong")
+          .length === 2,
+    );
     expect(queries).toHaveLength(queryCount);
     const closed = new Promise<void>((resolve) =>
       socket.once("close", () => resolve()),
     );
     socket.close();
     await closed;
-  });
+  }, 10_000);
 
   it("accepts the configured Origin", async () => {
     const socket = connect(await listen(), "https://site.example");

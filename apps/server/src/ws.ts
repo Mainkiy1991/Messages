@@ -8,6 +8,7 @@ import { createMessageHub, type MessageRow } from "./messages.js";
 import { MAX_CONVERSATIONS } from "@messages/shared";
 
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/u;
+const HEARTBEAT_RESPONSE_INTERVAL_MS = 4_000;
 const sendSchema = z
   .object({
     type: z.literal("send"),
@@ -379,11 +380,22 @@ export async function registerWebSocket(
           lastWindow = now;
           frameCount = 0;
         }
-        frameCount += 1;
-        if (frameCount > 120) {
-          closed = true;
-          socket.close(4429, "frame rate limit exceeded");
-          return;
+        const isHeartbeatPing =
+          !isBinary &&
+          (() => {
+            try {
+              return pingSchema.safeParse(JSON.parse(data.toString())).success;
+            } catch {
+              return false;
+            }
+          })();
+        if (!isHeartbeatPing) {
+          frameCount += 1;
+          if (frameCount > 120) {
+            closed = true;
+            socket.close(4429, "frame rate limit exceeded");
+            return;
+          }
         }
 
         if (isBinary) {
@@ -506,7 +518,7 @@ export async function registerWebSocket(
             const time = Date.now();
             if (
               lastHeartbeatResponseAt &&
-              time - lastHeartbeatResponseAt < 5_000
+              time - lastHeartbeatResponseAt < HEARTBEAT_RESPONSE_INTERVAL_MS
             )
               return;
             lastHeartbeatResponseAt = time;
