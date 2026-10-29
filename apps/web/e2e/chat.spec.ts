@@ -460,7 +460,9 @@ test.describe("real browser chat", () => {
     await a.page.reload();
     const preview = chatWith(a.page, bob.id);
     await expect(preview).toContainText("Long history message 15");
-    await expect(a.page.locator(".conversation-head")).toHaveCount(0);
+    await expect(a.page.locator(".conversation-head")).toContainText(
+      bob.id.slice(-10),
+    );
     await expect(preview.locator(".chat-item-copy > span")).toHaveCSS(
       "white-space",
       "nowrap",
@@ -589,7 +591,7 @@ test.describe("real browser chat", () => {
     );
     await a.page.goBack();
     await expect(a.page.locator(".chat-sidebar")).toBeVisible();
-    await expect(a.page.locator(".conversation")).toBeHidden();
+    await expect(a.page.locator(".empty-chat")).toBeVisible();
     await chatWith(a.page, bob.id).click();
     await expect(a.page.locator(".conversation-head")).toContainText(
       "Bob Contact",

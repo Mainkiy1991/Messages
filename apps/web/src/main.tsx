@@ -195,6 +195,8 @@ function App() {
     await controllerRef.current?.logout();
     controllerRef.current = null;
     await clearSession();
+    window.history.replaceState(null, "", window.location.href);
+    chatHistoryRef.current = false;
     setKeys(null);
     setChatState({
       chats: [],
