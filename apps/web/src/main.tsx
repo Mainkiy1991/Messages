@@ -226,6 +226,9 @@ function App() {
     const state = await getPinState();
     const nextAttemptAt = state?.nextAttemptAt ?? 0;
     setPinNextAttemptAt(nextAttemptAt);
+    setPinCountdown(
+      Math.max(0, Math.ceil((nextAttemptAt - Date.now()) / 1000)),
+    );
     return Date.now() >= nextAttemptAt;
   }
   async function waitForPaint() {
