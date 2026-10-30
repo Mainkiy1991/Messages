@@ -143,7 +143,7 @@ export async function loginToServer(
   );
   if (result.userId !== userIdFromPublicKey(keys.identity.publicKey))
     throw new Error("Server returned an unexpected user ID");
-  await saveServerSession(result);
+  await saveServerSession(result, keys);
   return result;
 }
 

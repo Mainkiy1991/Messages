@@ -1,0 +1,95 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  unwrapServerSession,
+  unwrapSecrets,
+  wrapServerSession,
+  wrapSecrets,
+} from "./index.js";
+
+describe("PIN secret wrapping", () => {
+  const secret = new TextEncoder().encode("session secret bytes");
+  it("wraps and unwraps with the correct PIN", async () => {
+    const blob = await wrapSecrets(secret, "correct123");
+    expect(blob).toMatchObject({ v: 1, kdf: "argon2id", mem: 65536, iters: 3 });
+    expect(await unwrapSecrets(blob, "correct123")).toEqual(secret);
+  }, 30000);
+  it("rejects a wrong PIN and modified blob with a clear error", async () => {
+    const blob = await wrapSecrets(secret, "correct123");
+    await expect(unwrapSecrets(blob, "wrong123")).rejects.toThrow(
+      "PIN_INVALID",
+    );
+    await expect(
+      unwrapSecrets(
+        { ...blob, ciphertext: blob.ciphertext.slice(0, -4) + "AAAA" },
+        "correct123",
+      ),
+    ).rejects.toThrow("PIN_INVALID");
+  }, 30000);
+  it("reports KDF failures separately from invalid PINs", async () => {
+    const blob = await wrapSecrets(secret, "correct123");
+    const { default: sodium } = await import("libsodium-wrappers-sumo");
+    await sodium.ready;
+    const derive = vi.spyOn(sodium, "crypto_pwhash").mockImplementation(() => {
+      throw new Error("simulated KDF failure");
+    });
+    try {
+      await expect(unwrapSecrets(blob, "correct123")).rejects.toThrow(
+        "PIN_KDF_FAILED",
+      );
+    } finally {
+      derive.mockRestore();
+    }
+    await expect(unwrapSecrets(blob, "wrong123")).rejects.toThrow(
+      "PIN_INVALID",
+    );
+  }, 30000);
+  it("uses fresh salts and nonces", async () => {
+    const a = await wrapSecrets(secret, "correct123");
+    const b = await wrapSecrets(secret, "correct123");
+    expect(a.salt).not.toBe(b.salt);
+    expect(a.nonce).not.toBe(b.nonce);
+    expect(a.ciphertext).not.toBe(b.ciphertext);
+  }, 30000);
+  it("accepts Unicode PINs and normalizes them with NFKC", async () => {
+    const blob = await wrapSecrets(secret, "ＡＢＣ１２３");
+    expect(await unwrapSecrets(blob, "ABC123")).toEqual(secret);
+    const cyrillicBlob = await wrapSecrets(secret, "пароль");
+    expect(await unwrapSecrets(cyrillicBlob, "пароль")).toEqual(secret);
+  }, 60000);
+  it("counts Unicode code points for the minimum PIN length", async () => {
+    await expect(wrapSecrets(secret, "парол")).rejects.toThrow("PIN_TOO_SHORT");
+    await expect(wrapSecrets(secret, "🔒🔒🔒🔒🔒🔒")).resolves.toMatchObject({
+      v: 1,
+    });
+  }, 30000);
+  it("decrypts a blob produced by the previous Noble implementation", async () => {
+    const legacyBlob = {
+      v: 1 as const,
+      kdf: "argon2id" as const,
+      mem: 65536 as const,
+      iters: 3 as const,
+      salt: "AAECAwQFBgcICQoLDA0ODw==",
+      nonce: "EBESExQVFhcYGRobHB0eHyAhIiMkJSYn",
+      ciphertext: "qyr6THMux/IHpAYzhsUaNWmW545Ejs3QinfaestSpFXtN9p3",
+    };
+    const plaintext = await unwrapSecrets(legacyBlob, "legacyPin123");
+    expect(new TextDecoder().decode(plaintext)).toBe("legacy Noble payload");
+  }, 30000);
+
+  it("encrypts server session data using a separate HKDF context", () => {
+    const key = new Uint8Array(32).fill(9);
+    const session = new TextEncoder().encode(
+      JSON.stringify({
+        token: "secret-token",
+        expiresAt: "later",
+        userId: "id",
+      }),
+    );
+    const blob = wrapServerSession(session, key);
+    expect(JSON.stringify(blob)).not.toContain("secret-token");
+    expect(unwrapServerSession(blob, key)).toEqual(session);
+    expect(() => unwrapServerSession(blob, new Uint8Array(32).fill(8))).toThrow(
+      "SERVER_SESSION_INVALID",
+    );
+  });
+});

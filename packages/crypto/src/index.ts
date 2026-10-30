@@ -19,6 +19,32 @@ export type DerivedKeys = {
 
 const HKDF_SALT = new Uint8Array(32);
 const encoder = new TextEncoder();
+const PIN_OPSLIMIT = 3;
+const PIN_MEMLIMIT = 64 * 1024 * 1024;
+const PIN_KEY_LENGTH = 32;
+
+async function derivePinKey(
+  pin: string,
+  salt: Uint8Array,
+): Promise<Uint8Array> {
+  const pinBytes = encoder.encode(pin.normalize("NFKC"));
+  try {
+    const { default: sodium } = await import("libsodium-wrappers-sumo");
+    await sodium.ready;
+    return sodium.crypto_pwhash(
+      PIN_KEY_LENGTH,
+      pinBytes,
+      salt,
+      PIN_OPSLIMIT,
+      PIN_MEMLIMIT,
+      sodium.crypto_pwhash_ALG_ARGON2ID13,
+    );
+  } catch {
+    throw new Error("PIN_KDF_FAILED");
+  } finally {
+    pinBytes.fill(0);
+  }
+}
 
 export function normalizeMnemonic(input: string): string {
   return input.trim().toLowerCase().replace(/\s+/gu, " ");
@@ -88,6 +114,159 @@ export function hexToBytes(hex: string): Uint8Array {
   return Uint8Array.from(hex.match(/.{2}/gu) ?? [], (byte) =>
     Number.parseInt(byte, 16),
   );
+}
+
+export type WrappedSecrets = {
+  v: 1;
+  kdf: "argon2id";
+  mem: 65536;
+  iters: 3;
+  salt: string;
+  nonce: string;
+  ciphertext: string;
+};
+
+export type WrappedServerSession = {
+  v: 1;
+  nonce: string;
+  ciphertext: string;
+};
+
+const SERVER_SESSION_INFO = "messages/v1/pin-server-session";
+
+export function wrapServerSession(
+  sessionBytes: Uint8Array,
+  identityPrivateKey: Uint8Array,
+): WrappedServerSession {
+  if (!(sessionBytes instanceof Uint8Array) || sessionBytes.length === 0)
+    throw new TypeError("Server session data is required");
+  if (
+    !(identityPrivateKey instanceof Uint8Array) ||
+    identityPrivateKey.length !== 32
+  )
+    throw new TypeError("Identity private key must be 32 bytes");
+  const key = derive(identityPrivateKey, SERVER_SESSION_INFO);
+  const nonce = randomBytes(24);
+  try {
+    const ciphertext = xchacha20poly1305(
+      key,
+      nonce,
+      encoder.encode(`${SERVER_SESSION_INFO}/aad`),
+    ).encrypt(sessionBytes);
+    return {
+      v: 1,
+      nonce: bytesToBase64(nonce),
+      ciphertext: bytesToBase64(ciphertext),
+    };
+  } finally {
+    key.fill(0);
+  }
+}
+
+export function unwrapServerSession(
+  blob: unknown,
+  identityPrivateKey: Uint8Array,
+): Uint8Array {
+  try {
+    if (
+      !(identityPrivateKey instanceof Uint8Array) ||
+      identityPrivateKey.length !== 32
+    )
+      throw new Error();
+    const value = blob as Partial<WrappedServerSession>;
+    if (
+      !value ||
+      typeof value !== "object" ||
+      value.v !== 1 ||
+      typeof value.nonce !== "string" ||
+      typeof value.ciphertext !== "string"
+    )
+      throw new Error();
+    const nonce = base64ToBytes(value.nonce);
+    const ciphertext = base64ToBytes(value.ciphertext);
+    if (nonce.length !== 24 || ciphertext.length < 16) throw new Error();
+    const key = derive(identityPrivateKey, SERVER_SESSION_INFO);
+    try {
+      return xchacha20poly1305(
+        key,
+        nonce,
+        encoder.encode(`${SERVER_SESSION_INFO}/aad`),
+      ).decrypt(ciphertext);
+    } finally {
+      key.fill(0);
+    }
+  } catch {
+    throw new Error("SERVER_SESSION_INVALID");
+  }
+}
+
+/** Encrypt opaque session-secret bytes using the production Argon2id parameters. */
+export async function wrapSecrets(
+  secretsBytes: Uint8Array,
+  pin: string,
+): Promise<WrappedSecrets> {
+  if (!(secretsBytes instanceof Uint8Array) || secretsBytes.length === 0)
+    throw new TypeError("Secret data is required");
+  if (typeof pin !== "string" || Array.from(pin).length < 6)
+    throw new TypeError("PIN_TOO_SHORT");
+  const salt = randomBytes(16);
+  const nonce = randomBytes(24);
+  const key = await derivePinKey(pin, salt);
+  try {
+    const aad = encoder.encode("messages/v1/pin-secrets");
+    const ciphertext = xchacha20poly1305(key, nonce, aad).encrypt(secretsBytes);
+    return {
+      v: 1,
+      kdf: "argon2id",
+      mem: 65536,
+      iters: 3,
+      salt: bytesToBase64(salt),
+      nonce: bytesToBase64(nonce),
+      ciphertext: bytesToBase64(ciphertext),
+    };
+  } finally {
+    key.fill(0);
+  }
+}
+
+/** Decrypt an authenticated PIN blob; all malformed blobs and wrong PINs share a safe error. */
+export async function unwrapSecrets(
+  blob: unknown,
+  pin: string,
+): Promise<Uint8Array> {
+  try {
+    if (typeof pin !== "string" || Array.from(pin).length < 6)
+      throw new Error();
+    const value = blob as Partial<WrappedSecrets>;
+    if (
+      !value ||
+      typeof value !== "object" ||
+      value.v !== 1 ||
+      value.kdf !== "argon2id" ||
+      value.mem !== 65536 ||
+      value.iters !== 3
+    )
+      throw new Error();
+    const salt = base64ToBytes(value.salt!);
+    const nonce = base64ToBytes(value.nonce!);
+    const ciphertext = base64ToBytes(value.ciphertext!);
+    if (salt.length !== 16 || nonce.length !== 24 || ciphertext.length < 16)
+      throw new Error();
+    const key = await derivePinKey(pin, salt);
+    try {
+      return xchacha20poly1305(
+        key,
+        nonce,
+        encoder.encode("messages/v1/pin-secrets"),
+      ).decrypt(ciphertext);
+    } finally {
+      key.fill(0);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === "PIN_KDF_FAILED")
+      throw error;
+    throw new Error("PIN_INVALID");
+  }
 }
 
 const MESSAGE_INFO = encoder.encode("messages/v1/message");
