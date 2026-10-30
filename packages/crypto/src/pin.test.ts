@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { unwrapSecrets, wrapSecrets } from "./index.js";
+import {
+  unwrapServerSession,
+  unwrapSecrets,
+  wrapServerSession,
+  wrapSecrets,
+} from "./index.js";
 
 describe("PIN secret wrapping", () => {
   const secret = new TextEncoder().encode("session secret bytes");
@@ -52,4 +57,21 @@ describe("PIN secret wrapping", () => {
     const plaintext = await unwrapSecrets(legacyBlob, "legacyPin123");
     expect(new TextDecoder().decode(plaintext)).toBe("legacy Noble payload");
   }, 30000);
+
+  it("encrypts server session data using a separate HKDF context", () => {
+    const key = new Uint8Array(32).fill(9);
+    const session = new TextEncoder().encode(
+      JSON.stringify({
+        token: "secret-token",
+        expiresAt: "later",
+        userId: "id",
+      }),
+    );
+    const blob = wrapServerSession(session, key);
+    expect(JSON.stringify(blob)).not.toContain("secret-token");
+    expect(unwrapServerSession(blob, key)).toEqual(session);
+    expect(() => unwrapServerSession(blob, new Uint8Array(32).fill(8))).toThrow(
+      "SERVER_SESSION_INVALID",
+    );
+  });
 });

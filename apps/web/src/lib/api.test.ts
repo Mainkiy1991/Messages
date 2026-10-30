@@ -75,7 +75,7 @@ describe("server API login", () => {
       "http://localhost:3000/auth/challenge",
       "http://localhost:3000/auth/login",
     ]);
-    expect(await restoreServerSession()).toEqual(session);
+    expect(await restoreServerSession(keys)).toEqual(session);
   });
 });
 

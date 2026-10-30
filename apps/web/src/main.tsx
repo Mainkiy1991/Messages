@@ -521,7 +521,7 @@ function App() {
   useEffect(() => {
     if (!keys || screen !== "home") return;
     let cancelled = false;
-    void restoreServerSession().then((session) => {
+    void restoreServerSession(keys).then((session) => {
       if (cancelled) return;
       const controller = new ChatController(keys, userId, session, {
         onChange: setChatState,

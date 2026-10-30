@@ -1,9 +1,12 @@
 import {
   bytesToBase64,
   base64ToBytes,
+  unwrapServerSession,
   unwrapSecrets,
+  wrapServerSession,
   wrapSecrets,
   type DerivedKeys,
+  type WrappedServerSession,
   type WrappedSecrets,
 } from "@messages/crypto";
 import { indexedDbOutbox } from "./lib/outbox.js";
@@ -97,11 +100,55 @@ export type ServerSession = {
   expiresAt: string;
   userId: string;
 };
+type StoredServerSession = ServerSession | WrappedServerSession;
 export type PinState = {
   blob: WrappedSecrets;
   failedAttempts: number;
   nextAttemptAt: number;
 };
+
+function isWrappedServerSession(value: unknown): value is WrappedServerSession {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "v" in value &&
+    value.v === 1 &&
+    "nonce" in value &&
+    typeof value.nonce === "string" &&
+    "ciphertext" in value &&
+    typeof value.ciphertext === "string"
+  );
+}
+
+function parseServerSession(value: unknown): ServerSession {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    !("token" in value) ||
+    typeof value.token !== "string" ||
+    !("expiresAt" in value) ||
+    typeof value.expiresAt !== "string" ||
+    !("userId" in value) ||
+    typeof value.userId !== "string"
+  )
+    throw new Error("SERVER_SESSION_INVALID");
+  return {
+    token: value.token,
+    expiresAt: value.expiresAt,
+    userId: value.userId,
+  };
+}
+
+function packServerSession(session: ServerSession): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(session));
+}
+
+function unpackServerSession(bytes: Uint8Array): ServerSession {
+  return parseServerSession(
+    JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
+  );
+}
+
 export function pinDelayForAttempt(failedAttempts: number): number {
   if (failedAttempts < 5) return 0;
   if (failedAttempts === 5) return 5 * 60_000;
@@ -121,14 +168,53 @@ export function pinFailureState(
 export async function saveSession(keys: DerivedKeys): Promise<void> {
   await putValues([["derivedKeys", keys]]);
 }
-export async function saveServerSession(session: ServerSession): Promise<void> {
-  await putValues([["serverSession", session]]);
+export async function saveServerSession(
+  session: ServerSession,
+  keys: DerivedKeys,
+): Promise<void> {
+  const pinState = await getValue<PinState>("pinState");
+  if (!pinState) {
+    await putValues([["serverSession", session]]);
+    return;
+  }
+  const sessionBytes = packServerSession(session);
+  try {
+    const encrypted = wrapServerSession(sessionBytes, keys.identity.privateKey);
+    await putValues([["serverSession", encrypted]]);
+  } finally {
+    sessionBytes.fill(0);
+  }
 }
-export async function restoreServerSession(): Promise<ServerSession | null> {
-  return (await getValue<ServerSession>("serverSession")) ?? null;
+export async function restoreServerSession(
+  keys: DerivedKeys,
+): Promise<ServerSession | null> {
+  const stored = await getValue<StoredServerSession>("serverSession");
+  if (!stored) return null;
+  const pinState = await getValue<PinState>("pinState");
+  if (pinState) {
+    if (!isWrappedServerSession(stored)) {
+      await putValues([], ["serverSession"]);
+      return null;
+    }
+    const bytes = unwrapServerSession(stored, keys.identity.privateKey);
+    try {
+      return unpackServerSession(bytes);
+    } finally {
+      bytes.fill(0);
+    }
+  }
+  if (isWrappedServerSession(stored))
+    throw new Error("Encrypted server session exists without PIN");
+  return parseServerSession(stored);
 }
 export async function getPinState(): Promise<PinState | null> {
-  return (await getValue<PinState>("pinState")) ?? null;
+  const pinState = (await getValue<PinState>("pinState")) ?? null;
+  if (pinState) {
+    const serverSession = await getValue<unknown>("serverSession");
+    if (serverSession && !isWrappedServerSession(serverSession))
+      await putValues([], ["serverSession"]);
+  }
+  return pinState;
 }
 export async function restoreSession(): Promise<DerivedKeys | null> {
   if (await getPinState()) return null;
@@ -142,16 +228,26 @@ export async function enablePin(keys: DerivedKeys, pin: string): Promise<void> {
   } finally {
     secretBytes.fill(0);
   }
-  await indexedDbOutbox.clear();
-  await putValues(
+  const values: Array<[string, unknown]> = [
     [
-      [
-        "pinState",
-        { blob, failedAttempts: 0, nextAttemptAt: 0 } satisfies PinState,
-      ],
+      "pinState",
+      { blob, failedAttempts: 0, nextAttemptAt: 0 } satisfies PinState,
     ],
-    ["derivedKeys"],
-  );
+  ];
+  const currentSession = await getValue<unknown>("serverSession");
+  if (currentSession && !isWrappedServerSession(currentSession)) {
+    const sessionBytes = packServerSession(parseServerSession(currentSession));
+    try {
+      values.push([
+        "serverSession",
+        wrapServerSession(sessionBytes, keys.identity.privateKey),
+      ]);
+    } finally {
+      sessionBytes.fill(0);
+    }
+  }
+  await indexedDbOutbox.clear();
+  await putValues(values, ["derivedKeys"]);
 }
 export async function unlockWithPin(pin: string): Promise<DerivedKeys> {
   const state = await getPinState();
@@ -208,7 +304,17 @@ export async function changePin(
 }
 export async function disablePin(pin: string): Promise<DerivedKeys> {
   const keys = await unlockWithPin(pin);
-  await putValues([["derivedKeys", keys]], ["pinState"]);
+  const storedSession = await getValue<unknown>("serverSession");
+  const values: Array<[string, unknown]> = [["derivedKeys", keys]];
+  if (isWrappedServerSession(storedSession)) {
+    const bytes = unwrapServerSession(storedSession, keys.identity.privateKey);
+    try {
+      values.push(["serverSession", unpackServerSession(bytes)]);
+    } finally {
+      bytes.fill(0);
+    }
+  }
+  await putValues(values, ["pinState"]);
   return keys;
 }
 export async function clearSession(): Promise<void> {

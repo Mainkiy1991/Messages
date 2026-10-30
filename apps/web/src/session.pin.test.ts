@@ -9,6 +9,8 @@ import {
   getPinState,
   pinFailureState,
   restoreSession,
+  restoreServerSession,
+  saveServerSession,
   unlockWithPin,
 } from "./session.js";
 
@@ -65,7 +67,31 @@ describe("PIN session storage", () => {
     mockWrappedSecrets.values.clear();
   });
   it("stores only a blob, increases retry delay, changes PIN and disables it", async () => {
+    const serverSession = {
+      token: "secret-server-token",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      userId: "user-id",
+    };
+    await saveServerSession(serverSession, keys);
     await enablePin(keys, "secure123");
+    const storedSession = await new Promise<unknown>((resolve, reject) => {
+      const request = indexedDB.open("messages-session");
+      request.onsuccess = () => {
+        const db = request.result;
+        const get = db
+          .transaction("keys")
+          .objectStore("keys")
+          .get("serverSession");
+        get.onsuccess = () => {
+          resolve(get.result);
+          db.close();
+        };
+        get.onerror = () => reject(get.error);
+      };
+      request.onerror = () => reject(request.error);
+    });
+    expect(JSON.stringify(storedSession)).not.toContain("secret-server-token");
+    expect(await restoreServerSession(keys)).toEqual(serverSession);
     expect(await restoreSession()).toBeNull();
     expect(await getPinState()).toMatchObject({
       blob: { v: 1 },
@@ -100,7 +126,41 @@ describe("PIN session storage", () => {
     await expect(disablePin("another99")).resolves.toEqual(keys);
     expect(await getPinState()).toBeNull();
     expect(await restoreSession()).toEqual(keys);
+    expect(await restoreServerSession(keys)).toEqual(serverSession);
   }, 90000);
+
+  it("removes a legacy plaintext server session while PIN protection is active", async () => {
+    await enablePin(keys, "secure123");
+    await saveServerSession(
+      {
+        token: "legacy-plaintext-token",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: "user-id",
+      },
+      keys,
+    );
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("messages-session");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction("keys", "readwrite");
+      tx.objectStore("keys").put(
+        {
+          token: "legacy-plaintext-token",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          userId: "user-id",
+        },
+        "serverSession",
+      );
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+    expect(await getPinState()).not.toBeNull();
+    expect(await restoreServerSession(keys)).toBeNull();
+  });
 
   it("uses the increasing lockout schedule", () => {
     let now = 1_000;

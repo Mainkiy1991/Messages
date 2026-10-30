@@ -124,6 +124,80 @@ export type WrappedSecrets = {
   ciphertext: string;
 };
 
+export type WrappedServerSession = {
+  v: 1;
+  nonce: string;
+  ciphertext: string;
+};
+
+const SERVER_SESSION_INFO = "messages/v1/pin-server-session";
+
+export function wrapServerSession(
+  sessionBytes: Uint8Array,
+  identityPrivateKey: Uint8Array,
+): WrappedServerSession {
+  if (!(sessionBytes instanceof Uint8Array) || sessionBytes.length === 0)
+    throw new TypeError("Server session data is required");
+  if (
+    !(identityPrivateKey instanceof Uint8Array) ||
+    identityPrivateKey.length !== 32
+  )
+    throw new TypeError("Identity private key must be 32 bytes");
+  const key = derive(identityPrivateKey, SERVER_SESSION_INFO);
+  const nonce = randomBytes(24);
+  try {
+    const ciphertext = xchacha20poly1305(
+      key,
+      nonce,
+      encoder.encode(`${SERVER_SESSION_INFO}/aad`),
+    ).encrypt(sessionBytes);
+    return {
+      v: 1,
+      nonce: bytesToBase64(nonce),
+      ciphertext: bytesToBase64(ciphertext),
+    };
+  } finally {
+    key.fill(0);
+  }
+}
+
+export function unwrapServerSession(
+  blob: unknown,
+  identityPrivateKey: Uint8Array,
+): Uint8Array {
+  try {
+    if (
+      !(identityPrivateKey instanceof Uint8Array) ||
+      identityPrivateKey.length !== 32
+    )
+      throw new Error();
+    const value = blob as Partial<WrappedServerSession>;
+    if (
+      !value ||
+      typeof value !== "object" ||
+      value.v !== 1 ||
+      typeof value.nonce !== "string" ||
+      typeof value.ciphertext !== "string"
+    )
+      throw new Error();
+    const nonce = base64ToBytes(value.nonce);
+    const ciphertext = base64ToBytes(value.ciphertext);
+    if (nonce.length !== 24 || ciphertext.length < 16) throw new Error();
+    const key = derive(identityPrivateKey, SERVER_SESSION_INFO);
+    try {
+      return xchacha20poly1305(
+        key,
+        nonce,
+        encoder.encode(`${SERVER_SESSION_INFO}/aad`),
+      ).decrypt(ciphertext);
+    } finally {
+      key.fill(0);
+    }
+  } catch {
+    throw new Error("SERVER_SESSION_INVALID");
+  }
+}
+
 /** Encrypt opaque session-secret bytes using the production Argon2id parameters. */
 export async function wrapSecrets(
   secretsBytes: Uint8Array,
