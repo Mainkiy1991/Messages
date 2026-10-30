@@ -102,6 +102,22 @@ export type PinState = {
   failedAttempts: number;
   nextAttemptAt: number;
 };
+export function pinDelayForAttempt(failedAttempts: number): number {
+  if (failedAttempts < 5) return 0;
+  if (failedAttempts === 5) return 5 * 60_000;
+  if (failedAttempts === 6) return 15 * 60_000;
+  return 60 * 60_000;
+}
+export function pinFailureState(
+  failedAttempts: number,
+  now: number,
+): Pick<PinState, "failedAttempts" | "nextAttemptAt"> {
+  const delay = pinDelayForAttempt(failedAttempts);
+  return {
+    failedAttempts,
+    nextAttemptAt: delay ? now + delay : 0,
+  };
+}
 export async function saveSession(keys: DerivedKeys): Promise<void> {
   await putValues([["derivedKeys", keys]]);
 }
@@ -126,6 +142,7 @@ export async function enablePin(keys: DerivedKeys, pin: string): Promise<void> {
   } finally {
     secretBytes.fill(0);
   }
+  await indexedDbOutbox.clear();
   await putValues(
     [
       [
@@ -135,35 +152,37 @@ export async function enablePin(keys: DerivedKeys, pin: string): Promise<void> {
     ],
     ["derivedKeys"],
   );
-  await indexedDbOutbox.clear();
 }
 export async function unlockWithPin(pin: string): Promise<DerivedKeys> {
   const state = await getPinState();
   if (!state) throw new Error("PIN is not enabled");
   if (Date.now() < state.nextAttemptAt) throw new Error("PIN_ATTEMPT_DELAY");
+  let keys: DerivedKeys;
   try {
     const secretBytes = await unwrapSecrets(state.blob, pin);
-    let keys: DerivedKeys;
     try {
       keys = unpackKeys(secretBytes);
     } finally {
       secretBytes.fill(0);
     }
-    await putValues([
-      ["pinState", { ...state, failedAttempts: 0, nextAttemptAt: 0 }],
-    ]);
-    return keys;
   } catch {
     const failedAttempts = state.failedAttempts + 1;
-    const delay = Math.min(60, 2 ** (failedAttempts - 1));
+    const failure = pinFailureState(failedAttempts, Date.now());
     await putValues([
       [
         "pinState",
-        { ...state, failedAttempts, nextAttemptAt: Date.now() + delay * 1000 },
+        {
+          ...state,
+          ...failure,
+        },
       ],
     ]);
     throw new Error("PIN_INVALID");
   }
+  await putValues([
+    ["pinState", { ...state, failedAttempts: 0, nextAttemptAt: 0 }],
+  ]);
+  return keys;
 }
 export async function changePin(
   keys: DerivedKeys,

@@ -19,6 +19,7 @@
     "@noble/ciphers": "^2.4.0",
     "@noble/curves": "^2.0.1",
     "@noble/hashes": "^2.0.1",
-    "@scure/bip39": "^2.0.1"
+    "@scure/bip39": "^2.0.1",
+    "libsodium-wrappers-sumo": "^0.8.4"
   }
 }

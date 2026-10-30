@@ -28,6 +28,7 @@ import {
   changePin,
   disablePin,
 } from "./session.js";
+import { indexedDbOutbox } from "./lib/outbox.js";
 import {
   ChatController,
   chatPreview,
@@ -60,14 +61,23 @@ function App() {
   const [pin, setPin] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
   const [oldPin, setOldPin] = useState("");
-  const [pinError, setPinError] = useState("");
+  const [pinButtonError, setPinButtonError] = useState<
+    "incorrect" | "tooShort" | "mismatch" | "operation" | null
+  >(null);
+  const [pinOperation, setPinOperation] = useState<
+    "enable" | "change" | "disable" | "unlock" | null
+  >(null);
   const [pinEnabled, setPinEnabled] = useState(false);
+  const [pinNextAttemptAt, setPinNextAttemptAt] = useState(0);
+  const [pinCountdown, setPinCountdown] = useState(0);
   const [positions, setPositions] = useState<number[]>([]);
   const [answers, setAnswers] = useState<string[]>(["", "", ""]);
   const [hasError, setHasError] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showLogoutConfirmation, setShowLogoutConfirmation] = useState(false);
   const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
+  const [showForgotPinConfirmation, setShowForgotPinConfirmation] =
+    useState(false);
   const [chatMenuOpen, setChatMenuOpen] = useState(false);
   const [chatState, setChatState] = useState<ChatControllerState>({
     chats: [],
@@ -85,11 +95,17 @@ function App() {
   const [draft, setDraft] = useState("");
   const [chatError, setChatError] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
-  const [idExpanded, setIdExpanded] = useState(false);
+  const [profileSection, setProfileSection] = useState<
+    "language" | "pin" | "id" | null
+  >(null);
+  const [pinForm, setPinForm] = useState<
+    "enable" | "change" | "disable" | null
+  >(null);
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [presenceClock, setPresenceClock] = useState(Date.now());
   const profileRef = useRef<HTMLDivElement | null>(null);
+  const pinErrorTimerRef = useRef<number | null>(null);
   const controllerRef = useRef<ChatController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const wasNearBottomRef = useRef(true);
@@ -104,18 +120,36 @@ function App() {
     );
     return () => window.clearInterval(timer);
   }, []);
+  useEffect(() => {
+    const updateCountdown = () =>
+      setPinCountdown(
+        Math.max(0, Math.ceil((pinNextAttemptAt - Date.now()) / 1000)),
+      );
+    updateCountdown();
+    const timer = window.setInterval(updateCountdown, 1000);
+    return () => window.clearInterval(timer);
+  }, [pinNextAttemptAt]);
+  useEffect(
+    () => () => {
+      if (pinErrorTimerRef.current !== null)
+        window.clearTimeout(pinErrorTimerRef.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!profileOpen) return;
     const outside = (event: PointerEvent) => {
       if (!profileRef.current?.contains(event.target as Node)) {
-        setIdExpanded(false);
+        setProfileSection(null);
+        setPinForm(null);
         setProfileOpen(false);
       }
     };
     const escape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setIdExpanded(false);
+        setProfileSection(null);
+        setPinForm(null);
         setProfileOpen(false);
       }
     };
@@ -138,6 +172,7 @@ function App() {
     void getPinState()
       .then(async (pinState) => {
         setPinEnabled(Boolean(pinState));
+        setPinNextAttemptAt(pinState?.nextAttemptAt ?? 0);
         if (pinState) {
           setScreen("locked");
           return false;
@@ -176,34 +211,105 @@ function App() {
     setHasError(false);
   }
 
-  async function submitPin(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setPinError("");
+  function showPinButtonError(
+    error: "incorrect" | "tooShort" | "mismatch" | "operation",
+  ) {
+    if (pinErrorTimerRef.current !== null)
+      window.clearTimeout(pinErrorTimerRef.current);
+    setPinButtonError(error);
+    pinErrorTimerRef.current = window.setTimeout(
+      () => setPinButtonError(null),
+      2000,
+    );
+  }
+  async function refreshPinCooldown(): Promise<boolean> {
+    const state = await getPinState();
+    const nextAttemptAt = state?.nextAttemptAt ?? 0;
+    setPinNextAttemptAt(nextAttemptAt);
+    return Date.now() >= nextAttemptAt;
+  }
+  async function waitForPaint() {
+    await new Promise<void>((resolve) =>
+      window.requestAnimationFrame(() => window.setTimeout(resolve, 0)),
+    );
+  }
+  function formatPinCountdown(seconds: number): string {
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  }
+  async function submitPin() {
+    if (pinOperation) return;
+    try {
+      if (!(await refreshPinCooldown())) return;
+    } catch {
+      showPinButtonError("operation");
+      return;
+    }
+    setPinButtonError(null);
+    setPinOperation("unlock");
+    await waitForPaint();
     try {
       const restored = await unlockWithPin(pin);
       setKeys(restored);
       setPin("");
       setScreen("home");
     } catch (error) {
-      setPinError(
+      try {
+        await refreshPinCooldown();
+      } catch {
+        showPinButtonError("operation");
+        return;
+      }
+      if (error instanceof Error && error.message === "PIN_INVALID")
+        showPinButtonError("incorrect");
+      else if (!(
         error instanceof Error && error.message === "PIN_ATTEMPT_DELAY"
-          ? t.pinWait
-          : t.pinIncorrect,
-      );
+      ))
+        showPinButtonError("operation");
+    } finally {
+      setPinOperation(null);
     }
   }
   async function managePin(action: "enable" | "change" | "disable") {
-    setPinError("");
+    if (pinOperation) return;
+    if (action !== "enable") {
+      try {
+        if (!(await refreshPinCooldown())) return;
+      } catch {
+        showPinButtonError("operation");
+        return;
+      }
+    }
+    setPinButtonError(null);
+    if (action !== "disable") {
+      if (Array.from(pin).length < 6) {
+        showPinButtonError("tooShort");
+        return;
+      }
+      if (pin.normalize("NFKC") !== pinConfirm.normalize("NFKC")) {
+        showPinButtonError("mismatch");
+        return;
+      }
+    }
+    if (action === "enable") {
+      let queuedCount: number;
+      try {
+        queuedCount = (await indexedDbOutbox.list(userId)).length;
+      } catch {
+        showPinButtonError("operation");
+        return;
+      }
+      if (queuedCount && !window.confirm(t.pinQueueConfirm(queuedCount)))
+        return;
+    }
+    setPinOperation(action);
+    await waitForPaint();
     try {
       if (!keys) return;
       if (action === "enable") {
-        if (!/^[a-z0-9]{6,}$/iu.test(pin) || pin !== pinConfirm)
-          throw new Error("PIN_FORM");
         await enablePin(keys, pin);
         setPinEnabled(true);
+        setPinNextAttemptAt(0);
       } else if (action === "change") {
-        if (!/^[a-z0-9]{6,}$/iu.test(pin) || pin !== pinConfirm)
-          throw new Error("PIN_FORM");
         await changePin(keys, oldPin, pin);
       } else {
         await disablePin(oldPin);
@@ -212,20 +318,48 @@ function App() {
       setPin("");
       setPinConfirm("");
       setOldPin("");
+      setPinForm(null);
     } catch (error) {
-      setPinError(
-        error instanceof Error && error.message === "PIN_FORM"
-          ? t.pinMismatch
-          : t.pinIncorrect,
-      );
+      try {
+        await refreshPinCooldown();
+      } catch {
+        showPinButtonError("operation");
+        return;
+      }
+      if (error instanceof Error && error.message === "PIN_INVALID")
+        showPinButtonError("incorrect");
+      else if (error instanceof Error && error.message === "PIN_TOO_SHORT")
+        showPinButtonError("tooShort");
+      else showPinButtonError("operation");
+    } finally {
+      setPinOperation(null);
     }
   }
+  function toggleProfileSection(section: "language" | "pin" | "id") {
+    const closing = profileSection === section;
+    setProfileSection(closing ? null : section);
+    if (section !== "pin" || closing) setPinForm(null);
+  }
+  function togglePinForm(form: "enable" | "change" | "disable") {
+    setPinButtonError(null);
+    if (pinForm === form) {
+      setPinForm(null);
+      return;
+    }
+    setPin("");
+    setPinConfirm("");
+    setOldPin("");
+    setPinForm(form);
+  }
   async function forgotPin() {
-    if (!window.confirm(t.forgotConfirm)) return;
+    setShowForgotPinConfirmation(true);
+  }
+  async function finishForgotPin() {
     await clearSession();
     setKeys(null);
     setPinEnabled(false);
     setPin("");
+    setShowForgotPinConfirmation(false);
     setScreen("welcome");
   }
 
@@ -294,6 +428,34 @@ function App() {
   }
 
   const userId = keys ? userIdFromPublicKey(keys.identity.publicKey) : "";
+  const pinErrorText = pinButtonError
+    ? pinButtonError === "incorrect"
+      ? t.pinIncorrect
+      : pinButtonError === "tooShort"
+        ? t.pinTooShort
+        : pinButtonError === "mismatch"
+          ? t.pinMismatch
+          : t.pinOperationFailed
+    : "";
+  function pinActionText(
+    label: string,
+    operation: "enable" | "change" | "disable" | "unlock",
+  ) {
+    if (pinOperation === operation) {
+      return operation === "enable"
+        ? t.pinInstalling
+        : operation === "change"
+          ? t.pinChanging
+          : operation === "disable"
+            ? t.pinDisabling
+            : t.pinUnlocking;
+    }
+    if (operation !== "enable" && pinCountdown > 0)
+      return t.pinCountdown(formatPinCountdown(pinCountdown));
+    return pinButtonError ? pinErrorText : label;
+  }
+  const pinActionDisabled = (operation: "enable" | "change" | "disable") =>
+    Boolean(pinOperation || (operation !== "enable" && pinCountdown > 0));
   const chats = chatState.chats;
   const activePeer = chatState.activePeer;
   const socketState = chatState.connectionState;
@@ -470,7 +632,10 @@ function App() {
                 title={t.profile}
                 aria-expanded={profileOpen}
                 onClick={() => {
-                  if (profileOpen) setIdExpanded(false);
+                  if (profileOpen) {
+                    setProfileSection(null);
+                    setPinForm(null);
+                  }
                   setProfileOpen(!profileOpen);
                 }}
               >
@@ -492,104 +657,193 @@ function App() {
               </button>
               {profileOpen && (
                 <div className="profile-panel">
-                  <label className="profile-language">
-                    {t.language}
-                    <select
-                      aria-label={t.language}
-                      value={language}
-                      onChange={(event) =>
-                        changeLanguage(event.target.value as Language)
-                      }
-                    >
-                      {supportedLanguages.map((entry) => (
-                        <option key={entry.code} value={entry.code}>
-                          {entry.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <div className="pin-settings">
-                    <strong>{t.pinTitle}</strong>
-                    {!pinEnabled ? (
-                      <>
-                        <input
-                          aria-label={t.pinNew}
-                          type="password"
-                          autoComplete="new-password"
-                          value={pin}
-                          onChange={(e) => setPin(e.target.value)}
-                          placeholder={t.pinNew}
-                        />
-                        <input
-                          aria-label={t.pinConfirm}
-                          type="password"
-                          autoComplete="new-password"
-                          value={pinConfirm}
-                          onChange={(e) => setPinConfirm(e.target.value)}
-                          placeholder={t.pinConfirm}
-                        />
-                        <small>{t.pinHint}</small>
-                        <button
-                          className="secondary"
-                          onClick={() => void managePin("enable")}
-                        >
-                          {t.pinEnable}
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <input
-                          aria-label={t.pinCurrent}
-                          type="password"
-                          autoComplete="current-password"
-                          value={oldPin}
-                          onChange={(e) => setOldPin(e.target.value)}
-                          placeholder={t.pinCurrent}
-                        />
-                        <input
-                          aria-label={t.pinNew}
-                          type="password"
-                          autoComplete="new-password"
-                          value={pin}
-                          onChange={(e) => setPin(e.target.value)}
-                          placeholder={t.pinNew}
-                        />
-                        <input
-                          aria-label={t.pinConfirm}
-                          type="password"
-                          autoComplete="new-password"
-                          value={pinConfirm}
-                          onChange={(e) => setPinConfirm(e.target.value)}
-                          placeholder={t.pinConfirm}
-                        />
-                        <button
-                          className="secondary"
-                          onClick={() => void managePin("change")}
-                        >
-                          {t.pinChange}
-                        </button>
-                        <button
-                          className="secondary"
-                          onClick={() => void managePin("disable")}
-                        >
-                          {t.pinDisable}
-                        </button>
-                      </>
-                    )}
-                    {pinError && (
-                      <p className="error" role="alert">
-                        {pinError}
-                      </p>
-                    )}
-                  </div>
                   <button
-                    className="id-toggle"
-                    aria-expanded={idExpanded}
-                    onClick={() => setIdExpanded(!idExpanded)}
+                    className="secondary profile-item"
+                    aria-expanded={profileSection === "language"}
+                    onClick={() => toggleProfileSection("language")}
+                  >
+                    {t.language}
+                  </button>
+                  {profileSection === "language" && (
+                    <div className="profile-section">
+                      <label className="profile-language">
+                        {t.language}
+                        <select
+                          aria-label={t.language}
+                          value={language}
+                          onChange={(event) =>
+                            changeLanguage(event.target.value as Language)
+                          }
+                        >
+                          {supportedLanguages.map((entry) => (
+                            <option key={entry.code} value={entry.code}>
+                              {entry.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                  )}
+                  <button
+                    className="secondary profile-item"
+                    aria-expanded={profileSection === "pin"}
+                    onClick={() => toggleProfileSection("pin")}
+                  >
+                    {t.pinTitle}
+                  </button>
+                  {profileSection === "pin" && (
+                    <div className="profile-section pin-settings">
+                      {!pinEnabled ? (
+                        <>
+                          <button
+                            className="secondary profile-item"
+                            aria-expanded={pinForm === "enable"}
+                            disabled={Boolean(pinOperation)}
+                            onClick={() => togglePinForm("enable")}
+                          >
+                            {t.pinEnable}
+                          </button>
+                          {pinForm === "enable" && (
+                            <>
+                              <input
+                                aria-label={t.pinNew}
+                                className="pin-input"
+                                type="text"
+                                inputMode="text"
+                                autoComplete="off"
+                                data-lpignore="true"
+                                data-1p-ignore="true"
+                                value={pin}
+                                onChange={(e) => setPin(e.target.value)}
+                                placeholder={t.pinNew}
+                              />
+                              <input
+                                aria-label={t.pinConfirm}
+                                className="pin-input"
+                                type="text"
+                                inputMode="text"
+                                autoComplete="off"
+                                data-lpignore="true"
+                                data-1p-ignore="true"
+                                value={pinConfirm}
+                                onChange={(e) => setPinConfirm(e.target.value)}
+                                placeholder={t.pinConfirm}
+                              />
+                              <small>{t.pinHint}</small>
+                              <button
+                                className={`secondary pin-action${pinButtonError ? " pin-action-error" : ""}`}
+                                aria-live="polite"
+                                disabled={pinActionDisabled("enable")}
+                                onClick={() => void managePin("enable")}
+                              >
+                                {pinActionText(t.pinInstallSubmit, "enable")}
+                              </button>
+                            </>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            className="secondary profile-item"
+                            aria-expanded={pinForm === "change"}
+                            disabled={Boolean(pinOperation)}
+                            onClick={() => togglePinForm("change")}
+                          >
+                            {t.pinChange}
+                          </button>
+                          {pinForm === "change" && (
+                            <>
+                              <input
+                                aria-label={t.pinCurrent}
+                                className="pin-input"
+                                type="text"
+                                inputMode="text"
+                                autoComplete="off"
+                                data-lpignore="true"
+                                data-1p-ignore="true"
+                                value={oldPin}
+                                onChange={(e) => setOldPin(e.target.value)}
+                                placeholder={t.pinCurrent}
+                              />
+                              <input
+                                aria-label={t.pinNew}
+                                className="pin-input"
+                                type="text"
+                                inputMode="text"
+                                autoComplete="off"
+                                data-lpignore="true"
+                                data-1p-ignore="true"
+                                value={pin}
+                                onChange={(e) => setPin(e.target.value)}
+                                placeholder={t.pinNew}
+                              />
+                              <input
+                                aria-label={t.pinConfirm}
+                                className="pin-input"
+                                type="text"
+                                inputMode="text"
+                                autoComplete="off"
+                                data-lpignore="true"
+                                data-1p-ignore="true"
+                                value={pinConfirm}
+                                onChange={(e) => setPinConfirm(e.target.value)}
+                                placeholder={t.pinConfirm}
+                              />
+                              <small>{t.pinHint}</small>
+                              <button
+                                className={`secondary pin-action${pinButtonError ? " pin-action-error" : ""}`}
+                                aria-live="polite"
+                                disabled={pinActionDisabled("change")}
+                                onClick={() => void managePin("change")}
+                              >
+                                {pinActionText(t.pinChangeSubmit, "change")}
+                              </button>
+                            </>
+                          )}
+                          <button
+                            className="secondary profile-item"
+                            aria-expanded={pinForm === "disable"}
+                            disabled={Boolean(pinOperation)}
+                            onClick={() => togglePinForm("disable")}
+                          >
+                            {t.pinDisable}
+                          </button>
+                          {pinForm === "disable" && (
+                            <>
+                              <input
+                                aria-label={t.pinCurrent}
+                                className="pin-input"
+                                type="text"
+                                inputMode="text"
+                                autoComplete="off"
+                                data-lpignore="true"
+                                data-1p-ignore="true"
+                                value={oldPin}
+                                onChange={(e) => setOldPin(e.target.value)}
+                                placeholder={t.pinCurrent}
+                              />
+                              <button
+                                className={`secondary pin-action${pinButtonError ? " pin-action-error" : ""}`}
+                                aria-live="polite"
+                                disabled={pinActionDisabled("disable")}
+                                onClick={() => void managePin("disable")}
+                              >
+                                {pinActionText(t.pinDisableSubmit, "disable")}
+                              </button>
+                            </>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+                  <button
+                    className="secondary profile-item"
+                    aria-expanded={profileSection === "id"}
+                    onClick={() => toggleProfileSection("id")}
                   >
                     {t.userId}
                   </button>
-                  {idExpanded && (
+                  {profileSection === "id" && (
                     <div className="profile-id">
                       <code data-testid="user-id">{userId}</code>
                       <button
@@ -609,7 +863,7 @@ function App() {
                   )}
                   <button
                     data-testid="logout"
-                    className="danger profile-logout"
+                    className="danger profile-item profile-logout"
                     onClick={() => setShowLogoutConfirmation(true)}
                   >
                     {t.logout}
@@ -622,34 +876,63 @@ function App() {
       </header>
       <section className="card">
         {screen === "locked" && (
-          <form onSubmit={submitPin} aria-label={t.pinUnlock}>
+          <div
+            aria-label={t.pinUnlock}
+            onKeyDown={(event) => {
+              if (
+                event.key === "Enter" &&
+                event.target instanceof HTMLInputElement
+              ) {
+                event.preventDefault();
+                void submitPin();
+              }
+            }}
+          >
             <h1>{t.pinUnlock}</h1>
             <label>
-              {t.pinCurrent}
+              {t.pinTitle}
               <input
                 autoFocus
-                type="password"
-                autoComplete="current-password"
+                className="pin-input"
+                type="text"
+                inputMode="text"
+                autoComplete="off"
+                data-lpignore="true"
+                data-1p-ignore="true"
                 value={pin}
                 onChange={(e) => setPin(e.target.value)}
               />
             </label>
-            {pinError && (
-              <p className="error" role="alert">
-                {pinError}
-              </p>
-            )}
-            <button className="primary" type="submit">
-              {t.pinUnlock}
-            </button>
             <button
-              className="text-button"
-              type="button"
-              onClick={() => void forgotPin()}
+              className={`primary pin-action${pinButtonError ? " pin-action-error" : ""}`}
+              aria-live="polite"
+              disabled={Boolean(pinOperation) || pinCountdown > 0}
+              onClick={() => void submitPin()}
             >
+              {pinActionText(t.pinUnlock, "unlock")}
+            </button>
+            <button className="text-button" onClick={() => void forgotPin()}>
               {t.forgotPin}
             </button>
-          </form>
+          </div>
+        )}
+        {showForgotPinConfirmation && (
+          <div
+            className="confirm-panel"
+            role="alertdialog"
+            aria-labelledby="forgot-pin-message"
+          >
+            <p id="forgot-pin-message">{t.forgotConfirm}</p>
+            <button className="danger" onClick={() => void finishForgotPin()}>
+              {t.forgotFinish}
+            </button>
+            <button
+              className="secondary"
+              onClick={() => setShowForgotPinConfirmation(false)}
+            >
+              {t.cancel}
+            </button>
+          </div>
         )}
         {screen === "welcome" && (
           <>

@@ -7,9 +7,44 @@ import {
   disablePin,
   enablePin,
   getPinState,
+  pinFailureState,
   restoreSession,
   unlockWithPin,
 } from "./session.js";
+
+const mockWrappedSecrets = vi.hoisted(() => ({
+  nextId: 0,
+  values: new Map<string, { pin: string; secrets: Uint8Array }>(),
+}));
+vi.mock("@messages/crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@messages/crypto")>();
+  return {
+    ...actual,
+    wrapSecrets: vi.fn(async (secrets: Uint8Array, pin: string) => {
+      const ciphertext = String(++mockWrappedSecrets.nextId);
+      mockWrappedSecrets.values.set(ciphertext, {
+        pin,
+        secrets: secrets.slice(),
+      });
+      return {
+        v: 1 as const,
+        kdf: "argon2id" as const,
+        mem: 65536 as const,
+        iters: 3 as const,
+        salt: "",
+        nonce: "",
+        ciphertext,
+      };
+    }),
+    unwrapSecrets: vi.fn(async (blob: unknown, pin: string) => {
+      if (!blob || typeof blob !== "object" || !("ciphertext" in blob))
+        throw new Error("PIN_INVALID");
+      const record = mockWrappedSecrets.values.get(String(blob.ciphertext));
+      if (!record || record.pin !== pin) throw new Error("PIN_INVALID");
+      return record.secrets.slice();
+    }),
+  };
+});
 
 const keys = {
   identity: {
@@ -27,9 +62,9 @@ describe("PIN session storage", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await clearSession();
+    mockWrappedSecrets.values.clear();
   });
   it("stores only a blob, increases retry delay, changes PIN and disables it", async () => {
-    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
     await enablePin(keys, "secure123");
     expect(await restoreSession()).toBeNull();
     expect(await getPinState()).toMatchObject({
@@ -53,18 +88,70 @@ describe("PIN session storage", () => {
     await expect(unlockWithPin("wrong000")).rejects.toThrow("PIN_INVALID");
     expect(await getPinState()).toMatchObject({
       failedAttempts: 1,
-      nextAttemptAt: 1_001_000,
+      nextAttemptAt: 0,
     });
-    await expect(unlockWithPin("secure123")).rejects.toThrow(
-      "PIN_ATTEMPT_DELAY",
-    );
-    now.mockReturnValue(1_001_001);
     expect(await unlockWithPin("secure123")).toEqual(keys);
+    expect(await getPinState()).toMatchObject({
+      failedAttempts: 0,
+      nextAttemptAt: 0,
+    });
     await changePin(keys, "secure123", "another99");
     await expect(unlockWithPin("secure123")).rejects.toThrow("PIN_INVALID");
-    now.mockReturnValue(1_002_002);
     await expect(disablePin("another99")).resolves.toEqual(keys);
     expect(await getPinState()).toBeNull();
     expect(await restoreSession()).toEqual(keys);
   }, 90000);
+
+  it("uses the increasing lockout schedule", () => {
+    let now = 1_000;
+    const expectedDelays = [
+      0,
+      0,
+      0,
+      0,
+      5 * 60_000,
+      15 * 60_000,
+      60 * 60_000,
+      60 * 60_000,
+    ];
+    for (const [index, delay] of expectedDelays.entries()) {
+      const state = pinFailureState(index + 1, now);
+      expect(state.failedAttempts).toBe(index + 1);
+      expect(state.nextAttemptAt).toBe(delay ? now + delay : 0);
+      if (delay) now += delay;
+    }
+  });
+
+  it("persists an active lockout and refuses PIN checks until it expires", async () => {
+    await enablePin(keys, "secure123");
+    const state = await getPinState();
+    expect(state).not.toBeNull();
+    const nextAttemptAt = Date.now() + 5 * 60_000;
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("messages-session");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction("keys", "readwrite");
+      tx.objectStore("keys").put(
+        { ...state!, failedAttempts: 5, nextAttemptAt },
+        "pinState",
+      );
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+    await expect(unlockWithPin("secure123")).rejects.toThrow(
+      "PIN_ATTEMPT_DELAY",
+    );
+    await expect(changePin(keys, "secure123", "newsecure123")).rejects.toThrow(
+      "PIN_ATTEMPT_DELAY",
+    );
+    await expect(disablePin("secure123")).rejects.toThrow("PIN_ATTEMPT_DELAY");
+    expect(await getPinState()).toMatchObject({
+      failedAttempts: 5,
+      nextAttemptAt,
+    });
+  }, 30000);
 });

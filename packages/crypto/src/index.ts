@@ -8,7 +8,6 @@ import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
-import { argon2idAsync } from "@noble/hashes/argon2.js";
 
 export type KeyPair = { publicKey: Uint8Array; privateKey: Uint8Array };
 
@@ -20,6 +19,30 @@ export type DerivedKeys = {
 
 const HKDF_SALT = new Uint8Array(32);
 const encoder = new TextEncoder();
+const PIN_OPSLIMIT = 3;
+const PIN_MEMLIMIT = 64 * 1024 * 1024;
+const PIN_KEY_LENGTH = 32;
+
+async function derivePinKey(
+  pin: string,
+  salt: Uint8Array,
+): Promise<Uint8Array> {
+  const { default: sodium } = await import("libsodium-wrappers-sumo");
+  await sodium.ready;
+  const pinBytes = encoder.encode(pin.normalize("NFKC"));
+  try {
+    return sodium.crypto_pwhash(
+      PIN_KEY_LENGTH,
+      pinBytes,
+      salt,
+      PIN_OPSLIMIT,
+      PIN_MEMLIMIT,
+      sodium.crypto_pwhash_ALG_ARGON2ID13,
+    );
+  } finally {
+    pinBytes.fill(0);
+  }
+}
 
 export function normalizeMnemonic(input: string): string {
   return input.trim().toLowerCase().replace(/\s+/gu, " ");
@@ -108,17 +131,11 @@ export async function wrapSecrets(
 ): Promise<WrappedSecrets> {
   if (!(secretsBytes instanceof Uint8Array) || secretsBytes.length === 0)
     throw new TypeError("Secret data is required");
-  if (typeof pin !== "string" || !/^[a-z0-9]{6,}$/iu.test(pin))
-    throw new TypeError("PIN must contain at least 6 characters");
+  if (typeof pin !== "string" || Array.from(pin).length < 6)
+    throw new TypeError("PIN_TOO_SHORT");
   const salt = randomBytes(16);
   const nonce = randomBytes(24);
-  const key = await argon2idAsync(encoder.encode(pin), salt, {
-    t: 3,
-    m: 65536,
-    p: 1,
-    dkLen: 32,
-    maxmem: 65536 * 1024 + 1024 * 1024,
-  });
+  const key = await derivePinKey(pin, salt);
   try {
     const aad = encoder.encode("messages/v1/pin-secrets");
     const ciphertext = xchacha20poly1305(key, nonce, aad).encrypt(secretsBytes);
@@ -142,7 +159,8 @@ export async function unwrapSecrets(
   pin: string,
 ): Promise<Uint8Array> {
   try {
-    if (typeof pin !== "string") throw new Error();
+    if (typeof pin !== "string" || Array.from(pin).length < 6)
+      throw new Error();
     const value = blob as Partial<WrappedSecrets>;
     if (
       !value ||
@@ -158,13 +176,7 @@ export async function unwrapSecrets(
     const ciphertext = base64ToBytes(value.ciphertext!);
     if (salt.length !== 16 || nonce.length !== 24 || ciphertext.length < 16)
       throw new Error();
-    const key = await argon2idAsync(encoder.encode(pin), salt, {
-      t: value.iters,
-      m: value.mem,
-      p: 1,
-      dkLen: 32,
-      maxmem: 65536 * 1024 + 1024 * 1024,
-    });
+    const key = await derivePinKey(pin, salt);
     try {
       return xchacha20poly1305(
         key,
@@ -175,7 +187,7 @@ export async function unwrapSecrets(
       key.fill(0);
     }
   } catch {
-    throw new Error("Неверный PIN или повреждённые данные");
+    throw new Error("PIN_INVALID");
   }
 }
 

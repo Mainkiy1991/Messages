@@ -173,16 +173,40 @@ header {
   border-radius: 10px;
   padding: 10px;
 }
-.id-toggle {
+.profile-item {
+  display: block;
   width: 100%;
   text-align: left;
-  border: 0;
-  background: transparent;
-  padding: 8px;
-  font-weight: 650;
+  margin: 4px 0;
+  min-height: 38px;
+}
+.profile-logout {
+  text-align: left;
 }
 .profile-id {
   padding: 6px 8px;
+}
+.profile-section {
+  padding: 4px 8px 8px;
+}
+.profile-section .profile-language {
+  padding: 4px 0;
+}
+.pin-settings {
+  display: grid;
+  gap: 8px;
+}
+.pin-input {
+  -webkit-text-security: disc;
+}
+.pin-action {
+  transition:
+    color 350ms ease,
+    border-color 350ms ease;
+}
+.pin-action-error {
+  color: #b42331;
+  border-color: #b42331;
 }
 .profile-id code,
 .id-box code {
