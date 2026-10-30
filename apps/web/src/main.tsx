@@ -62,7 +62,7 @@ function App() {
   const [pinConfirm, setPinConfirm] = useState("");
   const [oldPin, setOldPin] = useState("");
   const [pinButtonError, setPinButtonError] = useState<
-    "incorrect" | "tooShort" | "mismatch" | "operation" | null
+    "incorrect" | "tooShort" | "mismatch" | "verification" | "operation" | null
   >(null);
   const [pinOperation, setPinOperation] = useState<
     "enable" | "change" | "disable" | "unlock" | null
@@ -212,7 +212,7 @@ function App() {
   }
 
   function showPinButtonError(
-    error: "incorrect" | "tooShort" | "mismatch" | "operation",
+    error: "incorrect" | "tooShort" | "mismatch" | "verification" | "operation",
   ) {
     if (pinErrorTimerRef.current !== null)
       window.clearTimeout(pinErrorTimerRef.current);
@@ -264,6 +264,8 @@ function App() {
       }
       if (error instanceof Error && error.message === "PIN_INVALID")
         showPinButtonError("incorrect");
+      else if (error instanceof Error && error.message === "PIN_KDF_FAILED")
+        showPinButtonError("verification");
       else if (!(
         error instanceof Error && error.message === "PIN_ATTEMPT_DELAY"
       ))
@@ -333,6 +335,8 @@ function App() {
         showPinButtonError("incorrect");
       else if (error instanceof Error && error.message === "PIN_TOO_SHORT")
         showPinButtonError("tooShort");
+      else if (error instanceof Error && error.message === "PIN_KDF_FAILED")
+        showPinButtonError("verification");
       else showPinButtonError("operation");
     } finally {
       setPinOperation(null);
@@ -438,7 +442,9 @@ function App() {
         ? t.pinTooShort
         : pinButtonError === "mismatch"
           ? t.pinMismatch
-          : t.pinOperationFailed
+          : pinButtonError === "verification"
+            ? t.pinCheckFailed
+            : t.pinOperationFailed
     : "";
   function pinActionText(
     label: string,

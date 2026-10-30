@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   unwrapServerSession,
   unwrapSecrets,
@@ -24,6 +24,24 @@ describe("PIN secret wrapping", () => {
         "correct123",
       ),
     ).rejects.toThrow("PIN_INVALID");
+  }, 30000);
+  it("reports KDF failures separately from invalid PINs", async () => {
+    const blob = await wrapSecrets(secret, "correct123");
+    const { default: sodium } = await import("libsodium-wrappers-sumo");
+    await sodium.ready;
+    const derive = vi.spyOn(sodium, "crypto_pwhash").mockImplementation(() => {
+      throw new Error("simulated KDF failure");
+    });
+    try {
+      await expect(unwrapSecrets(blob, "correct123")).rejects.toThrow(
+        "PIN_KDF_FAILED",
+      );
+    } finally {
+      derive.mockRestore();
+    }
+    await expect(unwrapSecrets(blob, "wrong123")).rejects.toThrow(
+      "PIN_INVALID",
+    );
   }, 30000);
   it("uses fresh salts and nonces", async () => {
     const a = await wrapSecrets(secret, "correct123");

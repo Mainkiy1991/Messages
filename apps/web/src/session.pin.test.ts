@@ -16,6 +16,7 @@ import {
 
 const mockWrappedSecrets = vi.hoisted(() => ({
   nextId: 0,
+  failKdf: false,
   values: new Map<string, { pin: string; secrets: Uint8Array }>(),
 }));
 vi.mock("@messages/crypto", async (importOriginal) => {
@@ -39,6 +40,7 @@ vi.mock("@messages/crypto", async (importOriginal) => {
       };
     }),
     unwrapSecrets: vi.fn(async (blob: unknown, pin: string) => {
+      if (mockWrappedSecrets.failKdf) throw new Error("PIN_KDF_FAILED");
       if (!blob || typeof blob !== "object" || !("ciphertext" in blob))
         throw new Error("PIN_INVALID");
       const record = mockWrappedSecrets.values.get(String(blob.ciphertext));
@@ -64,6 +66,7 @@ describe("PIN session storage", () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     await clearSession();
+    mockWrappedSecrets.failKdf = false;
     mockWrappedSecrets.values.clear();
   });
   it("stores only a blob, increases retry delay, changes PIN and disables it", async () => {
@@ -181,6 +184,23 @@ describe("PIN session storage", () => {
       if (delay) now += delay;
     }
   });
+
+  it("does not count KDF failures as incorrect PIN attempts", async () => {
+    await enablePin(keys, "secure123");
+    mockWrappedSecrets.failKdf = true;
+    await expect(unlockWithPin("secure123")).rejects.toThrow("PIN_KDF_FAILED");
+    expect(await getPinState()).toMatchObject({
+      failedAttempts: 0,
+      nextAttemptAt: 0,
+    });
+
+    mockWrappedSecrets.failKdf = false;
+    await expect(unlockWithPin("wrong000")).rejects.toThrow("PIN_INVALID");
+    expect(await getPinState()).toMatchObject({
+      failedAttempts: 1,
+      nextAttemptAt: 0,
+    });
+  }, 30000);
 
   it("persists an active lockout and refuses PIN checks until it expires", async () => {
     await enablePin(keys, "secure123");

@@ -27,10 +27,10 @@ async function derivePinKey(
   pin: string,
   salt: Uint8Array,
 ): Promise<Uint8Array> {
-  const { default: sodium } = await import("libsodium-wrappers-sumo");
-  await sodium.ready;
   const pinBytes = encoder.encode(pin.normalize("NFKC"));
   try {
+    const { default: sodium } = await import("libsodium-wrappers-sumo");
+    await sodium.ready;
     return sodium.crypto_pwhash(
       PIN_KEY_LENGTH,
       pinBytes,
@@ -39,6 +39,8 @@ async function derivePinKey(
       PIN_MEMLIMIT,
       sodium.crypto_pwhash_ALG_ARGON2ID13,
     );
+  } catch {
+    throw new Error("PIN_KDF_FAILED");
   } finally {
     pinBytes.fill(0);
   }
@@ -260,7 +262,9 @@ export async function unwrapSecrets(
     } finally {
       key.fill(0);
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message === "PIN_KDF_FAILED")
+      throw error;
     throw new Error("PIN_INVALID");
   }
 }

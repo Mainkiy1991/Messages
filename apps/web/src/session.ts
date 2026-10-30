@@ -261,7 +261,9 @@ export async function unlockWithPin(pin: string): Promise<DerivedKeys> {
     } finally {
       secretBytes.fill(0);
     }
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message === "PIN_KDF_FAILED")
+      throw error;
     const failedAttempts = state.failedAttempts + 1;
     const failure = pinFailureState(failedAttempts, Date.now());
     await putValues([
