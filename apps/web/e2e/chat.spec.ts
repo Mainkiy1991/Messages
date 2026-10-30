@@ -927,6 +927,7 @@ test.describe("real browser chat", () => {
     ).toBeLessThanOrEqual(360);
     await a.page.getByRole("button", { name: "Cancel" }).click();
     await a.page.getByTestId("profile").click();
+    await a.page.getByRole("button", { name: "Language", exact: true }).click();
     await a.page.getByLabel("Language").selectOption("ru");
     await expect(a.page.locator("html")).toHaveAttribute("lang", "ru");
     await a.page.getByTestId("profile").click();
@@ -937,6 +938,7 @@ test.describe("real browser chat", () => {
     ).toBeVisible();
     await a.page.getByRole("button", { name: "Отмена" }).click();
     await a.page.getByTestId("profile").click();
+    await a.page.getByRole("button", { name: "Язык", exact: true }).click();
     await a.page.getByLabel("Язык").selectOption("en");
     await expect(a.page.locator("html")).toHaveAttribute("lang", "en");
     await a.page.getByTestId("profile").click();
@@ -961,6 +963,7 @@ test.describe("real browser chat", () => {
       "Profile",
     );
     expect(await a.page.getByTestId("profile").innerText()).toBe("");
+    await a.page.getByRole("button", { name: "Language", exact: true }).click();
     await expect(a.page.getByLabel("Language")).toHaveValue("en");
     await a.page.getByLabel("Language").selectOption("ru");
     await expect(a.page.getByTestId("profile")).toHaveAttribute(

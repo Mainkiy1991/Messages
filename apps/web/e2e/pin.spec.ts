@@ -64,7 +64,6 @@ test("PIN locks the page on reload and unlocks after a wrong attempt", async ({
   await page.getByLabel("PIN").fill("secure123");
   await page.getByRole("button", { name: "Unlock" }).click();
   await expect(page.getByTestId("profile")).toBeVisible();
-  await page.clock.uninstall();
 });
 
 test("Forgot PIN clears local data and returns to the start page", async ({
@@ -175,6 +174,10 @@ test("enabling PIN confirms and clears queued unsent messages", async ({
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
+    if (!db.objectStoreNames.contains("frames")) {
+      db.close();
+      return [];
+    }
     const records = await new Promise<unknown[]>((resolve, reject) => {
       const req = db.transaction("frames").objectStore("frames").getAll();
       req.onsuccess = () => resolve(req.result);
@@ -226,5 +229,4 @@ test("the unlock button displays and enforces a persisted countdown", async ({
   await page.getByLabel("PIN").fill("secure123");
   await page.getByRole("button", { name: "Unlock" }).click();
   await expect(page.getByTestId("profile")).toBeVisible();
-  await page.clock.uninstall();
 });
