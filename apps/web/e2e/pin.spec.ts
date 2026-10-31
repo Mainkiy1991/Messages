@@ -139,7 +139,6 @@ test("profile PIN errors shake only the current PIN field", async ({
   await page.addInitScript(() => localStorage.setItem("messages-lang", "en"));
   await createAccount(page);
   await enablePin(page);
-  await page.getByRole("button", { name: "PIN", exact: true }).click();
   await page.getByRole("button", { name: "Change PIN" }).click();
   const currentPin = page.getByLabel("Current PIN");
   await currentPin.fill("wrong000");
