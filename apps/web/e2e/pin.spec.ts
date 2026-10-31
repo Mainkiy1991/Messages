@@ -83,7 +83,7 @@ test("Forgot PIN clears local data and returns to the start page", async ({
   await page.reload();
   await page.getByRole("button", { name: "Forgot PIN?" }).click();
   await expect(
-    page.getByText("You cannot continue this session without the PIN.", {
+    page.getByText("You cannot continue this session without your PIN.", {
       exact: false,
     }),
   ).toBeVisible();
@@ -139,7 +139,6 @@ test("profile PIN errors shake only the current PIN field", async ({
   await page.addInitScript(() => localStorage.setItem("messages-lang", "en"));
   await createAccount(page);
   await enablePin(page);
-  await page.getByTestId("profile").click();
   await page.getByRole("button", { name: "PIN", exact: true }).click();
   await page.getByRole("button", { name: "Change PIN" }).click();
   const currentPin = page.getByLabel("Current PIN");
