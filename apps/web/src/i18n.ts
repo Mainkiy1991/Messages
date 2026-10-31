@@ -101,6 +101,7 @@ export const strings = {
     pinDisable: "Отключить PIN",
     pinDisableSubmit: "Отключить",
     pinUnlock: "Разблокировать",
+    pinUnlockTitle: "Для разблокировки введите PIN",
     pinInstalling: "Установка…",
     pinChanging: "Смена…",
     pinDisabling: "Отключение…",
@@ -116,7 +117,7 @@ export const strings = {
     forgotPin: "Забыли PIN?",
     forgotFinish: "Завершить сессию",
     forgotConfirm:
-      "Без PIN продолжить эту сессию нельзя. Чтобы снова открыть чаты, нужно войти заново по сид-фразе (12 или 24 слова). Убедитесь, что она у вас есть. Сообщения останутся на сервере и подтянутся после входа. Завершить текущую сессию?",
+      "Без PIN продолжить текущую сессию невозможно. Чтобы снова получить доступ к чатам, необходимо войти в аккаунт с помощью сид-фразы (12 или 24 слова).\n\nУбедитесь, что у вас есть доступ к сид-фразе, прежде чем продолжить. Все сообщения останутся на сервере и будут восстановлены после повторного входа.\n\nЗавершить текущую сессию?",
   },
   en: {
     title: "Messages",
@@ -206,6 +207,7 @@ export const strings = {
     pinDisable: "Disable PIN",
     pinDisableSubmit: "Disable",
     pinUnlock: "Unlock",
+    pinUnlockTitle: "Enter your PIN to unlock",
     pinInstalling: "Setting…",
     pinChanging: "Changing…",
     pinDisabling: "Disabling…",
@@ -221,7 +223,7 @@ export const strings = {
     forgotPin: "Forgot PIN?",
     forgotFinish: "End session",
     forgotConfirm:
-      "You cannot continue this session without the PIN. To open your chats again, sign in with your seed phrase (12 or 24 words). Make sure you have it. Your messages will remain on the server and will be synced after sign-in. End the current session?",
+      "You cannot continue this session without your PIN. To access your chats again, sign in to your account with your seed phrase (12 or 24 words).\n\nMake sure you have access to your seed phrase before continuing. All messages will remain on the server and will be restored after you sign in again.\n\nEnd the current session?",
   },
 } as const;
 

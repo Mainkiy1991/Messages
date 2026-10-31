@@ -52,13 +52,21 @@ test("PIN locks the page on reload and unlocks after a wrong attempt", async ({
   expect(stored).not.toContain("historyKey");
   expect(stored).not.toContain(phrase);
   await page.reload();
-  await expect(page.getByRole("heading", { name: "Unlock" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Enter your PIN to unlock" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("PIN")).toBeVisible();
+  await expect(page.getByText("PIN", { exact: true })).toHaveCount(0);
   await expect(page.getByTestId("profile")).toHaveCount(0);
   await page.clock.install();
   await page.getByLabel("PIN").fill("wrong000");
   await page.getByRole("button", { name: "Unlock" }).click();
   const unlockButton = page.getByRole("button", { name: "Incorrect PIN" });
   await expect(unlockButton).toBeVisible();
+  await expect(unlockButton).toHaveClass(/pin-action-error/);
+  await expect(page.getByLabel("PIN")).toHaveClass(/pin-input-incorrect/);
+  await expect(page.getByLabel("PIN")).toHaveValue("");
+  await expect(page.getByLabel("PIN")).toBeFocused();
   await page.clock.fastForward(2000);
   await expect(page.getByRole("button", { name: "Unlock" })).toBeVisible();
   await page.getByLabel("PIN").fill("secure123");
@@ -75,10 +83,11 @@ test("Forgot PIN clears local data and returns to the start page", async ({
   await page.reload();
   await page.getByRole("button", { name: "Forgot PIN?" }).click();
   await expect(
-    page.getByText("You cannot continue this session without the PIN.", {
+    page.getByText("You cannot continue this session without your PIN.", {
       exact: false,
     }),
   ).toBeVisible();
+  await expect(page.locator("#forgot-pin-message p")).toHaveCount(3);
   await page.getByRole("button", { name: "End session" }).click();
   await expect(page.getByRole("heading", { name: "Welcome" })).toBeVisible();
   await expect(page.getByTestId("open-login")).toBeVisible();
@@ -122,6 +131,40 @@ test("profile PIN forms are mutually exclusive and can be collapsed", async ({
   ).toHaveAttribute("aria-expanded", "false");
   await page.getByRole("button", { name: "Disable PIN" }).click();
   await expect(page.getByLabel("Current PIN")).toHaveCount(0);
+});
+
+test("profile PIN errors shake only the current PIN field", async ({
+  page,
+}) => {
+  await page.addInitScript(() => localStorage.setItem("messages-lang", "en"));
+  await createAccount(page);
+  await enablePin(page);
+  await page.getByRole("button", { name: "Change PIN" }).click();
+  const currentPin = page.getByLabel("Current PIN");
+  await currentPin.fill("wrong000");
+  await page.getByLabel("New PIN").fill("secure456");
+  await page.getByLabel("Confirm PIN").fill("secure456");
+  const changeButton = page.getByRole("button", {
+    name: "Change",
+    exact: true,
+  });
+  await changeButton.click();
+  await expect(page.getByRole("button", { name: "Incorrect PIN" })).toHaveClass(
+    /pin-action-error/,
+  );
+  await expect(currentPin).toHaveClass(/pin-input-incorrect/);
+  await expect(currentPin).toHaveValue("");
+  await expect(page.getByLabel("New PIN")).not.toHaveClass(
+    /pin-input-incorrect/,
+  );
+
+  await page.getByLabel("New PIN").fill("secure456");
+  await page.getByLabel("Confirm PIN").fill("other789");
+  await changeButton.click();
+  await expect(
+    page.getByRole("button", { name: "PINs do not match" }),
+  ).toHaveClass(/pin-action-error/);
+  await expect(currentPin).not.toHaveClass(/pin-input-incorrect/);
 });
 
 test("enabling PIN confirms and clears queued unsent messages", async ({

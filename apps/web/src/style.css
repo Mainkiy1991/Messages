@@ -199,14 +199,49 @@ header {
 .pin-input {
   -webkit-text-security: disc;
 }
+.pin-input-incorrect {
+  animation: pin-shake 400ms ease-in-out;
+}
+@keyframes pin-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20%,
+  60% {
+    transform: translateX(-6px);
+  }
+  40%,
+  80% {
+    transform: translateX(6px);
+  }
+}
 .pin-action {
   transition:
     color 350ms ease,
-    border-color 350ms ease;
+    border-color 350ms ease,
+    background-color 350ms ease,
+    box-shadow 350ms ease;
 }
 .pin-action-error {
-  color: #b42331;
-  border-color: #b42331;
+  color: #a3323a;
+  border-color: #e5c6c7;
+}
+.primary.pin-action-incorrect {
+  box-shadow: inset 0 0 0 1px #e5c6c7;
+  background: #fffafa;
+}
+.forgot-pin-message p {
+  margin: 0 0 12px;
+}
+.forgot-pin-message p:last-child {
+  margin-bottom: 16px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pin-input-incorrect {
+    animation: none;
+    border-color: #a3323a;
+  }
 }
 .profile-id code,
 .id-box code {
