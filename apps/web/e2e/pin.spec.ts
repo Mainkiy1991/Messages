@@ -34,6 +34,9 @@ test("PIN locks the page on reload and unlocks after a wrong attempt", async ({
   await page.addInitScript(() => localStorage.setItem("messages-lang", "en"));
   const phrase = await createAccount(page);
   await enablePin(page);
+  const logoutColor = await page
+    .getByTestId("logout")
+    .evaluate((button) => getComputedStyle(button).color);
   const stored = await page.evaluate(async () => {
     const request = indexedDB.open("messages-session");
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -64,6 +67,16 @@ test("PIN locks the page on reload and unlocks after a wrong attempt", async ({
   const unlockButton = page.getByRole("button", { name: "Incorrect PIN" });
   await expect(unlockButton).toBeVisible();
   await expect(unlockButton).toHaveClass(/pin-action-error/);
+  await expect
+    .poll(() =>
+      unlockButton.evaluate((button) => getComputedStyle(button).color),
+    )
+    .toBe(logoutColor);
+  await expect(unlockButton).toHaveCSS("opacity", "1");
+  await expect(unlockButton).toHaveCSS(
+    "background-color",
+    "rgb(255, 250, 250)",
+  );
   await expect(page.getByLabel("PIN")).toHaveClass(/pin-input-incorrect/);
   await expect(page.getByLabel("PIN")).toHaveValue("");
   await expect(page.getByLabel("PIN")).toBeFocused();
@@ -139,6 +152,9 @@ test("profile PIN errors shake only the current PIN field", async ({
   await page.addInitScript(() => localStorage.setItem("messages-lang", "en"));
   await createAccount(page);
   await enablePin(page);
+  const logoutColor = await page
+    .getByTestId("logout")
+    .evaluate((button) => getComputedStyle(button).color);
   await page.getByRole("button", { name: "Change PIN" }).click();
   const currentPin = page.getByLabel("Current PIN");
   await currentPin.fill("wrong000");
@@ -152,6 +168,15 @@ test("profile PIN errors shake only the current PIN field", async ({
   await expect(page.getByRole("button", { name: "Incorrect PIN" })).toHaveClass(
     /pin-action-error/,
   );
+  const changeErrorButton = page.getByRole("button", {
+    name: "Incorrect PIN",
+  });
+  await expect
+    .poll(() =>
+      changeErrorButton.evaluate((button) => getComputedStyle(button).color),
+    )
+    .toBe(logoutColor);
+  await expect(changeErrorButton).toHaveCSS("opacity", "1");
   await expect(currentPin).toHaveClass(/pin-input-incorrect/);
   await expect(currentPin).toHaveValue("");
   await expect(page.getByLabel("New PIN")).not.toHaveClass(
@@ -165,6 +190,24 @@ test("profile PIN errors shake only the current PIN field", async ({
     page.getByRole("button", { name: "PINs do not match" }),
   ).toHaveClass(/pin-action-error/);
   await expect(currentPin).not.toHaveClass(/pin-input-incorrect/);
+
+  await page.getByRole("button", { name: "Disable PIN" }).click();
+  const disableCurrentPin = page.getByLabel("Current PIN");
+  await disableCurrentPin.fill("wrong000");
+  const disableButton = page.getByRole("button", {
+    name: "Disable",
+    exact: true,
+  });
+  await disableButton.click();
+  const disableErrorButton = page.getByRole("button", {
+    name: "Incorrect PIN",
+  });
+  await expect
+    .poll(() =>
+      disableErrorButton.evaluate((button) => getComputedStyle(button).color),
+    )
+    .toBe(logoutColor);
+  await expect(disableErrorButton).toHaveCSS("opacity", "1");
 });
 
 test("enabling PIN confirms and clears queued unsent messages", async ({
