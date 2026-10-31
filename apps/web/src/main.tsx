@@ -64,6 +64,7 @@ function App() {
   const [pinButtonError, setPinButtonError] = useState<
     "incorrect" | "tooShort" | "mismatch" | "verification" | "operation" | null
   >(null);
+  const [pinInputIncorrect, setPinInputIncorrect] = useState(false);
   const [pinOperation, setPinOperation] = useState<
     "enable" | "change" | "disable" | "unlock" | null
   >(null);
@@ -106,6 +107,7 @@ function App() {
   const [presenceClock, setPresenceClock] = useState(Date.now());
   const profileRef = useRef<HTMLDivElement | null>(null);
   const pinErrorTimerRef = useRef<number | null>(null);
+  const pinInputRef = useRef<HTMLInputElement | null>(null);
   const controllerRef = useRef<ChatController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const wasNearBottomRef = useRef(true);
@@ -217,10 +219,16 @@ function App() {
     if (pinErrorTimerRef.current !== null)
       window.clearTimeout(pinErrorTimerRef.current);
     setPinButtonError(error);
-    pinErrorTimerRef.current = window.setTimeout(
-      () => setPinButtonError(null),
-      2000,
-    );
+    pinErrorTimerRef.current = window.setTimeout(() => {
+      setPinButtonError(null);
+      setPinInputIncorrect(false);
+    }, 2000);
+    if (error === "incorrect") {
+      setPinInputIncorrect(true);
+      setPin("");
+      setOldPin("");
+      window.requestAnimationFrame(() => pinInputRef.current?.focus());
+    }
   }
   async function refreshPinCooldown(): Promise<boolean> {
     const state = await getPinState();
@@ -764,7 +772,8 @@ function App() {
                             <>
                               <input
                                 aria-label={t.pinCurrent}
-                                className="pin-input"
+                                ref={pinInputRef}
+                                className={`pin-input${pinInputIncorrect ? " pin-input-incorrect" : ""}`}
                                 type="text"
                                 inputMode="text"
                                 autoComplete="off"
@@ -821,7 +830,8 @@ function App() {
                             <>
                               <input
                                 aria-label={t.pinCurrent}
-                                className="pin-input"
+                                ref={pinInputRef}
+                                className={`pin-input${pinInputIncorrect ? " pin-input-incorrect" : ""}`}
                                 type="text"
                                 inputMode="text"
                                 autoComplete="off"
@@ -897,12 +907,13 @@ function App() {
               }
             }}
           >
-            <h1>{t.pinUnlock}</h1>
+            <h1>{t.pinUnlockTitle}</h1>
             <label>
-              {t.pinTitle}
               <input
                 autoFocus
-                className="pin-input"
+                ref={pinInputRef}
+                aria-label={t.pinTitle}
+                className={`pin-input${pinInputIncorrect ? " pin-input-incorrect" : ""}`}
                 type="text"
                 inputMode="text"
                 autoComplete="off"
@@ -913,7 +924,7 @@ function App() {
               />
             </label>
             <button
-              className={`primary pin-action${pinButtonError ? " pin-action-error" : ""}`}
+              className={`primary pin-action${pinButtonError ? " pin-action-error" : ""}${pinButtonError === "incorrect" ? " pin-action-incorrect" : ""}`}
               aria-live="polite"
               disabled={Boolean(pinOperation) || pinCountdown > 0}
               onClick={() => void submitPin()}
@@ -931,7 +942,11 @@ function App() {
             role="alertdialog"
             aria-labelledby="forgot-pin-message"
           >
-            <p id="forgot-pin-message">{t.forgotConfirm}</p>
+            <div id="forgot-pin-message" className="forgot-pin-message">
+              {t.forgotConfirm.split("\n\n").map((paragraph) => (
+                <p key={paragraph}>{paragraph}</p>
+              ))}
+            </div>
             <button className="danger" onClick={() => void finishForgotPin()}>
               {t.forgotFinish}
             </button>
