@@ -144,7 +144,10 @@ test("profile PIN errors shake only the current PIN field", async ({
   await currentPin.fill("wrong000");
   await page.getByLabel("New PIN").fill("secure456");
   await page.getByLabel("Confirm PIN").fill("secure456");
-  const changeButton = page.getByRole("button", { name: "Change" });
+  const changeButton = page.getByRole("button", {
+    name: "Change",
+    exact: true,
+  });
   await changeButton.click();
   await expect(page.getByRole("button", { name: "Incorrect PIN" })).toHaveClass(
     /pin-action-error/,
