@@ -31,7 +31,11 @@ async function enablePin(page: Page) {
 test("PIN locks the page on reload and unlocks after a wrong attempt", async ({
   page,
 }) => {
-  await page.addInitScript(() => localStorage.setItem("messages-lang", "en"));
+  await page.addInitScript(() => {
+    if (!localStorage.getItem("messages-lang")) {
+      localStorage.setItem("messages-lang", "en");
+    }
+  });
   const phrase = await createAccount(page);
   await enablePin(page);
   const logoutColor = await page
@@ -91,7 +95,11 @@ test("locked PIN controls keep their geometry at 360px in every language", async
   page,
 }) => {
   await page.setViewportSize({ width: 360, height: 800 });
-  await page.addInitScript(() => localStorage.setItem("messages-lang", "en"));
+  await page.addInitScript(() => {
+    if (!localStorage.getItem("messages-lang")) {
+      localStorage.setItem("messages-lang", "en");
+    }
+  });
   await createAccount(page);
   await enablePin(page);
   await page.clock.install();
