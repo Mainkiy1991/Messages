@@ -5,7 +5,10 @@ async function createAccount(page: Page): Promise<string> {
   await page.getByTestId("create-account").click();
   await page.getByRole("button", { name: "Continue" }).click();
   const words = (
-    await page.getByTestId("seed-phrase").locator("li").allTextContents()
+    await page
+      .getByTestId("seed-phrase")
+      .locator("li > span:last-child")
+      .allTextContents()
   ).map((word) => word.trim());
   const inputs = page.locator('form input[autocomplete="off"]');
   for (let i = 0; i < (await inputs.count()); i++) {
