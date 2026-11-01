@@ -1,8 +1,9 @@
-export type Language = "ru" | "en";
+export type Language = "ru" | "en" | "uk";
 
 export const supportedLanguages = [
   { code: "ru", name: "Русский", locale: "ru-RU" },
   { code: "en", name: "English", locale: "en-US" },
+  { code: "uk", name: "Українська", locale: "uk-UA" },
 ] as const satisfies readonly {
   code: Language;
   name: string;
@@ -225,6 +226,114 @@ export const strings = {
     forgotConfirm:
       "You cannot continue this session without your PIN. To access your chats again, sign in to your account with your seed phrase (12 or 24 words).\n\nMake sure you have access to your seed phrase before continuing. All messages will remain on the server and will be restored after you sign in again.\n\nEnd the current session?",
   },
+  uk: {
+    title: "Messages",
+    create: "Створити обліковий запис",
+    login: "Увійти за сід-фразою",
+    welcome: "Ласкаво просимо",
+    createTitle: "Створення облікового запису",
+    words: "Кількість слів",
+    twelve: "12 слів",
+    twentyFour: "24 слова",
+    warning:
+      "Запишіть фразу на папері та зберігайте її в надійному місці. Нікому її не показуйте. Якщо фразу буде втрачено, відновити обліковий запис неможливо.",
+    saved: "Я зберіг(ла) фразу",
+    next: "Продовжити",
+    verify: "Перевірка фрази",
+    enterWord: (n: number) => `Введіть слово №${n}`,
+    finish: "Завершити створення",
+    loginTitle: "Вхід за сід-фразою",
+    phrase: "Сід-фраза",
+    signIn: "Увійти",
+    invalid: "Неправильна сід-фраза. Перевірте слова й спробуйте ще раз.",
+    chats: "Чати",
+    profile: "Профіль",
+    createChat: "Створити чат",
+    connectionError: "Помилка з’єднання",
+    userId: "ID користувача",
+    copy: "Копіювати",
+    copied: "Скопійовано",
+    logout: "Вийти",
+    confirmLogout:
+      "Вийти? Ключі буде стерто з цього пристрою. Увійти знову можна лише за сід-фразою. Переконайтеся, що зберегли її.",
+    confirm: "Вийти",
+    cancel: "Скасувати",
+    deleteChatMenu: "Видалити чат",
+    chatActions: "Дії чату",
+    confirmDeleteChat:
+      "Переписку буде видалено лише у вас, на всіх ваших пристроях. У співрозмовника вона залишиться. Невідправлені повідомлення цього чату також буде видалено. Цю дію не можна скасувати.",
+    deleteChatFailed:
+      "Не вдалося видалити переписку. Перевірте з’єднання та спробуйте ще раз.",
+    outboxClearFailed:
+      "Чат приховано, але не вдалося очистити чергу повідомлень. Перезавантажте сторінку та спробуйте ще раз.",
+    delete: "Видалити",
+    back: "Назад",
+    language: "Мова",
+    serverUnavailable: "Сервер недоступний. Спробуйте пізніше.",
+    connected: "підключено",
+    connecting: "підключення…",
+    offline: "немає зв’язку",
+    peerId: "ID співрозмовника",
+    newChat: "Новий чат",
+    invalidId: "Введіть ID із 64 малих шістнадцяткових символів.",
+    selfChat: "Не можна створити чат із самим собою.",
+    userNotFound:
+      "Користувача не знайдено. Він має хоча б раз увійти в обліковий запис.",
+    badPeerKey: "Не вдалося перевірити ключ користувача.",
+    decryptFailed: "Не вдалося розшифрувати повідомлення",
+    sendFailed: "Не вдалося надіслати повідомлення.",
+    invalidText: "Повідомлення має містити від 1 до 4000 символів.",
+    sending: "надсилається",
+    sent: "надіслано",
+    delivered: "доставлено",
+    read: "прочитано",
+    failed: "помилка",
+    retry: "Повторити",
+    send: "Надіслати",
+    messagePlaceholder: "Повідомлення",
+    noMessages: "Повідомлень немає",
+    you: "Ви",
+    selectChat: "Виберіть чат або створіть новий.",
+    contactName: "Ім’я контакту (необов’язково)",
+    saveName: "Зберегти ім’я",
+    contactSaveFailed: "Не вдалося зберегти ім’я контакту",
+    contactsDecryptError:
+      "Не вдалося завантажити контакти. У чатах показано ID.",
+    serverWaking: "Сервер запускається, зачекайте до хвилини…",
+    loadMore: "Завантажити ще",
+    loading: "Завантаження…",
+    presenceOnline: "у мережі",
+    pinTitle: "PIN-код",
+    pinNew: "Новий PIN-код",
+    pinConfirm: "Повторіть PIN-код",
+    pinCurrent: "Поточний PIN-код",
+    pinHint:
+      "Рекомендуємо щонайменше 8 символів, бажано з літерами. Короткий PIN-код можна підібрати.",
+    pinEnable: "Увімкнути PIN-код",
+    pinInstallSubmit: "Встановити",
+    pinChange: "Змінити PIN-код",
+    pinChangeSubmit: "Змінити",
+    pinDisable: "Вимкнути PIN-код",
+    pinDisableSubmit: "Вимкнути",
+    pinUnlock: "Розблокувати",
+    pinUnlockTitle: "Введіть PIN-код, щоб розблокувати",
+    pinInstalling: "Налаштування…",
+    pinChanging: "Зміна…",
+    pinDisabling: "Вимкнення…",
+    pinUnlocking: "Розблокування…",
+    pinOperationFailed: "Не вдалося виконати дію",
+    pinCheckFailed: "Не вдалося перевірити PIN-код. Спробуйте ще раз",
+    pinIncorrect: "Неправильний PIN-код",
+    pinTooShort: "PIN-код має містити щонайменше 6 символів",
+    pinMismatch: "PIN-коди не збігаються",
+    pinCountdown: (time: string) => `Зачекайте ${time}`,
+    pinQueueConfirm: (count: number) =>
+      `${count} ${ukrainianPlural(count, "не надіслане повідомлення", "не надіслані повідомлення", "не надісланих повідомлень")} буде видалено. Продовжити?`,
+    forgotPin: "Забули PIN-код?",
+    forgotFinish: "Завершити сеанс",
+    forgotConfirm:
+      "Без PIN-коду продовжити цей сеанс неможливо. Щоб знову отримати доступ до чатів, увійдіть в обліковий запис за допомогою сід-фрази (12 або 24 слова).\n\nПерш ніж продовжити, переконайтеся, що маєте доступ до сід-фрази. Усі повідомлення залишаться на сервері й відновляться після повторного входу.\n\nЗавершити поточний сеанс?",
+  },
 } as const;
 
 export type Strings = (typeof strings)[Language];
@@ -232,7 +341,8 @@ export type Strings = (typeof strings)[Language];
 export function detectLanguage(browserLanguages: readonly string[]): Language {
   for (const browserLanguage of browserLanguages) {
     const code = browserLanguage.trim().toLowerCase().split(/[-_]/u)[0];
-    if (code === "ru" || code === "uk" || code === "be") return "ru";
+    if (code === "uk") return "uk";
+    if (code === "ru" || code === "be") return "ru";
     if (code === "en") return "en";
   }
   return "en";
@@ -246,7 +356,7 @@ export function getInitialLanguage(
     const saved = (storage ?? globalThis.localStorage).getItem(
       languageStorageKey,
     );
-    if (saved === "ru" || saved === "en") return saved;
+    if (saved === "ru" || saved === "en" || saved === "uk") return saved;
   } catch {
     // Storage can be unavailable in private or restricted browser contexts.
   }
@@ -266,6 +376,16 @@ export function saveLanguagePreference(
 
 export function getLanguageLocale(language: Language): string {
   return supportedLanguages.find((entry) => entry.code === language)!.locale;
+}
+
+export function ukrainianPlural(
+  count: number,
+  one: string,
+  few: string,
+  many: string,
+): string {
+  const category = new Intl.PluralRules("uk-UA").select(count);
+  return category === "one" ? one : category === "few" ? few : many;
 }
 
 export function chooseCheckPositions(

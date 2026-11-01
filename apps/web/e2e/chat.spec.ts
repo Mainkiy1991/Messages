@@ -43,7 +43,9 @@ let activeUsers: User[] = [];
 async function openUser(browser: Browser): Promise<User> {
   const context = await browser.newContext();
   await context.addInitScript(() => {
-    localStorage.setItem("messages-lang", "en");
+    if (localStorage.getItem("messages-lang") === null) {
+      localStorage.setItem("messages-lang", "en");
+    }
   });
   const page = await context.newPage();
   const user: User = {
@@ -855,6 +857,62 @@ test.describe("real browser chat", () => {
     );
     expect(sessionDatabases).toEqual([]);
     expect(await signIn(user.page, account.phrase)).toBe(account.id);
+  });
+
+  test("Ukrainian profile language persists and fits a 360px viewport", async ({
+    browser,
+  }) => {
+    const user = await openUser(browser);
+    const page = user.page;
+    await page.setViewportSize({ width: 360, height: 740 });
+    await createAccount(page);
+    await page.getByTestId("profile").click();
+    await page.getByRole("button", { name: "Language" }).click();
+    await page.getByLabel("Language").selectOption("uk");
+    await expect(page.locator("html")).toHaveAttribute("lang", "uk");
+    await expect(page.getByTestId("profile")).toHaveAttribute(
+      "aria-label",
+      "Профіль",
+    );
+    await expect(page.getByTestId("connection-status")).toHaveAttribute(
+      "aria-label",
+      "підключено",
+    );
+    expect(
+      await page.evaluate(() => localStorage.getItem("messages-lang")),
+    ).toBe("uk");
+    await page.reload();
+    await expect(page.locator("html")).toHaveAttribute("lang", "uk");
+    await expect(page.getByRole("button", { name: "Новий чат" })).toBeVisible();
+
+    const overflow = await page.evaluate(() => {
+      const viewportWidth = document.documentElement.clientWidth;
+      return [...document.querySelectorAll("h1, h2, button")]
+        .filter((element) => {
+          const style = getComputedStyle(element);
+          return style.display !== "none" && style.visibility !== "hidden";
+        })
+        .map((element) => {
+          const rect = element.getBoundingClientRect();
+          return {
+            text: element.textContent?.trim(),
+            left: rect.left,
+            right: rect.right,
+            scrollWidth: element.scrollWidth,
+            clientWidth: element.clientWidth,
+            overflowX: getComputedStyle(element).overflowX,
+          };
+        })
+        .filter(
+          ({ left, right, scrollWidth, clientWidth, overflowX }) =>
+            left < 0 ||
+            right > viewportWidth ||
+            (scrollWidth > clientWidth &&
+              overflowX !== "auto" &&
+              overflowX !== "scroll"),
+        );
+    });
+    expect(overflow).toEqual([]);
   });
 
   test("chat layout, compact forms, profile controls and responsive navigation", async ({

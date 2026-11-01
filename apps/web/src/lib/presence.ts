@@ -1,4 +1,4 @@
-import type { Language } from "../i18n.js";
+import { getLanguageLocale, strings, type Language } from "../i18n.js";
 
 export function formatPresence(
   online: boolean,
@@ -6,20 +6,32 @@ export function formatPresence(
   language: Language,
   now = Date.now(),
 ): string {
-  if (online) return language === "ru" ? "в сети" : "online";
+  const t = strings[language];
+  if (online) return t.presenceOnline;
   if (!lastSeenAt) return "";
   const time = Date.parse(lastSeenAt);
   if (!Number.isFinite(time)) return "";
   const age = Math.max(0, now - time);
-  const locale = language === "ru" ? "ru-RU" : "en-US";
-  const prefix = language === "ru" ? "был(а) в сети " : "last seen ";
+  const locale = getLanguageLocale(language);
+  const prefix =
+    language === "ru"
+      ? "был(а) в сети "
+      : language === "uk"
+        ? "був(ла) в мережі "
+        : "last seen ";
   if (age < 60_000)
-    return language === "ru" ? "был(а) в сети сейчас" : "last seen just now";
+    return language === "ru"
+      ? "был(а) в сети сейчас"
+      : language === "uk"
+        ? "був(ла) в мережі щойно"
+        : "last seen just now";
   if (age < 60 * 60_000) {
     const minutes = Math.floor(age / 60_000);
     return language === "ru"
       ? `${prefix}${minutes} мин. назад`
-      : `${prefix}${minutes} min. ago`;
+      : language === "uk"
+        ? `${prefix}${minutes} хв тому`
+        : `${prefix}${minutes} min. ago`;
   }
   const date = new Date(time);
   const yesterday = new Date(now);
@@ -32,7 +44,9 @@ export function formatPresence(
     });
     return language === "ru"
       ? `${prefix}сегодня в ${clock}`
-      : `${prefix}today at ${clock}`;
+      : language === "uk"
+        ? `${prefix}сьогодні о ${clock}`
+        : `${prefix}today at ${clock}`;
   }
   if (sameDay(date, yesterday)) {
     const clock = date.toLocaleTimeString(locale, {
@@ -41,7 +55,9 @@ export function formatPresence(
     });
     return language === "ru"
       ? `${prefix}вчера в ${clock}`
-      : `${prefix}yesterday at ${clock}`;
+      : language === "uk"
+        ? `${prefix}учора о ${clock}`
+        : `${prefix}yesterday at ${clock}`;
   }
   if (date.getFullYear() === new Date(now).getFullYear()) {
     const calendar = date.toLocaleDateString(locale, {
