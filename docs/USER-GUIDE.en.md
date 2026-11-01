@@ -5,6 +5,7 @@ Messages is an open-source non-commercial messenger without email or phone. Sign
 ## Getting started
 
 ### Create an account
+
 1. Tap **Create account** on the welcome screen.
 2. Choose the number of seed words: **12 words** or **24 words**. More words mean stronger protection.
 3. Write the generated phrase down on paper and keep it in a safe place. Never show it to anyone.
@@ -12,6 +13,7 @@ Messages is an open-source non-commercial messenger without email or phone. Sign
 5. Tap **Finish account setup** — your account is ready.
 
 ### Sign in on another device
+
 1. Tap **Sign in with seed phrase**.
 2. Enter the full phrase of 12 or 24 words and tap **Sign in**.
 3. Your account and contacts become available after syncing with the server.
