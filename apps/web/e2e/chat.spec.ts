@@ -197,6 +197,18 @@ test.describe("real browser chat", () => {
           await showSeedPhrase(page, wordCount);
           const seedList = page.getByTestId("seed-phrase");
           await expect(seedList.locator("li")).toHaveCount(wordCount);
+          const selectionStyles = await seedList.evaluate((list) => {
+            const number = getComputedStyle(list.querySelector(".seed-index")!);
+            const word = getComputedStyle(
+              list.querySelector("li span:last-child")!,
+            );
+            return {
+              number: number.userSelect || number.webkitUserSelect,
+              word: word.userSelect || word.webkitUserSelect,
+            };
+          });
+          expect(selectionStyles.number).toBe("none");
+          expect(selectionStyles.word).not.toBe("none");
           const layout = await seedList.evaluate((list) => {
             const items = [...list.querySelectorAll("li")];
             const rect = (element: Element) => {
