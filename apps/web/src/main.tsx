@@ -896,6 +896,7 @@ function App() {
       <section className="card">
         {screen === "locked" && (
           <div
+            className="pin-lock-screen"
             aria-label={t.pinUnlock}
             onKeyDown={(event) => {
               if (

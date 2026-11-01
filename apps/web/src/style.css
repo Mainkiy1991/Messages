@@ -220,10 +220,38 @@ header {
   }
 }
 .pin-action {
+  height: 44px;
+  min-height: 44px;
+  white-space: nowrap;
+  overflow: hidden;
   transition:
     border-color 350ms ease,
     background-color 350ms ease,
     box-shadow 350ms ease;
+}
+.pin-lock-screen {
+  display: grid;
+  gap: 12px;
+}
+.pin-lock-screen h1 {
+  margin: 0 0 12px;
+}
+.pin-lock-screen label {
+  margin: 0 0 4px;
+}
+.pin-lock-screen .pin-action {
+  width: 100%;
+  height: 44px;
+  min-height: 44px;
+  padding: 0 10px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.pin-lock-screen .text-button {
+  width: 100%;
+  height: 40px;
+  margin: 0;
+  white-space: nowrap;
 }
 .forgot-pin-message p {
   margin: 0 0 12px;

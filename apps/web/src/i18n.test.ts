@@ -57,6 +57,24 @@ describe("localization", () => {
       Object.keys(strings.en).sort(),
     );
   });
+  it("uses consistent Ukrainian PIN and unsent-message wording", () => {
+    const ukText = (Object.values(strings.uk) as unknown[])
+      .filter((value): value is string => typeof value === "string")
+      .join(" ");
+    expect(ukText).not.toContain("PIN-код");
+    expect(ukText).not.toContain("Неправильн");
+    expect(strings.uk.pinTitle).toBe("PIN");
+    expect(strings.uk.pinNew).toBe("Новий PIN");
+    expect(strings.uk.pinConfirm).toBe("Повторіть PIN");
+    expect(strings.uk.pinCurrent).toBe("Поточний PIN");
+    expect(strings.uk.pinUnlockTitle).toBe("Введіть PIN, щоб розблокувати");
+    expect(strings.uk.pinIncorrect).toBe("Невірний PIN");
+    expect(strings.uk.invalid).toContain("Невірна сід-фраза");
+    expect(strings.uk.confirmDeleteChat).toContain("Ненадіслані повідомлення");
+    expect(strings.uk.pinQueueConfirm(1)).toContain("ненадіслане повідомлення");
+    expect(strings.uk.pinQueueConfirm(2)).toContain("ненадіслані повідомлення");
+    expect(strings.uk.pinQueueConfirm(5)).toContain("ненадісланих повідомлень");
+  });
   it("shows translated text after changing the selected language", () => {
     let language: "ru" | "en" | "uk" = "ru";
     expect(strings[language].create).toBe("Создать аккаунт");
