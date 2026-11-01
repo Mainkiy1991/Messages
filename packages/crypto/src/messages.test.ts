@@ -130,6 +130,7 @@ describe("strict identifier casing", () => {
       encryptHistoryEntry({
         historyKey: alice.historyKey,
         clientMsgId: "A" + "0".repeat(31),
+        senderId: aliceId,
         peerId: bobId,
         text: "hello",
         sentAt,
@@ -139,6 +140,7 @@ describe("strict identifier casing", () => {
       encryptHistoryEntry({
         historyKey: alice.historyKey,
         clientMsgId: "0".repeat(32),
+        senderId: aliceId,
         peerId: "A" + bobId.slice(1),
         text: "hello",
         sentAt,
@@ -185,13 +187,36 @@ describe("recipient messages", () => {
       "😀".repeat(4000),
     ]) {
       const ciphertext = encrypt(text);
-      expect(decrypt(ciphertext)).toEqual({ text, sentAt });
+      expect(decrypt(ciphertext)).toMatchObject({
+        v: 2,
+        type: "text",
+        text,
+        sentAt,
+      });
       expect(ciphertext.length).toBeLessThan(64 * 1024);
     }
   });
 
   it("uses a fresh nonce for each encryption", () => {
     expect(encrypt("same text")).not.toBe(encrypt("same text"));
+  });
+
+  it("authenticates the v2 ID in both the envelope and AAD", () => {
+    const ciphertext = encrypt("bound ID");
+    const packed = base64ToBytes(ciphertext);
+    packed[1] ^= 1;
+    expect(() => decrypt(bytesToBase64(packed))).toThrow(DecryptError);
+    const changedSentAt = base64ToBytes(ciphertext);
+    changedSentAt[changedSentAt.length - 18] ^= 1;
+    expect(() => decrypt(bytesToBase64(changedSentAt))).toThrow(
+      "DECRYPT_FAILED",
+    );
+  });
+
+  it("rejects altered v2 sentAt with DECRYPT_FAILED", () => {
+    const packed = base64ToBytes(encrypt("timestamp"));
+    packed[packed.length - 18] ^= 1;
+    expect(() => decrypt(bytesToBase64(packed))).toThrow("DECRYPT_FAILED");
   });
 
   it("rejects wrong keys, tampering, identity substitution and invalid envelopes", () => {
@@ -204,7 +229,7 @@ describe("recipient messages", () => {
         recipientId: bobId,
         ciphertext,
       }),
-    ).toThrow(DecryptError);
+    ).toThrow("DECRYPT_FAILED");
     const packed = base64ToBytes(ciphertext);
     for (const offset of [1, 25, packed.length - 1]) {
       const changed = packed.slice();
@@ -213,15 +238,15 @@ describe("recipient messages", () => {
     }
     expect(() =>
       decrypt(ciphertext, alice, bob, "f".repeat(64), bobId),
-    ).toThrow(DecryptError);
+    ).toThrow("DECRYPT_FAILED");
     expect(() =>
       decrypt(ciphertext, alice, bob, aliceId, "f".repeat(64)),
-    ).toThrow(DecryptError);
+    ).toThrow("DECRYPT_FAILED");
     for (const invalid of ["", "!", bytesToBase64(packed.slice(0, 10))]) {
       expect(() => decrypt(invalid)).toThrow(DecryptError);
     }
     const unknownVersion = packed.slice();
-    unknownVersion[0] = 2;
+    unknownVersion[0] = 3;
     expect(() => decrypt(bytesToBase64(unknownVersion))).toThrow(DecryptError);
   });
 
@@ -292,10 +317,11 @@ describe("recipient messages", () => {
 describe("sender history entries", () => {
   const clientMsgId = "01".repeat(16);
 
-  it("round-trips and binds the history key, message id and peer id", () => {
+  it("round-trips and binds the history key, participants and both message IDs", () => {
     const entry = encryptHistoryEntry({
       historyKey: alice.historyKey,
       clientMsgId,
+      senderId: aliceId,
       peerId: bobId,
       text: "history text",
       sentAt,
@@ -304,22 +330,30 @@ describe("sender history entries", () => {
       decryptHistoryEntry({
         historyKey: alice.historyKey,
         clientMsgId,
+        senderId: aliceId,
         peerId: bobId,
         entry,
       }),
-    ).toEqual({ text: "history text", sentAt });
+    ).toMatchObject({
+      v: 2,
+      type: "text",
+      text: "history text",
+      sentAt,
+    });
     expect(() =>
       decryptHistoryEntry({
         historyKey: bob.historyKey,
         clientMsgId,
+        senderId: aliceId,
         peerId: bobId,
         entry,
       }),
-    ).toThrow(DecryptError);
+    ).toThrow("DECRYPT_FAILED");
     expect(() =>
       decryptHistoryEntry({
         historyKey: alice.historyKey,
         clientMsgId: "02".repeat(16),
+        senderId: aliceId,
         peerId: bobId,
         entry,
       }),
@@ -328,8 +362,29 @@ describe("sender history entries", () => {
       decryptHistoryEntry({
         historyKey: alice.historyKey,
         clientMsgId,
+        senderId: aliceId,
         peerId: aliceId,
         entry,
+      }),
+    ).toThrow(DecryptError);
+    expect(() =>
+      decryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId,
+        senderId: "f".repeat(64),
+        peerId: bobId,
+        entry,
+      }),
+    ).toThrow(DecryptError);
+    const changedSentAt = base64ToBytes(entry);
+    changedSentAt[changedSentAt.length - 18] ^= 1;
+    expect(() =>
+      decryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId,
+        senderId: aliceId,
+        peerId: bobId,
+        entry: bytesToBase64(changedSentAt),
       }),
     ).toThrow(DecryptError);
   });
@@ -350,6 +405,7 @@ describe("sender history entries", () => {
       decryptHistoryEntry({
         historyKey: alice.historyKey,
         clientMsgId,
+        senderId: aliceId,
         peerId: bobId,
         entry:
           "AQMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA0gQ2LVLX0ZISjtniITtdIAyg+HM38K0SjQr9/8BXbYeMc0cZuf1UB0S7sYpBJdLyE+y54dqCLqstpzW76YNj1QvwR1UBHoapfcMoUI=",

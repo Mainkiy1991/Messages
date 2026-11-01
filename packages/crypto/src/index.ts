@@ -273,13 +273,14 @@ const MESSAGE_INFO = encoder.encode("messages/v1/message");
 const HISTORY_INFO = encoder.encode("messages/v1/history-entry");
 const CONTACTS_INFO = encoder.encode("messages/v1/contacts");
 const VERSION = 1;
+const MESSAGE_VERSION_V2 = 2;
 const NONCE_LENGTH = 24;
 const MAX_TEXT_CHARS = 4000;
 const MAX_TEXT_BYTES = 16 * 1024;
 
 export class DecryptError extends Error {
   constructor() {
-    super("Cannot decrypt message");
+    super("DECRYPT_FAILED");
     this.name = "DecryptError";
   }
 }
@@ -318,6 +319,10 @@ export function newClientMsgId(): string {
   return bytesToHex(bytes);
 }
 
+export function newReplayMessageId(): string {
+  return bytesToBase64(randomBytes(16));
+}
+
 export function encryptTextMessage(input: {
   senderEncryptionPrivateKey: Uint8Array;
   recipientEncryptionPublicKey: Uint8Array;
@@ -325,6 +330,7 @@ export function encryptTextMessage(input: {
   recipientId: string;
   text: string;
   sentAt?: number;
+  messageId?: string;
 }): string {
   checkKey(input.senderEncryptionPrivateKey);
   checkKey(input.recipientEncryptionPublicKey);
@@ -332,6 +338,9 @@ export function encryptTextMessage(input: {
   checkText(input.text);
   const sentAt = input.sentAt ?? Date.now();
   checkSentAt(sentAt);
+  const id = input.messageId ?? newReplayMessageId();
+  const idBytes = base64ToBytes(id);
+  if (idBytes.length !== 16) throw new TypeError("Invalid message id");
   const senderEncryptionPublicKey = x25519.getPublicKey(
     input.senderEncryptionPrivateKey,
   );
@@ -354,14 +363,21 @@ export function encryptTextMessage(input: {
   );
   const nonce = randomBytes(NONCE_LENGTH);
   const aad = encoder.encode(
-    `messages/v1/message\n${input.senderId}\n${input.recipientId}`,
+    `messages/v2/message\n${input.senderId}\n${input.recipientId}\n${bytesToHex(senderEncryptionPublicKey)}\n${bytesToHex(input.recipientEncryptionPublicKey)}\n${id}`,
   );
   const plaintext = encoder.encode(
-    JSON.stringify({ v: VERSION, text: input.text, sentAt }),
+    JSON.stringify({
+      v: 2,
+      id,
+      type: "text",
+      text: input.text,
+      sentAt,
+    }),
   );
   return bytesToBase64(
     concat(
-      Uint8Array.of(VERSION),
+      Uint8Array.of(MESSAGE_VERSION_V2),
+      idBytes,
       nonce,
       xchacha20poly1305(key, nonce, aad).encrypt(plaintext),
     ),
@@ -374,13 +390,25 @@ export function decryptTextMessage(input: {
   senderId: string;
   recipientId: string;
   ciphertext: string;
-}): { text: string; sentAt: number } {
+}): { text?: string; sentAt?: number; v?: 2; id?: string; type?: string } {
   try {
     checkKey(input.recipientEncryptionPrivateKey);
     checkKey(input.senderEncryptionPublicKey);
     checkIds(input.senderId, input.recipientId);
     const packed = base64ToBytes(input.ciphertext);
-    const decoded = decodeEnvelope(packed);
+    const isV2 = packed[0] === MESSAGE_VERSION_V2;
+    const idBytes = isV2 ? packed.subarray(1, 17) : undefined;
+    if (
+      isV2 &&
+      (idBytes!.length !== 16 || packed.length < 1 + 16 + NONCE_LENGTH + 16)
+    )
+      throw new Error();
+    const decoded = isV2
+      ? {
+          nonce: packed.subarray(17, 17 + NONCE_LENGTH),
+          body: packed.subarray(17 + NONCE_LENGTH),
+        }
+      : decodeEnvelope(packed);
     const recipientEncryptionPublicKey = x25519.getPublicKey(
       input.recipientEncryptionPrivateKey,
     );
@@ -401,6 +429,38 @@ export function decryptTextMessage(input: {
       ),
       32,
     );
+    if (isV2) {
+      const id = bytesToBase64(idBytes!);
+      const aad = encoder.encode(
+        `messages/v2/message\n${input.senderId}\n${input.recipientId}\n${bytesToHex(input.senderEncryptionPublicKey)}\n${bytesToHex(recipientEncryptionPublicKey)}\n${id}`,
+      );
+      const value = JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(
+          xchacha20poly1305(key, decoded.nonce, aad).decrypt(decoded.body),
+        ),
+      ) as Record<string, unknown>;
+      if (value.v !== 2 || value.id !== id || typeof value.type !== "string")
+        throw new Error();
+      if (typeof value.sentAt !== "number") throw new Error();
+      checkSentAt(value.sentAt);
+      if (value.type !== "text")
+        return { v: 2, id, type: value.type, sentAt: value.sentAt };
+      if (typeof value.text !== "string") throw new Error();
+      checkText(value.text);
+      return {
+        v: 2,
+        id,
+        type: "text",
+        text: value.text,
+        sentAt: value.sentAt,
+      } as {
+        v: 2;
+        id: string;
+        type: string;
+        text: string;
+        sentAt: number;
+      };
+    }
     const aad = encoder.encode(
       `messages/v1/message\n${input.senderId}\n${input.recipientId}`,
     );
@@ -418,23 +478,36 @@ export function encryptHistoryEntry(input: {
   peerId: string;
   text: string;
   sentAt: number;
+  senderId: string;
+  messageId?: string;
 }): string {
   checkKey(input.historyKey);
   checkId(input.clientMsgId, 32, /^[0-9a-f]{32}$/u);
   checkId(input.peerId, 64, /^[0-9a-f]{64}$/u);
+  checkIds(input.senderId, input.peerId);
   checkText(input.text);
   checkSentAt(input.sentAt);
   const key = hkdf(sha256, input.historyKey, HKDF_SALT, HISTORY_INFO, 32);
   const nonce = randomBytes(NONCE_LENGTH);
+  const id = input.messageId ?? newReplayMessageId();
+  const idBytes = base64ToBytes(id);
+  if (idBytes.length !== 16) throw new TypeError("Invalid message id");
   const aad = encoder.encode(
-    `messages/v1/history-entry\n${input.clientMsgId}\n${input.peerId}`,
+    `messages/v2/history-entry\n${input.senderId}\n${input.peerId}\n${id}\n${input.clientMsgId}`,
   );
   const plaintext = encoder.encode(
-    JSON.stringify({ v: VERSION, text: input.text, sentAt: input.sentAt }),
+    JSON.stringify({
+      v: 2,
+      id,
+      type: "text",
+      text: input.text,
+      sentAt: input.sentAt,
+    }),
   );
   return bytesToBase64(
     concat(
-      Uint8Array.of(VERSION),
+      Uint8Array.of(MESSAGE_VERSION_V2),
+      idBytes,
       nonce,
       xchacha20poly1305(key, nonce, aad).encrypt(plaintext),
     ),
@@ -446,14 +519,60 @@ export function decryptHistoryEntry(input: {
   clientMsgId: string;
   peerId: string;
   entry: string;
-}): { text: string; sentAt: number } {
+  senderId: string;
+}): { text?: string; sentAt?: number; v?: 2; id?: string; type?: string } {
   try {
     checkKey(input.historyKey);
     checkId(input.clientMsgId, 32, /^[0-9a-f]{32}$/u);
     checkId(input.peerId, 64, /^[0-9a-f]{64}$/u);
+    checkIds(input.senderId, input.peerId);
     const packed = base64ToBytes(input.entry);
-    const decoded = decodeEnvelope(packed);
+    const isV2 = packed[0] === MESSAGE_VERSION_V2;
+    const idBytes = isV2 ? packed.subarray(1, 17) : undefined;
+    if (
+      isV2 &&
+      (idBytes!.length !== 16 || packed.length < 1 + 16 + NONCE_LENGTH + 16)
+    )
+      throw new Error();
+    const decoded = isV2
+      ? {
+          nonce: packed.subarray(17, 17 + NONCE_LENGTH),
+          body: packed.subarray(17 + NONCE_LENGTH),
+        }
+      : decodeEnvelope(packed);
     const key = hkdf(sha256, input.historyKey, HKDF_SALT, HISTORY_INFO, 32);
+    if (isV2) {
+      const id = bytesToBase64(idBytes!);
+      const aad = encoder.encode(
+        `messages/v2/history-entry\n${input.senderId}\n${input.peerId}\n${id}\n${input.clientMsgId}`,
+      );
+      const value = JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(
+          xchacha20poly1305(key, decoded.nonce, aad).decrypt(decoded.body),
+        ),
+      ) as Record<string, unknown>;
+      if (value.v !== 2 || value.id !== id || typeof value.type !== "string")
+        throw new Error();
+      if (typeof value.sentAt !== "number") throw new Error();
+      checkSentAt(value.sentAt);
+      if (value.type !== "text")
+        return { v: 2, id, type: value.type, sentAt: value.sentAt };
+      if (typeof value.text !== "string") throw new Error();
+      checkText(value.text);
+      return {
+        v: 2,
+        id,
+        type: "text",
+        text: value.text,
+        sentAt: value.sentAt,
+      } as {
+        v: 2;
+        id: string;
+        type: string;
+        text: string;
+        sentAt: number;
+      };
+    }
     const aad = encoder.encode(
       `messages/v1/history-entry\n${input.clientMsgId}\n${input.peerId}`,
     );
@@ -581,7 +700,11 @@ function checkText(text: string): void {
 }
 
 function checkSentAt(sentAt: number): void {
-  if (typeof sentAt !== "number" || !Number.isFinite(sentAt))
+  if (
+    typeof sentAt !== "number" ||
+    !Number.isFinite(sentAt) ||
+    !Number.isFinite(new Date(sentAt).getTime())
+  )
     throw new TypeError("Invalid timestamp");
 }
 

@@ -1,4 +1,5 @@
 import {
+  base64ToBytes,
   decryptContactBook,
   decryptHistoryEntry,
   decryptTextMessage,
@@ -6,6 +7,7 @@ import {
   encryptHistoryEntry,
   encryptTextMessage,
   newClientMsgId,
+  newReplayMessageId,
   type DerivedKeys,
 } from "@messages/crypto";
 import { MAX_CONVERSATIONS } from "@messages/shared";
@@ -52,6 +54,9 @@ export type ChatMessage = {
   frame?: OutgoingFrame;
   arrivalOrder: number;
   seq?: string;
+  replayId?: string;
+  replayAuthor?: string;
+  countedUnread?: boolean;
 };
 export type Chat = {
   peerId: string;
@@ -309,22 +314,30 @@ export class ChatController {
       );
       for (const frame of queued) {
         let text = "";
+        let replayId: string | undefined;
+        let createdAt = new Date().toISOString();
         let decryptFailed = false;
         try {
-          text = decryptHistoryEntry({
+          const decrypted = decryptHistoryEntry({
             historyKey: this.keys.historyKey,
             clientMsgId: frame.clientMsgId,
             peerId: frame.to,
+            senderId: this.userId,
             entry: frame.senderCopy,
-          }).text;
+          });
+          text = decrypted.text ?? "";
+          replayId = decrypted.id;
+          if (decrypted.sentAt !== undefined)
+            createdAt = new Date(decrypted.sentAt).toISOString();
         } catch {
           decryptFailed = true;
         }
         this.upsertMessage(frame.to, {
           id: frame.clientMsgId,
           clientMsgId: frame.clientMsgId,
+          ...(replayId ? { replayId, replayAuthor: this.userId } : {}),
           text,
-          createdAt: new Date().toISOString(),
+          createdAt,
           direction: "out",
           status: "sending",
           frame,
@@ -727,14 +740,15 @@ export class ChatController {
       const messages = await Promise.all(
         visibleMessages.map(async (entry) => {
           try {
-            const text =
+            const decrypted =
               entry.direction === "out"
                 ? decryptHistoryEntry({
                     historyKey: this.keys.historyKey,
                     clientMsgId: entry.clientMsgId,
                     peerId,
+                    senderId: this.userId,
                     entry: entry.payload,
-                  }).text
+                  })
                 : decryptTextMessage({
                     recipientEncryptionPrivateKey:
                       this.keys.encryption.privateKey,
@@ -743,13 +757,24 @@ export class ChatController {
                     senderId: peerId,
                     recipientId: this.userId,
                     ciphertext: entry.payload,
-                  }).text;
+                  });
+            if (decrypted.type && decrypted.type !== "text") return null;
             return {
               id: entry.id,
               clientMsgId: entry.clientMsgId,
               seq: entry.seq,
-              text,
-              createdAt: entry.createdAt,
+              text: decrypted.text ?? "",
+              ...(decrypted.id
+                ? {
+                    replayId: decrypted.id,
+                    replayAuthor:
+                      entry.direction === "out" ? this.userId : peerId,
+                  }
+                : {}),
+              createdAt:
+                decrypted.sentAt !== undefined
+                  ? new Date(decrypted.sentAt).toISOString()
+                  : entry.createdAt,
               direction: entry.direction,
               ...(entry.direction === "out"
                 ? {
@@ -765,6 +790,7 @@ export class ChatController {
               arrivalOrder: this.arrivalOrder++,
             } as ChatMessage;
           } catch {
+            if (isV2Envelope(entry.payload)) return null;
             return {
               id: entry.id,
               clientMsgId: entry.clientMsgId,
@@ -788,20 +814,33 @@ export class ChatController {
             } as ChatMessage;
           }
         }),
+      ).then((items) =>
+        items.filter((item): item is ChatMessage => item !== null),
       );
       this.update({
         chats: sortChats(
           this.state.chats.map((item) =>
             item.peerId === peerId
-              ? {
-                  ...item,
-                  messages: mergeMessages(item.messages, messages),
-                  hasMore: after ? item.hasMore : page.hasMore,
-                  historyLoaded: true,
-                  ...(after ? { historyAfterMore: page.hasMore } : {}),
-                  loadingHistory: false,
-                  historyLoadFailed: false,
-                }
+              ? (() => {
+                  return {
+                    ...item,
+                    ...(() => {
+                      const reconciled = unreadAfterHistoryMerge(
+                        item,
+                        messages,
+                      );
+                      return {
+                        unreadCount: reconciled.unreadCount,
+                        messages: mergeMessages(reconciled.messages, messages),
+                      };
+                    })(),
+                    hasMore: after ? item.hasMore : page.hasMore,
+                    historyLoaded: true,
+                    ...(after ? { historyAfterMore: page.hasMore } : {}),
+                    loadingHistory: false,
+                    historyLoadFailed: false,
+                  };
+                })()
               : item,
           ),
         ),
@@ -1092,6 +1131,7 @@ export class ChatController {
     try {
       const sentAt = (this.deps.now ?? Date.now)();
       const clientMsgId = (this.deps.makeClientMsgId ?? newClientMsgId)();
+      const replayId = newReplayMessageId();
       const frame: OutgoingFrame = {
         type: "send",
         clientMsgId,
@@ -1103,11 +1143,14 @@ export class ChatController {
           recipientId: peerId,
           text,
           sentAt,
+          messageId: replayId,
         }),
         senderCopy: encryptHistoryEntry({
           historyKey: this.keys.historyKey,
           clientMsgId,
           peerId,
+          senderId: this.userId,
+          messageId: replayId,
           text,
           sentAt,
         }),
@@ -1115,6 +1158,8 @@ export class ChatController {
       const message: ChatMessage = {
         id: clientMsgId,
         clientMsgId,
+        replayId,
+        replayAuthor: this.userId,
         text,
         createdAt: new Date(sentAt).toISOString(),
         direction: "out",
@@ -1231,26 +1276,37 @@ export class ChatController {
       )
         return;
       let text = "";
+      let replayId: string | undefined;
+      let sentAt: number | undefined;
       let decryptFailed = false;
       try {
         const senderEncryptionPublicKey = await this.getVerifiedPeerKey(
           frame.from,
         );
-        text = decryptTextMessage({
+        const decrypted = decryptTextMessage({
           recipientEncryptionPrivateKey: this.keys.encryption.privateKey,
           senderEncryptionPublicKey,
           senderId: frame.from,
           recipientId: this.userId,
           ciphertext: frame.ciphertext,
-        }).text;
+        });
+        if (decrypted.type && decrypted.type !== "text") return;
+        text = decrypted.text ?? "";
+        replayId = decrypted.id;
+        sentAt = decrypted.sentAt;
       } catch {
+        if (isV2Envelope(frame.ciphertext)) return;
         /* Render a safe placeholder; WebSocket still acks this frame. */
         decryptFailed = true;
       }
       const message: ChatMessage = {
         id: frame.id,
+        ...(replayId ? { replayId, replayAuthor: frame.from } : {}),
         text,
-        createdAt: frame.createdAt,
+        createdAt:
+          sentAt !== undefined
+            ? new Date(sentAt).toISOString()
+            : frame.createdAt,
         direction: "in",
         ...(typeof frame.seq === "string" && /^\d+$/u.test(frame.seq)
           ? { seq: frame.seq }
@@ -1266,9 +1322,28 @@ export class ChatController {
         messages: [],
         unreadCount: 0,
       };
-      const unreadCount =
-        this.state.activePeer === frame.from ? 0 : chat.unreadCount + 1;
-      this.upsertMessage(frame.from, message, unreadCount);
+      const duplicate = replayId
+        ? chat.messages.find(
+            (item) =>
+              item.direction === "in" &&
+              item.replayId === replayId &&
+              item.replayAuthor === frame.from,
+          )
+        : undefined;
+      if (duplicate) {
+        this.upsertMessage(frame.from, {
+          ...message,
+          countedUnread: duplicate.countedUnread,
+        });
+        return;
+      }
+      const countedUnread = this.state.activePeer !== frame.from;
+      const unreadCount = countedUnread ? chat.unreadCount + 1 : 0;
+      this.upsertMessage(
+        frame.from,
+        countedUnread ? { ...message, countedUnread: true } : message,
+        unreadCount,
+      );
       if (this.state.activePeer === frame.from) this.scheduleRead(frame.from);
       return;
     }
@@ -1455,6 +1530,41 @@ export class ChatController {
 
 export const WAKING_TIMEOUT_MS = 90_000;
 
+export function unreadAfterHistoryMerge(
+  chat: Chat,
+  historyMessages: ChatMessage[],
+): { unreadCount: number; messages: ChatMessage[] } {
+  const compensated = new Set<string>();
+  const messages = chat.messages.map((existing) => {
+    if (
+      existing.direction !== "in" ||
+      !existing.countedUnread ||
+      !existing.replayId ||
+      !historyMessages.some(
+        (message) =>
+          message.direction === "in" &&
+          message.replayId === existing.replayId &&
+          message.replayAuthor === existing.replayAuthor,
+      )
+    )
+      return existing;
+    compensated.add(`${existing.replayAuthor}\n${existing.replayId}`);
+    return { ...existing, countedUnread: false };
+  });
+  return {
+    unreadCount: Math.max(0, chat.unreadCount - compensated.size),
+    messages,
+  };
+}
+
+function isV2Envelope(value: string): boolean {
+  try {
+    return base64ToBytes(value)[0] === 2;
+  } catch {
+    return false;
+  }
+}
+
 function compareMessages(a: ChatMessage, b: ChatMessage): number {
   if (a.seq && b.seq && a.seq !== b.seq)
     return BigInt(a.seq) < BigInt(b.seq) ? -1 : 1;
@@ -1473,17 +1583,31 @@ export function mergeMessages(
   for (const message of incoming) {
     const index = result.findIndex(
       (item) =>
-        item.id === message.id ||
+        (item.id === message.id &&
+          (!(item.replayId && message.replayId) ||
+            item.replayAuthor === message.replayAuthor)) ||
+        (!!item.replayId &&
+          item.replayId === message.replayId &&
+          item.replayAuthor === message.replayAuthor) ||
         (!!item.clientMsgId && item.clientMsgId === message.clientMsgId),
     );
     if (index < 0) result.push(message);
-    else
+    else {
+      const previous = result[index]!;
+      const keepPrevious =
+        !!previous.seq &&
+        !!message.seq &&
+        BigInt(previous.seq) <= BigInt(message.seq);
+      const first = keepPrevious ? message : previous;
+      const chosen = keepPrevious ? previous : message;
       result[index] = {
-        ...result[index]!,
-        ...message,
-        status: mergeStatus(result[index]!.status, message.status),
-        frame: message.frame ?? result[index]!.frame,
+        ...first,
+        ...chosen,
+        status: mergeStatus(previous.status, message.status),
+        frame: message.frame ?? previous.frame,
+        countedUnread: previous.countedUnread || message.countedUnread,
       };
+    }
   }
   return result.sort(compareMessages);
 }
