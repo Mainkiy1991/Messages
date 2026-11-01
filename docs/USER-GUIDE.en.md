@@ -7,10 +7,9 @@ Messages is an open-source non-commercial messenger without email or phone. Sign
 ### Create an account
 
 1. Tap **Create account** on the welcome screen.
-2. Choose the number of seed words: **12 words** or **24 words**. More words mean stronger protection.
-3. Write the generated phrase down on paper and keep it in a safe place. Never show it to anyone.
-4. Tap **I have saved the phrase**, then verify three words from the phrase in order.
-5. Tap **Finish account setup** — your account is ready.
+2. Choose the number of seed words — **12 words** or **24 words** — and tap **Continue**. 24 words give more headroom, while 12 words are enough and easier to write down.
+3. On the **Verify phrase** screen, write all the words down in order on paper and keep the sheet in a safe place. Never show the phrase to anyone.
+4. On the same screen, tick the **I have saved the phrase** checkbox, enter the three requested words in the **Enter word #…** fields and tap **Finish account setup** — your account is ready.
 
 ### Sign in on another device
 
@@ -33,27 +32,32 @@ Messages is an open-source non-commercial messenger without email or phone. Sign
 
 ## Messages and statuses
 
-When sending a message, the status changes in sequence:
+The status of your message is shown under it and changes in order:
 
 - **sending** — the message is being transmitted to the server.
 - **sent** — the server has accepted the message.
-- **delivered** — the message has been delivered to the recipient's device.
-- **read** — the recipient has opened the chat and the message is marked as read.
-- **failed** — could not send. Check your connection and tap **Retry**.
+- **delivered** — the message has reached the recipient's device.
+- **read** — the recipient opened the chat in a visible tab and the message is marked as read.
+- **failed** — the message could not be sent. Check your connection and tap **Retry**.
 
-The connection status is shown next to the contact's name or ID:
+The contact's status is shown next to their name or ID:
 
-- **online** — the contact is online.
-- **offline** — the connection is lost.
+- **online** — the contact is in the messenger right now.
+- **last seen …** — the contact is offline, followed by the time of their last visit, for example "last seen 5 min. ago" or "last seen yesterday at 2:30 PM". While there is no data yet, no status is shown.
+
+Separately, the app header has an indicator of your own connection: **connected**, **connecting…**, or **offline**. It describes your device, not the contact.
 
 ## PIN (optional)
 
-PIN adds extra protection for local keys on this device. It is not sent to the server and is not stored separately from the encrypted session.
+The PIN encrypts the local keys on this device. It is never sent to the server: the server does not know it and cannot check it.
 
-- **What it does:** after enabling PIN, keys are removed from device storage and exist in memory only after unlocking. Someone who gets access to your browser cannot decrypt the keys or read history without the PIN.
-- **How to enable:** in Profile, tap **PIN**, then **Enable PIN**, create and confirm your PIN. We recommend at least **8 characters**, preferably with letters. A short PIN is easier to guess.
+- **What it gives you:** the keys stay on the device but are stored encrypted, and they cannot be opened without the PIN. While the session is locked, someone with access to your browser cannot decrypt the keys or read your history.
+- **Honest limits:** the PIN protects you only while the session is locked. It does not protect an unlocked session: once you have entered the PIN, the keys sit in the page memory while you work. The pauses after wrong entries can be bypassed by someone with access to the device's data, so PIN length matters: we recommend at least 8 characters, preferably with letters.
+- **Message queue:** enabling the PIN clears the queue of messages that have not been sent yet. The app asks for confirmation and shows how many messages will be deleted.
+- **How to enable:** in Profile open **PIN**, tap **Enable PIN**, enter a PIN in the **New PIN** and **Confirm PIN** fields and tap **Set PIN**. The current session keeps working; after you reload the page it is locked, and the app shows **Enter your PIN to unlock** with the **Unlock** button.
+- **Change or disable:** in Profile, in the **PIN** section, tap **Change PIN** (the current PIN is required) or **Disable PIN**.
 - **Forgot PIN:** tap **Forgot PIN?**, then **End session**. Keys on this device will be erased. To use the account again, sign in with your seed phrase. Messages remain on the server and are restored after you sign in again.
-- **Pauses after incorrect entries:** the first four wrong attempts have no pause. After the fifth — a 5-minute pause, after the sixth — 15 minutes, after the seventh and every subsequent — 60 minutes.
+- **Pauses after incorrect entries:** the first four wrong attempts have no pause, after the fifth — a 5-minute pause, after the sixth — 15 minutes, after the seventh and every subsequent — 60 minutes. A successful unlock resets the counter. The minimum PIN length is 6 characters, but that is only a technical minimum.
 
 ## Sign out
 
