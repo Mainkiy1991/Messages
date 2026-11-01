@@ -1023,6 +1023,9 @@ function App() {
             <ol className="seed-list" data-testid="seed-phrase">
               {phrase.split(" ").map((word, i) => (
                 <li key={i}>
+                  <span className="seed-index" aria-hidden="true">
+                    {i + 1}.
+                  </span>
                   <span>{word}</span>
                 </li>
               ))}

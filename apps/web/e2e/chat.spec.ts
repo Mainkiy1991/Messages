@@ -92,14 +92,23 @@ async function openUser(browser: Browser): Promise<User> {
   return user;
 }
 
+async function showSeedPhrase(page: Page, wordCount: 12 | 24 = 12) {
+  await page.getByTestId("create-account").click();
+  await page.locator(".auth-card select").selectOption(String(wordCount));
+  await page.locator(".auth-card > .primary").click();
+  await expect(page.getByTestId("seed-phrase")).toBeVisible();
+}
+
 async function createAccount(
   page: Page,
+  wordCount: 12 | 24 = 12,
 ): Promise<{ phrase: string; id: string }> {
-  await page.getByTestId("create-account").click();
-  await page.getByLabel("Number of words").selectOption("12");
-  await page.getByRole("button", { name: "Continue" }).click();
+  await showSeedPhrase(page, wordCount);
   const words = (
-    await page.getByTestId("seed-phrase").locator("li").allTextContents()
+    await page
+      .getByTestId("seed-phrase")
+      .locator("li > span:last-child")
+      .allTextContents()
   ).map((word) => word.trim());
   const phrase = words.join(" ");
   const verificationInputs = page.locator('form input[autocomplete="off"]');
@@ -169,6 +178,85 @@ function chatWith(page: Page, peerId: string) {
 }
 
 test.describe("real browser chat", () => {
+  test("seed phrase numbers and words fit their cells at mobile widths", async ({
+    browser,
+  }) => {
+    const user = await openUser(browser);
+    const page = user.page;
+
+    for (const language of ["ru", "en", "uk"]) {
+      await page.evaluate(
+        (value) => localStorage.setItem("messages-lang", value),
+        language,
+      );
+      await page.reload();
+
+      for (const width of [360, 320]) {
+        await page.setViewportSize({ width, height: 900 });
+        for (const wordCount of [12, 24] as const) {
+          await showSeedPhrase(page, wordCount);
+          const seedList = page.getByTestId("seed-phrase");
+          await expect(seedList.locator("li")).toHaveCount(wordCount);
+          const layout = await seedList.evaluate((list) => {
+            const items = [...list.querySelectorAll("li")];
+            const rect = (element: Element) => {
+              const box = element.getBoundingClientRect();
+              return { left: box.left, right: box.right, width: box.width };
+            };
+            return items.map((item) => {
+              const number = item.querySelector(".seed-index")!;
+              const word = item.querySelector("span:last-child")!;
+              return {
+                item: rect(item),
+                number: rect(number),
+                word: rect(word),
+                wordScrollWidth: word.scrollWidth,
+                wordClientWidth: word.clientWidth,
+              };
+            });
+          });
+
+          for (const item of layout) {
+            expect(item.number.right).toBeLessThanOrEqual(item.item.right + 1);
+            expect(item.word.right).toBeLessThanOrEqual(item.item.right + 1);
+            expect(item.wordScrollWidth).toBeLessThanOrEqual(
+              item.wordClientWidth,
+            );
+          }
+          const leftColumn = layout.filter((_, index) => index % 2 === 0);
+          const rightColumn = layout.filter((_, index) => index % 2 === 1);
+          expect(
+            Math.max(...leftColumn.map((item) => item.item.right)),
+          ).toBeLessThanOrEqual(
+            Math.min(...rightColumn.map((item) => item.item.left)) + 1,
+          );
+
+          await seedList
+            .locator("li span:last-child")
+            .first()
+            .evaluate((word) => {
+              word.textContent = "absolute";
+            });
+          const longWord = await seedList
+            .locator("li span:last-child")
+            .first()
+            .evaluate((word) => ({
+              scrollWidth: word.scrollWidth,
+              clientWidth: word.clientWidth,
+              right: word.getBoundingClientRect().right,
+              itemRight: word.parentElement!.getBoundingClientRect().right,
+            }));
+          expect(longWord.scrollWidth).toBeLessThanOrEqual(
+            longWord.clientWidth,
+          );
+          expect(longWord.right).toBeLessThanOrEqual(longWord.itemRight + 1);
+
+          await page.goto("/");
+        }
+      }
+    }
+  });
+
   test("welcome controls keep one full-width layout in every language", async ({
     browser,
   }) => {

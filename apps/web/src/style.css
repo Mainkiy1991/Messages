@@ -389,14 +389,32 @@ select {
 }
 .seed-list {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px 20px;
-  padding-left: 32px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 .seed-list li {
+  display: grid;
+  grid-template-columns: 2.5em minmax(0, 1fr);
+  align-items: start;
+  column-gap: 8px;
+  min-width: 0;
   padding: 8px;
   background: #f6f6fa;
   border-radius: 8px;
+}
+.seed-index {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.seed-list li > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.auth-card .warning {
+  margin: 0;
 }
 .checkbox {
   display: flex;
@@ -788,10 +806,6 @@ button.primary.pin-action-incorrect:disabled {
   }
   .welcome-language {
     margin-bottom: 14px;
-  }
-  .seed-list {
-    grid-template-columns: repeat(2, 1fr);
-    gap: 6px 14px;
   }
   .message {
     max-width: 88%;
