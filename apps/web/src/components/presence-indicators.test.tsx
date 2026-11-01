@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { formatPresence } from "../lib/presence.js";
 import {
   PresenceDot,
   PresenceLabel,
@@ -35,6 +36,13 @@ function renderIndicators(
 }
 
 describe("chat presence indicators", () => {
+  it("formats Ukrainian online and last-seen labels", () => {
+    expect(formatPresence(true, null, "uk", now)).toBe("у мережі");
+    expect(formatPresence(false, offline.lastSeenAt, "uk", now)).toBe(
+      "був(ла) в мережі 10 хв тому",
+    );
+  });
+
   it("shows online in the header and the green list dot", () => {
     const html = renderIndicators("connected", online);
     expect(html).toContain('data-testid="presence-dot"');

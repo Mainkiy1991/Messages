@@ -6,6 +6,8 @@
 
 Messages — открытый мессенджер с входом по сид-фразе и шифрованием на клиенте. Приватные данные не покидают устройство.
 
+Интерфейс доступен на русском, английском и украинском языках.
+
 Пример формата строки подключения PostgreSQL: `DATABASE_URL=postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=verify-full`.
 
 **Статус:** ранняя разработка; проект не проходил аудит безопасности.
@@ -127,6 +129,8 @@ pnpm test:e2e
 ## English
 
 Messages is an open-source messenger with seed-phrase sign-in and client-side encryption. Private data stays on the user's device.
+
+The interface is available in Russian, English, and Ukrainian.
 
 Example PostgreSQL connection string: `DATABASE_URL=postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=verify-full`.
 

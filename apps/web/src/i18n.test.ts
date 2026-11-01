@@ -6,12 +6,14 @@ import {
   getInitialLanguage,
   saveLanguagePreference,
   strings,
+  ukrainianPlural,
 } from "./i18n.js";
 
 describe("localization", () => {
   it.each([
     ["ru-RU", "ru"],
-    ["uk", "ru"],
+    ["uk", "uk"],
+    ["uk-UA", "uk"],
     ["be", "ru"],
     ["en-US", "en"],
     ["de", "en"],
@@ -27,7 +29,9 @@ describe("localization", () => {
     expect(getInitialLanguage(["en-US"], { getItem: () => "ru" })).toBe("ru");
   });
   it("ignores a damaged saved preference", () => {
-    expect(getInitialLanguage(["ru-RU"], { getItem: () => "uk" })).toBe("ru");
+    expect(getInitialLanguage(["ru-RU"], { getItem: () => "invalid" })).toBe(
+      "ru",
+    );
   });
   it("falls back to browser detection when local storage is unavailable", () => {
     expect(
@@ -45,16 +49,21 @@ describe("localization", () => {
       }),
     ).not.toThrow();
   });
-  it("keeps Russian and English translation keys in sync", () => {
+  it("keeps all translation keys in sync", () => {
     expect(Object.keys(strings.ru).sort()).toEqual(
+      Object.keys(strings.en).sort(),
+    );
+    expect(Object.keys(strings.uk).sort()).toEqual(
       Object.keys(strings.en).sort(),
     );
   });
   it("shows translated text after changing the selected language", () => {
-    let language: "ru" | "en" = "ru";
+    let language: "ru" | "en" | "uk" = "ru";
     expect(strings[language].create).toBe("Создать аккаунт");
     language = "en";
     expect(strings[language].create).toBe("Create account");
+    language = "uk";
+    expect(strings[language].create).toBe("Створити обліковий запис");
   });
   it("saves the manual language under the expected preference key", () => {
     const setItem = vi.fn();
@@ -73,6 +82,23 @@ describe("localization", () => {
       "Unsent messages in this chat will also be deleted.",
     );
     expect(strings.en.deleteChatFailed).toContain("try again");
+  });
+  it("uses Ukrainian plural forms, including 11–14 exceptions", () => {
+    expect(ukrainianPlural(1, "one", "few", "many")).toBe("one");
+    expect(ukrainianPlural(2, "one", "few", "many")).toBe("few");
+    expect(ukrainianPlural(4, "one", "few", "many")).toBe("few");
+    for (const count of [5, 11, 12, 13, 14, 25]) {
+      expect(ukrainianPlural(count, "one", "few", "many")).toBe("many");
+    }
+  });
+  it("formats Ukrainian dates with the Ukrainian locale", async () => {
+    const { getLanguageLocale } = await import("./i18n.js");
+    expect(getLanguageLocale("uk")).toBe("uk-UA");
+    expect(
+      new Date("2026-03-08T12:00:00Z").toLocaleDateString("uk-UA", {
+        month: "long",
+      }),
+    ).toBe("березень");
   });
 });
 
