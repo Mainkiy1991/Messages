@@ -1,6 +1,8 @@
 # Messages
 
-**[Русский](#русский) | [English](#english)**
+**[Русский](#русский) | [English](#english) | [Українська](#українська)**
+
+**User guide:** [RU](docs/USER-GUIDE.ru.md) | [EN](docs/USER-GUIDE.en.md) | [UK](docs/USER-GUIDE.uk.md)
 
 ## Русский
 
@@ -247,3 +249,15 @@ The command builds the apps, applies migrations, and starts the real server and 
 - `apps/web` — React, Vite, and TypeScript.
 - `apps/server` — Fastify API, PostgreSQL, migrations, challenge-response, and sessions.
 - `packages/crypto` — BIP-39, Ed25519, X25519, signing functions, and message encryption.
+
+## Українська
+
+Messages — відкритий месенджер з входом за сід-фразою та шифруванням на клієнті. Ключі та вміст повідомлень не залишають пристрій у відкритому вигляді; сервер бачить лише службові дані (хто кому пише і коли).
+
+Інтерфейс доступний російською, англійською та українською мовами.
+
+**Статус:** рання розробка; проєкт не проходив аудит безпеки.
+
+**Посібник користувача:** [Українська](docs/USER-GUIDE.uk.md).
+
+Інструкції із запуску сервера, вебклієнта та перевірок — у розділах [Русский](#русский) і [English](#english).
