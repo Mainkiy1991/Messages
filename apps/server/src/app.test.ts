@@ -15,6 +15,7 @@ import {
   signAuth,
   signKeyBinding,
   generateMnemonic,
+  newReplayMessageId,
 } from "@messages/crypto";
 import { buildApp } from "./app.js";
 import { getWebSocketMemoryState } from "./ws.js";
@@ -2353,6 +2354,7 @@ suite("server authentication (PostgreSQL)", () => {
     const sender = await createAccount();
     const recipient = await createAccount();
     const clientMsgId = randomId();
+    const replayId = newReplayMessageId();
     const sentAt = 1_700_000_000_000;
     const text = "Сквозное сообщение 🚀";
     const ciphertext = encryptTextMessage({
@@ -2362,11 +2364,14 @@ suite("server authentication (PostgreSQL)", () => {
       recipientId: recipient.userId,
       text,
       sentAt,
+      messageId: replayId,
     });
     const senderCopy = encryptHistoryEntry({
       historyKey: sender.keys.historyKey,
       clientMsgId,
       peerId: recipient.userId,
+      senderId: sender.userId,
+      messageId: replayId,
       text,
       sentAt,
     });
@@ -2401,9 +2406,10 @@ suite("server authentication (PostgreSQL)", () => {
         historyKey: sender.keys.historyKey,
         clientMsgId: senderMessage.clientMsgId,
         peerId: recipient.userId,
+        senderId: sender.userId,
         entry: senderMessage.payload,
       }),
-    ).toEqual({ text, sentAt });
+    ).toMatchObject({ v: 2, id: replayId, type: "text", text });
     expect(
       decryptTextMessage({
         recipientEncryptionPrivateKey: recipient.keys.encryption.privateKey,
@@ -2412,7 +2418,7 @@ suite("server authentication (PostgreSQL)", () => {
         recipientId: recipient.userId,
         ciphertext: recipientMessage.payload,
       }),
-    ).toEqual({ text, sentAt });
+    ).toMatchObject({ v: 2, id: replayId, type: "text", text });
     socket.close();
   });
 });
