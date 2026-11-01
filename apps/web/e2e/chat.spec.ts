@@ -43,7 +43,9 @@ let activeUsers: User[] = [];
 async function openUser(browser: Browser): Promise<User> {
   const context = await browser.newContext();
   await context.addInitScript(() => {
-    localStorage.setItem("messages-lang", "en");
+    if (localStorage.getItem("messages-lang") === null) {
+      localStorage.setItem("messages-lang", "en");
+    }
   });
   const page = await context.newPage();
   const user: User = {
