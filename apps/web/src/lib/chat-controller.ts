@@ -750,7 +750,7 @@ export class ChatController {
                     recipientId: this.userId,
                     ciphertext: entry.payload,
                   });
-            if (decrypted.type !== "text") return null;
+            if (decrypted.type && decrypted.type !== "text") return null;
             return {
               id: entry.id,
               clientMsgId: entry.clientMsgId,
@@ -1273,7 +1273,7 @@ export class ChatController {
           recipientId: this.userId,
           ciphertext: frame.ciphertext,
         });
-        if (decrypted.type !== "text") return;
+        if (decrypted.type && decrypted.type !== "text") return;
         text = decrypted.text ?? "";
         replayId = decrypted.id;
       } catch {

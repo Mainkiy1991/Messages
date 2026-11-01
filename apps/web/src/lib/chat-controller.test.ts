@@ -87,6 +87,8 @@ async function waitFor(
 
 function makeController(
   options: {
+    keys?: typeof alice;
+    userId?: string;
     userKeys?: (peerId: string, token: string) => Promise<UserKeys>;
     initialSession?: ServerSession | null;
     login?: () => Promise<ServerSession>;
@@ -110,8 +112,8 @@ function makeController(
   const tokens: string[] = [];
   let loginCount = 0;
   const controller = new ChatController(
-    alice,
-    aliceId,
+    options.keys ?? alice,
+    options.userId ?? aliceId,
     options.initialSession ?? null,
     {
       login: async () => {
@@ -149,9 +151,9 @@ function makeController(
   return { controller, sockets, tokens, getLoginCount: () => loginCount };
 }
 
-async function authenticate(socket: TestSocket) {
+async function authenticate(socket: TestSocket, userId = aliceId) {
   socket.open();
-  socket.frame({ type: "auth_ok", userId: aliceId });
+  socket.frame({ type: "auth_ok", userId });
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
@@ -159,6 +161,36 @@ describe("ChatController", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("continues to display v1 messages without a type discriminator", async () => {
+    const f = makeController({
+      keys: bob,
+      userId: bobId,
+      initialSession: { ...session("token-b"), userId: bobId },
+    });
+    f.controller.start();
+    await waitFor(() => f.sockets.length === 1);
+    await authenticate(f.sockets[0]!, bobId);
+    await f.controller.openChat(aliceId);
+    f.sockets[0]!.frame({
+      type: "message",
+      id: "legacy-row",
+      from: aliceId,
+      seq: "1",
+      ciphertext:
+        "AQICAgICAgICAgICAgICAgICAgICAgICAgeF2KPOnZtjgFOw3w6S1atAt23V1Swl41qiLEmNa16oSRlJ546e4gHvOOIaDBqDcVAtlbJhAb5xyeG/3VW7Ggo/Wf0N7IQQ5x1TZRM=",
+      createdAt: new Date().toISOString(),
+    });
+    await waitFor(
+      () =>
+        f.controller.getSnapshot().chats.find((chat) => chat.peerId === aliceId)
+          ?.messages[0]?.text === "Тест vector 👋",
+    );
+    expect(f.controller.getSnapshot().chats[0]?.messages[0]?.text).toBe(
+      "Тест vector 👋",
+    );
+    f.controller.stop();
   });
 
   it("preserves sending → sent → delivered and never downgrades on late sent", async () => {
