@@ -783,6 +783,9 @@ button.primary.pin-action-incorrect:disabled {
   .card:not(:has(.messenger)) {
     padding: 24px 18px;
   }
+  .welcome-card h1 {
+    min-height: 2lh;
+  }
   .welcome-language {
     margin-bottom: 14px;
   }

@@ -894,7 +894,7 @@ function App() {
         </div>
       </header>
       <section
-        className={`card${["welcome", "create", "verify", "login"].includes(screen) ? " auth-card" : ""}`}
+        className={`card${["welcome", "create", "verify", "login"].includes(screen) ? " auth-card" : ""}${screen === "welcome" ? " welcome-card" : ""}`}
       >
         {screen === "locked" && (
           <div
