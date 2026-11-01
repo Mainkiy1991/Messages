@@ -408,6 +408,8 @@ select {
 .seed-index {
   text-align: right;
   font-variant-numeric: tabular-nums;
+  user-select: none;
+  -webkit-user-select: none;
 }
 .seed-list li > span:last-child {
   min-width: 0;
