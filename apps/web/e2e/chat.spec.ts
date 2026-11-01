@@ -169,6 +169,107 @@ function chatWith(page: Page, peerId: string) {
 }
 
 test.describe("real browser chat", () => {
+  test("welcome controls keep one full-width layout in every language", async ({
+    browser,
+  }) => {
+    const user = await openUser(browser);
+    const page = user.page;
+    const languageSelect = page.locator(".welcome-language-select");
+
+    for (const width of [360, 1280]) {
+      await page.setViewportSize({ width, height: 800 });
+      for (const language of ["ru", "en", "uk"]) {
+        await languageSelect.selectOption(language);
+        await expect(page.locator("html")).toHaveAttribute("lang", language);
+        const layout = await page.evaluate(() => {
+          const card = document.querySelector(".auth-card")!;
+          const elements = [
+            document.querySelector('[data-testid="create-account"]')!,
+            document.querySelector('[data-testid="open-login"]')!,
+            document.querySelector(".welcome-language-select")!,
+          ];
+          const cardRect = card.getBoundingClientRect();
+          return {
+            card: { left: cardRect.left, right: cardRect.right },
+            elements: elements.map((element) => {
+              const rect = element.getBoundingClientRect();
+              return {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+                right: rect.right,
+                scrollWidth: element.scrollWidth,
+                clientWidth: element.clientWidth,
+              };
+            }),
+          };
+        });
+        const [create, login, select] = layout.elements;
+        for (const element of layout.elements) {
+          expect(Math.abs(element.x - create!.x)).toBeLessThanOrEqual(1);
+          expect(Math.abs(element.width - create!.width)).toBeLessThanOrEqual(
+            1,
+          );
+          expect(element.height).toBe(44);
+          expect(element.x).toBeGreaterThanOrEqual(layout.card.left);
+          expect(element.right).toBeLessThanOrEqual(layout.card.right);
+          expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth);
+        }
+        expect(login!.y).toBeGreaterThan(create!.y);
+        expect(select!.y).toBeGreaterThan(login!.y);
+
+        if (language === "ru") {
+          const baseline = layout.elements.map(({ x, y, width, height }) => ({
+            x,
+            y,
+            width,
+            height,
+          }));
+          for (const nextLanguage of ["en", "uk"]) {
+            await languageSelect.selectOption(nextLanguage);
+            const changed = await page.evaluate(() =>
+              [
+                document.querySelector('[data-testid="create-account"]')!,
+                document.querySelector('[data-testid="open-login"]')!,
+                document.querySelector(".welcome-language-select")!,
+              ].map((element) => {
+                const rect = element.getBoundingClientRect();
+                return {
+                  x: rect.x,
+                  y: rect.y,
+                  width: rect.width,
+                  height: rect.height,
+                };
+              }),
+            );
+            changed.forEach((item, index) => {
+              expect(Math.abs(item.y - baseline[index]!.y)).toBeLessThanOrEqual(
+                1,
+              );
+              expect(Math.abs(item.x - baseline[index]!.x)).toBeLessThanOrEqual(
+                1,
+              );
+              expect(
+                Math.abs(item.width - baseline[index]!.width),
+              ).toBeLessThanOrEqual(1);
+            });
+          }
+          await languageSelect.selectOption("ru");
+        }
+      }
+    }
+
+    await languageSelect.selectOption("uk");
+    await expect(page.locator("html")).toHaveAttribute("lang", "uk");
+    expect(
+      await page.evaluate(() => localStorage.getItem("messages-lang")),
+    ).toBe("uk");
+    await page.reload();
+    await expect(page.locator("html")).toHaveAttribute("lang", "uk");
+    await expect(page.locator(".welcome-language-select")).toHaveValue("uk");
+  });
+
   test.beforeEach(async ({ serverControl }) => {
     activeUsers = [];
     await serverControl.stop();
