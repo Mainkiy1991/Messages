@@ -893,7 +893,9 @@ function App() {
           )}
         </div>
       </header>
-      <section className="card">
+      <section
+        className={`card${["welcome", "create", "verify", "login"].includes(screen) ? " auth-card" : ""}`}
+      >
         {screen === "locked" && (
           <div
             className="pin-lock-screen"
@@ -961,22 +963,6 @@ function App() {
         )}
         {screen === "welcome" && (
           <>
-            <label className="welcome-language">
-              {t.language}
-              <select
-                aria-label={t.language}
-                value={language}
-                onChange={(event) =>
-                  changeLanguage(event.target.value as Language)
-                }
-              >
-                {supportedLanguages.map((entry) => (
-                  <option key={entry.code} value={entry.code}>
-                    {entry.name}
-                  </option>
-                ))}
-              </select>
-            </label>
             <h1>{t.welcome}</h1>
             <button
               data-testid="create-account"
@@ -996,6 +982,20 @@ function App() {
             >
               {t.login}
             </button>
+            <select
+              className="welcome-language-select"
+              aria-label={t.language}
+              value={language}
+              onChange={(event) =>
+                changeLanguage(event.target.value as Language)
+              }
+            >
+              {supportedLanguages.map((entry) => (
+                <option key={entry.code} value={entry.code}>
+                  {entry.name}
+                </option>
+              ))}
+            </select>
           </>
         )}
         {screen === "create" && (
