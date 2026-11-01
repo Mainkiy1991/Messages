@@ -190,6 +190,9 @@ describe("ChatController", () => {
     expect(f.controller.getSnapshot().chats[0]?.messages[0]?.text).toBe(
       "Тест vector 👋",
     );
+    expect(f.controller.getSnapshot().chats[0]?.messages[0]?.createdAt).toBe(
+      new Date(1_700_000_000_000).toISOString(),
+    );
     f.controller.stop();
   });
 
@@ -635,6 +638,7 @@ describe("ChatController", () => {
     const first: ChatMessage = {
       id: "row-8",
       replayId: "AQEBAQEBAQEBAQEBAQEBAQ==",
+      replayAuthor: charlieId,
       seq: "8",
       text: "once",
       createdAt: "2025-01-01T00:00:08Z",
@@ -667,6 +671,27 @@ describe("ChatController", () => {
       arrivalOrder: 1,
     };
     expect(mergeMessages([first], [second])).toHaveLength(2);
+  });
+
+  it("does not merge v2 messages with the same ID from different authors", () => {
+    const sent: ChatMessage = {
+      id: "sent-row",
+      replayId: "AQEBAQEBAQEBAQEBAQEBAQ==",
+      replayAuthor: aliceId,
+      text: "sent by me",
+      createdAt: "2025-01-01T00:00:00Z",
+      direction: "out",
+      arrivalOrder: 0,
+    };
+    const received: ChatMessage = {
+      ...sent,
+      id: "received-row",
+      replayAuthor: bobId,
+      text: "sent by peer",
+      direction: "in",
+      arrivalOrder: 1,
+    };
+    expect(mergeMessages([sent], [received])).toHaveLength(2);
   });
 
   it("orders merged history and advances its cursor numerically across digit boundaries", async () => {

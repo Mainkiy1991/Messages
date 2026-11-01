@@ -130,6 +130,7 @@ describe("strict identifier casing", () => {
       encryptHistoryEntry({
         historyKey: alice.historyKey,
         clientMsgId: "A" + "0".repeat(31),
+        senderId: aliceId,
         peerId: bobId,
         text: "hello",
         sentAt,
@@ -139,6 +140,7 @@ describe("strict identifier casing", () => {
       encryptHistoryEntry({
         historyKey: alice.historyKey,
         clientMsgId: "0".repeat(32),
+        senderId: aliceId,
         peerId: "A" + bobId.slice(1),
         text: "hello",
         sentAt,
@@ -185,7 +187,12 @@ describe("recipient messages", () => {
       "😀".repeat(4000),
     ]) {
       const ciphertext = encrypt(text);
-      expect(decrypt(ciphertext)).toMatchObject({ v: 2, type: "text", text });
+      expect(decrypt(ciphertext)).toMatchObject({
+        v: 2,
+        type: "text",
+        text,
+        sentAt,
+      });
       expect(ciphertext.length).toBeLessThan(64 * 1024);
     }
   });
@@ -199,6 +206,9 @@ describe("recipient messages", () => {
     const packed = base64ToBytes(ciphertext);
     packed[1] ^= 1;
     expect(() => decrypt(bytesToBase64(packed))).toThrow(DecryptError);
+    const changedSentAt = base64ToBytes(ciphertext);
+    changedSentAt[changedSentAt.length - 18] ^= 1;
+    expect(() => decrypt(bytesToBase64(changedSentAt))).toThrow(DecryptError);
   });
 
   it("rejects wrong keys, tampering, identity substitution and invalid envelopes", () => {
@@ -299,10 +309,11 @@ describe("recipient messages", () => {
 describe("sender history entries", () => {
   const clientMsgId = "01".repeat(16);
 
-  it("round-trips and binds the history key, message id and peer id", () => {
+  it("round-trips and binds the history key, participants and both message IDs", () => {
     const entry = encryptHistoryEntry({
       historyKey: alice.historyKey,
       clientMsgId,
+      senderId: aliceId,
       peerId: bobId,
       text: "history text",
       sentAt,
@@ -311,14 +322,30 @@ describe("sender history entries", () => {
       decryptHistoryEntry({
         historyKey: alice.historyKey,
         clientMsgId,
+        senderId: aliceId,
         peerId: bobId,
         entry,
       }),
-    ).toMatchObject({ v: 2, type: "text", text: "history text" });
+    ).toMatchObject({
+      v: 2,
+      type: "text",
+      text: "history text",
+      sentAt,
+    });
     expect(() =>
       decryptHistoryEntry({
         historyKey: bob.historyKey,
         clientMsgId,
+        senderId: aliceId,
+        peerId: bobId,
+        entry,
+      }),
+    ).toThrow(DecryptError);
+    expect(() =>
+      decryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId: "02".repeat(16),
+        senderId: aliceId,
         peerId: bobId,
         entry,
       }),
@@ -327,20 +354,7 @@ describe("sender history entries", () => {
       decryptHistoryEntry({
         historyKey: alice.historyKey,
         clientMsgId,
-        peerId: bobId,
-        entry: bytesToBase64(
-          (() => {
-            const changed = base64ToBytes(entry);
-            changed[1] ^= 1;
-            return changed;
-          })(),
-        ),
-      }),
-    ).toThrow(DecryptError);
-    expect(() =>
-      decryptHistoryEntry({
-        historyKey: alice.historyKey,
-        clientMsgId,
+        senderId: aliceId,
         peerId: aliceId,
         entry,
       }),
@@ -352,6 +366,17 @@ describe("sender history entries", () => {
         senderId: "f".repeat(64),
         peerId: bobId,
         entry,
+      }),
+    ).toThrow(DecryptError);
+    const changedSentAt = base64ToBytes(entry);
+    changedSentAt[changedSentAt.length - 18] ^= 1;
+    expect(() =>
+      decryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId,
+        senderId: aliceId,
+        peerId: bobId,
+        entry: bytesToBase64(changedSentAt),
       }),
     ).toThrow(DecryptError);
   });
@@ -372,6 +397,7 @@ describe("sender history entries", () => {
       decryptHistoryEntry({
         historyKey: alice.historyKey,
         clientMsgId,
+        senderId: aliceId,
         peerId: bobId,
         entry:
           "AQMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA0gQ2LVLX0ZISjtniITtdIAyg+HM38K0SjQr9/8BXbYeMc0cZuf1UB0S7sYpBJdLyE+y54dqCLqstpzW76YNj1QvwR1UBHoapfcMoUI=",

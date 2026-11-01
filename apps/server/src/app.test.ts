@@ -2409,7 +2409,7 @@ suite("server authentication (PostgreSQL)", () => {
         senderId: sender.userId,
         entry: senderMessage.payload,
       }),
-    ).toMatchObject({ v: 2, id: replayId, type: "text", text });
+    ).toMatchObject({ v: 2, id: replayId, type: "text", text, sentAt });
     expect(
       decryptTextMessage({
         recipientEncryptionPrivateKey: recipient.keys.encryption.privateKey,
@@ -2418,7 +2418,7 @@ suite("server authentication (PostgreSQL)", () => {
         recipientId: recipient.userId,
         ciphertext: recipientMessage.payload,
       }),
-    ).toMatchObject({ v: 2, id: replayId, type: "text", text });
+    ).toMatchObject({ v: 2, id: replayId, type: "text", text, sentAt });
     socket.close();
   });
 });

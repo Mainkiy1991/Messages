@@ -366,7 +366,13 @@ export function encryptTextMessage(input: {
     `messages/v2/message\n${input.senderId}\n${input.recipientId}\n${bytesToHex(senderEncryptionPublicKey)}\n${bytesToHex(input.recipientEncryptionPublicKey)}\n${id}`,
   );
   const plaintext = encoder.encode(
-    JSON.stringify({ v: 2, id, type: "text", text: input.text }),
+    JSON.stringify({
+      v: 2,
+      id,
+      type: "text",
+      text: input.text,
+      sentAt,
+    }),
   );
   return bytesToBase64(
     concat(
@@ -435,14 +441,24 @@ export function decryptTextMessage(input: {
       ) as Record<string, unknown>;
       if (value.v !== 2 || value.id !== id || typeof value.type !== "string")
         throw new Error();
-      if (value.type !== "text") return { v: 2, id, type: value.type };
+      if (typeof value.sentAt !== "number") throw new Error();
+      checkSentAt(value.sentAt);
+      if (value.type !== "text")
+        return { v: 2, id, type: value.type, sentAt: value.sentAt };
       if (typeof value.text !== "string") throw new Error();
       checkText(value.text);
-      return { v: 2, id, type: "text", text: value.text } as {
+      return {
+        v: 2,
+        id,
+        type: "text",
+        text: value.text,
+        sentAt: value.sentAt,
+      } as {
         v: 2;
         id: string;
         type: string;
         text: string;
+        sentAt: number;
       };
     }
     const aad = encoder.encode(
@@ -462,25 +478,31 @@ export function encryptHistoryEntry(input: {
   peerId: string;
   text: string;
   sentAt: number;
-  senderId?: string;
+  senderId: string;
   messageId?: string;
 }): string {
   checkKey(input.historyKey);
   checkId(input.clientMsgId, 32, /^[0-9a-f]{32}$/u);
   checkId(input.peerId, 64, /^[0-9a-f]{64}$/u);
+  checkIds(input.senderId, input.peerId);
   checkText(input.text);
   checkSentAt(input.sentAt);
   const key = hkdf(sha256, input.historyKey, HKDF_SALT, HISTORY_INFO, 32);
   const nonce = randomBytes(NONCE_LENGTH);
-  const senderId = input.senderId ?? input.peerId;
   const id = input.messageId ?? newReplayMessageId();
   const idBytes = base64ToBytes(id);
   if (idBytes.length !== 16) throw new TypeError("Invalid message id");
   const aad = encoder.encode(
-    `messages/v2/history-entry\n${senderId}\n${input.peerId}\n${id}`,
+    `messages/v2/history-entry\n${input.senderId}\n${input.peerId}\n${id}\n${input.clientMsgId}`,
   );
   const plaintext = encoder.encode(
-    JSON.stringify({ v: 2, id, type: "text", text: input.text }),
+    JSON.stringify({
+      v: 2,
+      id,
+      type: "text",
+      text: input.text,
+      sentAt: input.sentAt,
+    }),
   );
   return bytesToBase64(
     concat(
@@ -497,12 +519,13 @@ export function decryptHistoryEntry(input: {
   clientMsgId: string;
   peerId: string;
   entry: string;
-  senderId?: string;
+  senderId: string;
 }): { text?: string; sentAt?: number; v?: 2; id?: string; type?: string } {
   try {
     checkKey(input.historyKey);
     checkId(input.clientMsgId, 32, /^[0-9a-f]{32}$/u);
     checkId(input.peerId, 64, /^[0-9a-f]{64}$/u);
+    checkIds(input.senderId, input.peerId);
     const packed = base64ToBytes(input.entry);
     const isV2 = packed[0] === MESSAGE_VERSION_V2;
     const idBytes = isV2 ? packed.subarray(1, 17) : undefined;
@@ -521,7 +544,7 @@ export function decryptHistoryEntry(input: {
     if (isV2) {
       const id = bytesToBase64(idBytes!);
       const aad = encoder.encode(
-        `messages/v2/history-entry\n${input.senderId ?? input.peerId}\n${input.peerId}\n${id}`,
+        `messages/v2/history-entry\n${input.senderId}\n${input.peerId}\n${id}\n${input.clientMsgId}`,
       );
       const value = JSON.parse(
         new TextDecoder("utf-8", { fatal: true }).decode(
@@ -530,14 +553,24 @@ export function decryptHistoryEntry(input: {
       ) as Record<string, unknown>;
       if (value.v !== 2 || value.id !== id || typeof value.type !== "string")
         throw new Error();
-      if (value.type !== "text") return { v: 2, id, type: value.type };
+      if (typeof value.sentAt !== "number") throw new Error();
+      checkSentAt(value.sentAt);
+      if (value.type !== "text")
+        return { v: 2, id, type: value.type, sentAt: value.sentAt };
       if (typeof value.text !== "string") throw new Error();
       checkText(value.text);
-      return { v: 2, id, type: "text", text: value.text } as {
+      return {
+        v: 2,
+        id,
+        type: "text",
+        text: value.text,
+        sentAt: value.sentAt,
+      } as {
         v: 2;
         id: string;
         type: string;
         text: string;
+        sentAt: number;
       };
     }
     const aad = encoder.encode(
@@ -667,7 +700,11 @@ function checkText(text: string): void {
 }
 
 function checkSentAt(sentAt: number): void {
-  if (typeof sentAt !== "number" || !Number.isFinite(sentAt))
+  if (
+    typeof sentAt !== "number" ||
+    !Number.isFinite(sentAt) ||
+    !Number.isFinite(new Date(sentAt).getTime())
+  )
     throw new TypeError("Invalid timestamp");
 }
 
