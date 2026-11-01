@@ -5,6 +5,15 @@ import {
   type BrowserContext,
   type Page,
 } from "@playwright/test";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { Pool } = require("../../server/node_modules/pg") as {
+  Pool: new (options: { connectionString: string }) => {
+    query(sql: string, values: unknown[]): Promise<unknown>;
+    end(): Promise<void>;
+  };
+};
 
 type User = {
   context: BrowserContext;
@@ -559,6 +568,39 @@ test.describe("real browser chat", () => {
     await expect(b.page.locator(".message-list .message-text")).toHaveText([
       "Queued one",
       "Queued two",
+    ]);
+  });
+
+  test("does not show a replayed ciphertext after reload", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(a.page, bob.id);
+    await openChat(b.page, alice.id);
+    await send(a.page, "Replay once");
+    const bobMessages = b.page.locator(".message-list .message-text");
+    await expect(bobMessages).toHaveText(["Replay once"]);
+
+    const pool = new Pool({ connectionString: process.env.E2E_DATABASE_URL! });
+    try {
+      await pool.query(
+        `INSERT INTO messages(sender_id, recipient_id, client_msg_id, ciphertext, sender_copy)
+         SELECT sender_id, recipient_id, $3, ciphertext, sender_copy
+         FROM messages WHERE sender_id=$1 AND recipient_id=$2
+         ORDER BY seq DESC LIMIT 1`,
+        [alice.id, bob.id, `replay-${crypto.randomUUID()}`],
+      );
+    } finally {
+      await pool.end();
+    }
+
+    await b.page.reload();
+    await openChat(b.page, alice.id);
+    await expect(b.page.locator(".message-list .message-text")).toHaveText([
+      "Replay once",
     ]);
   });
 

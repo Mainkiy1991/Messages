@@ -1,4 +1,5 @@
 import {
+  base64ToBytes,
   decryptContactBook,
   decryptHistoryEntry,
   decryptTextMessage,
@@ -6,6 +7,7 @@ import {
   encryptHistoryEntry,
   encryptTextMessage,
   newClientMsgId,
+  newReplayMessageId,
   type DerivedKeys,
 } from "@messages/crypto";
 import { MAX_CONVERSATIONS } from "@messages/shared";
@@ -52,6 +54,7 @@ export type ChatMessage = {
   frame?: OutgoingFrame;
   arrivalOrder: number;
   seq?: string;
+  replayId?: string;
 };
 export type Chat = {
   peerId: string;
@@ -311,12 +314,14 @@ export class ChatController {
         let text = "";
         let decryptFailed = false;
         try {
-          text = decryptHistoryEntry({
-            historyKey: this.keys.historyKey,
-            clientMsgId: frame.clientMsgId,
-            peerId: frame.to,
-            entry: frame.senderCopy,
-          }).text;
+          text =
+            decryptHistoryEntry({
+              historyKey: this.keys.historyKey,
+              clientMsgId: frame.clientMsgId,
+              peerId: frame.to,
+              senderId: this.userId,
+              entry: frame.senderCopy,
+            }).text ?? "";
         } catch {
           decryptFailed = true;
         }
@@ -727,14 +732,15 @@ export class ChatController {
       const messages = await Promise.all(
         visibleMessages.map(async (entry) => {
           try {
-            const text =
+            const decrypted =
               entry.direction === "out"
                 ? decryptHistoryEntry({
                     historyKey: this.keys.historyKey,
                     clientMsgId: entry.clientMsgId,
                     peerId,
+                    senderId: this.userId,
                     entry: entry.payload,
-                  }).text
+                  })
                 : decryptTextMessage({
                     recipientEncryptionPrivateKey:
                       this.keys.encryption.privateKey,
@@ -743,12 +749,14 @@ export class ChatController {
                     senderId: peerId,
                     recipientId: this.userId,
                     ciphertext: entry.payload,
-                  }).text;
+                  });
+            if (decrypted.type !== "text") return null;
             return {
               id: entry.id,
               clientMsgId: entry.clientMsgId,
               seq: entry.seq,
-              text,
+              text: decrypted.text ?? "",
+              ...(decrypted.id ? { replayId: decrypted.id } : {}),
               createdAt: entry.createdAt,
               direction: entry.direction,
               ...(entry.direction === "out"
@@ -765,6 +773,7 @@ export class ChatController {
               arrivalOrder: this.arrivalOrder++,
             } as ChatMessage;
           } catch {
+            if (isV2Envelope(entry.payload)) return null;
             return {
               id: entry.id,
               clientMsgId: entry.clientMsgId,
@@ -788,20 +797,35 @@ export class ChatController {
             } as ChatMessage;
           }
         }),
+      ).then((items) =>
+        items.filter((item): item is ChatMessage => item !== null),
       );
       this.update({
         chats: sortChats(
           this.state.chats.map((item) =>
             item.peerId === peerId
-              ? {
-                  ...item,
-                  messages: mergeMessages(item.messages, messages),
-                  hasMore: after ? item.hasMore : page.hasMore,
-                  historyLoaded: true,
-                  ...(after ? { historyAfterMore: page.hasMore } : {}),
-                  loadingHistory: false,
-                  historyLoadFailed: false,
-                }
+              ? (() => {
+                  const liveDuplicates = messages.filter(
+                    (message) =>
+                      message.direction === "in" &&
+                      !!message.replayId &&
+                      item.messages.some(
+                        (old) =>
+                          old.direction === "in" &&
+                          old.replayId === message.replayId,
+                      ),
+                  ).length;
+                  return {
+                    ...item,
+                    unreadCount: Math.max(0, item.unreadCount - liveDuplicates),
+                    messages: mergeMessages(item.messages, messages),
+                    hasMore: after ? item.hasMore : page.hasMore,
+                    historyLoaded: true,
+                    ...(after ? { historyAfterMore: page.hasMore } : {}),
+                    loadingHistory: false,
+                    historyLoadFailed: false,
+                  };
+                })()
               : item,
           ),
         ),
@@ -1092,6 +1116,7 @@ export class ChatController {
     try {
       const sentAt = (this.deps.now ?? Date.now)();
       const clientMsgId = (this.deps.makeClientMsgId ?? newClientMsgId)();
+      const replayId = newReplayMessageId();
       const frame: OutgoingFrame = {
         type: "send",
         clientMsgId,
@@ -1103,11 +1128,14 @@ export class ChatController {
           recipientId: peerId,
           text,
           sentAt,
+          messageId: replayId,
         }),
         senderCopy: encryptHistoryEntry({
           historyKey: this.keys.historyKey,
           clientMsgId,
           peerId,
+          senderId: this.userId,
+          messageId: replayId,
           text,
           sentAt,
         }),
@@ -1115,6 +1143,7 @@ export class ChatController {
       const message: ChatMessage = {
         id: clientMsgId,
         clientMsgId,
+        replayId,
         text,
         createdAt: new Date(sentAt).toISOString(),
         direction: "out",
@@ -1231,24 +1260,30 @@ export class ChatController {
       )
         return;
       let text = "";
+      let replayId: string | undefined;
       let decryptFailed = false;
       try {
         const senderEncryptionPublicKey = await this.getVerifiedPeerKey(
           frame.from,
         );
-        text = decryptTextMessage({
+        const decrypted = decryptTextMessage({
           recipientEncryptionPrivateKey: this.keys.encryption.privateKey,
           senderEncryptionPublicKey,
           senderId: frame.from,
           recipientId: this.userId,
           ciphertext: frame.ciphertext,
-        }).text;
+        });
+        if (decrypted.type !== "text") return;
+        text = decrypted.text ?? "";
+        replayId = decrypted.id;
       } catch {
+        if (isV2Envelope(frame.ciphertext)) return;
         /* Render a safe placeholder; WebSocket still acks this frame. */
         decryptFailed = true;
       }
       const message: ChatMessage = {
         id: frame.id,
+        ...(replayId ? { replayId } : {}),
         text,
         createdAt: frame.createdAt,
         direction: "in",
@@ -1266,6 +1301,15 @@ export class ChatController {
         messages: [],
         unreadCount: 0,
       };
+      if (
+        replayId &&
+        chat.messages.some(
+          (item) => item.direction === "in" && item.replayId === replayId,
+        )
+      ) {
+        this.upsertMessage(frame.from, message);
+        return;
+      }
       const unreadCount =
         this.state.activePeer === frame.from ? 0 : chat.unreadCount + 1;
       this.upsertMessage(frame.from, message, unreadCount);
@@ -1455,6 +1499,14 @@ export class ChatController {
 
 export const WAKING_TIMEOUT_MS = 90_000;
 
+function isV2Envelope(value: string): boolean {
+  try {
+    return base64ToBytes(value)[0] === 2;
+  } catch {
+    return false;
+  }
+}
+
 function compareMessages(a: ChatMessage, b: ChatMessage): number {
   if (a.seq && b.seq && a.seq !== b.seq)
     return BigInt(a.seq) < BigInt(b.seq) ? -1 : 1;
@@ -1474,16 +1526,25 @@ export function mergeMessages(
     const index = result.findIndex(
       (item) =>
         item.id === message.id ||
+        (!!item.replayId && item.replayId === message.replayId) ||
         (!!item.clientMsgId && item.clientMsgId === message.clientMsgId),
     );
     if (index < 0) result.push(message);
-    else
+    else {
+      const previous = result[index]!;
+      const keepPrevious =
+        !!previous.seq &&
+        !!message.seq &&
+        BigInt(previous.seq) <= BigInt(message.seq);
+      const first = keepPrevious ? message : previous;
+      const chosen = keepPrevious ? previous : message;
       result[index] = {
-        ...result[index]!,
-        ...message,
-        status: mergeStatus(result[index]!.status, message.status),
-        frame: message.frame ?? result[index]!.frame,
+        ...first,
+        ...chosen,
+        status: mergeStatus(previous.status, message.status),
+        frame: message.frame ?? previous.frame,
       };
+    }
   }
   return result.sort(compareMessages);
 }

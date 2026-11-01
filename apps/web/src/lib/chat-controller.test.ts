@@ -443,6 +443,50 @@ describe("ChatController", () => {
     f.controller.stop();
   });
 
+  it("does not increment unread for a repeated v2 WebSocket ciphertext", async () => {
+    const f = makeController({
+      initialSession: session("token-a"),
+      userKeys: async (peerId) =>
+        peerId === charlieId ? userKeys(charlie) : userKeys(bob),
+    });
+    f.controller.start();
+    await waitFor(() => f.sockets.length === 1);
+    await authenticate(f.sockets[0]!);
+    await f.controller.openChat(bobId);
+    const ciphertext = encryptTextMessage({
+      senderEncryptionPrivateKey: charlie.encryption.privateKey,
+      recipientEncryptionPublicKey: alice.encryption.publicKey,
+      senderId: charlieId,
+      recipientId: aliceId,
+      text: "once",
+    });
+    for (const [id, seq] of [
+      ["row-4", "4"],
+      ["row-9", "9"],
+    ]) {
+      f.sockets[0]!.frame({
+        type: "message",
+        id,
+        seq,
+        from: charlieId,
+        ciphertext,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    await waitFor(() =>
+      f.controller
+        .getSnapshot()
+        .chats.some((chat) => chat.peerId === charlieId),
+    );
+    const chat = f.controller
+      .getSnapshot()
+      .chats.find((item) => item.peerId === charlieId)!;
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0]).toMatchObject({ seq: "4", text: "once" });
+    expect(chat.unreadCount).toBe(1);
+    f.controller.stop();
+  });
+
   it("uses the refreshed token for peer-key requests and logout after a 4401 reconnect", async () => {
     const logoutTokens: string[] = [];
     const f = makeController({
@@ -555,6 +599,44 @@ describe("ChatController", () => {
     });
   });
 
+  it("deduplicates v2 replay IDs and keeps the smaller server sequence", () => {
+    const first: ChatMessage = {
+      id: "row-8",
+      replayId: "AQEBAQEBAQEBAQEBAQEBAQ==",
+      seq: "8",
+      text: "once",
+      createdAt: "2025-01-01T00:00:08Z",
+      direction: "in",
+      arrivalOrder: 0,
+    };
+    const duplicate: ChatMessage = {
+      ...first,
+      id: "row-12",
+      seq: "12",
+      text: "duplicate",
+      arrivalOrder: 1,
+    };
+    const merged = mergeMessages([first], [duplicate]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ id: "row-8", seq: "8", text: "once" });
+  });
+
+  it("does not deduplicate legacy messages by equal text", () => {
+    const first: ChatMessage = {
+      id: "legacy-1",
+      text: "same",
+      createdAt: "2025-01-01T00:00:00Z",
+      direction: "in",
+      arrivalOrder: 0,
+    };
+    const second: ChatMessage = {
+      ...first,
+      id: "legacy-2",
+      arrivalOrder: 1,
+    };
+    expect(mergeMessages([first], [second])).toHaveLength(2);
+  });
+
   it("orders merged history and advances its cursor numerically across digit boundaries", async () => {
     const calls: Array<string | undefined> = [];
     const createEntry = (seq: string) => {
@@ -566,6 +648,7 @@ describe("ChatController", () => {
         clientMsgId,
         payload: encryptHistoryEntry({
           historyKey: alice.historyKey,
+          senderId: aliceId,
           clientMsgId,
           peerId: bobId,
           text: `message ${seq}`,
@@ -641,6 +724,7 @@ describe("ChatController", () => {
           direction === "out"
             ? encryptHistoryEntry({
                 historyKey: alice.historyKey,
+                senderId: aliceId,
                 clientMsgId,
                 peerId,
                 text: `message ${seq}`,
@@ -851,6 +935,7 @@ describe("ChatController", () => {
             clientMsgId,
             payload: encryptHistoryEntry({
               historyKey: alice.historyKey,
+              senderId: aliceId,
               clientMsgId,
               peerId: bobId,
               text: "saved message",
@@ -1088,6 +1173,7 @@ describe("ChatController", () => {
         ciphertext: "Y2lwaGVy",
         senderCopy: encryptHistoryEntry({
           historyKey: alice.historyKey,
+          senderId: aliceId,
           clientMsgId,
           peerId,
           text: `queued ${index}`,
@@ -1117,6 +1203,7 @@ describe("ChatController", () => {
         clientMsgId,
         payload: encryptHistoryEntry({
           historyKey: alice.historyKey,
+          senderId: aliceId,
           clientMsgId,
           peerId: bobId,
           text: `history ${seq}`,
@@ -1299,6 +1386,7 @@ describe("ChatController", () => {
                 clientMsgId,
                 payload: encryptHistoryEntry({
                   historyKey: alice.historyKey,
+                  senderId: aliceId,
                   clientMsgId,
                   peerId,
                   text: "Latest preview",
@@ -1557,6 +1645,7 @@ describe("ChatController", () => {
       ciphertext: "encrypted-message",
       senderCopy: encryptHistoryEntry({
         historyKey: alice.historyKey,
+        senderId: aliceId,
         clientMsgId: "00000000000000000000000000000002",
         peerId: bobId,
         text: "unsent text",
@@ -1637,6 +1726,7 @@ describe("ChatController", () => {
             clientMsgId: idSent,
             payload: encryptHistoryEntry({
               historyKey: alice.historyKey,
+              senderId: aliceId,
               clientMsgId: idSent,
               peerId: bobId,
               text: "sent history",
@@ -1652,6 +1742,7 @@ describe("ChatController", () => {
             clientMsgId: idDelivered,
             payload: encryptHistoryEntry({
               historyKey: alice.historyKey,
+              senderId: aliceId,
               clientMsgId: idDelivered,
               peerId: bobId,
               text: "delivered history",
@@ -1708,6 +1799,7 @@ describe("ChatController", () => {
             clientMsgId: id,
             payload: encryptHistoryEntry({
               historyKey: alice.historyKey,
+              senderId: aliceId,
               clientMsgId: id,
               peerId: bobId,
               text: "read",
