@@ -208,7 +208,15 @@ describe("recipient messages", () => {
     expect(() => decrypt(bytesToBase64(packed))).toThrow(DecryptError);
     const changedSentAt = base64ToBytes(ciphertext);
     changedSentAt[changedSentAt.length - 18] ^= 1;
-    expect(() => decrypt(bytesToBase64(changedSentAt))).toThrow(DecryptError);
+    expect(() => decrypt(bytesToBase64(changedSentAt))).toThrow(
+      "DECRYPT_FAILED",
+    );
+  });
+
+  it("rejects altered v2 sentAt with DECRYPT_FAILED", () => {
+    const packed = base64ToBytes(encrypt("timestamp"));
+    packed[packed.length - 18] ^= 1;
+    expect(() => decrypt(bytesToBase64(packed))).toThrow("DECRYPT_FAILED");
   });
 
   it("rejects wrong keys, tampering, identity substitution and invalid envelopes", () => {
@@ -221,7 +229,7 @@ describe("recipient messages", () => {
         recipientId: bobId,
         ciphertext,
       }),
-    ).toThrow(DecryptError);
+    ).toThrow("DECRYPT_FAILED");
     const packed = base64ToBytes(ciphertext);
     for (const offset of [1, 25, packed.length - 1]) {
       const changed = packed.slice();
@@ -230,10 +238,10 @@ describe("recipient messages", () => {
     }
     expect(() =>
       decrypt(ciphertext, alice, bob, "f".repeat(64), bobId),
-    ).toThrow(DecryptError);
+    ).toThrow("DECRYPT_FAILED");
     expect(() =>
       decrypt(ciphertext, alice, bob, aliceId, "f".repeat(64)),
-    ).toThrow(DecryptError);
+    ).toThrow("DECRYPT_FAILED");
     for (const invalid of ["", "!", bytesToBase64(packed.slice(0, 10))]) {
       expect(() => decrypt(invalid)).toThrow(DecryptError);
     }
@@ -340,7 +348,7 @@ describe("sender history entries", () => {
         peerId: bobId,
         entry,
       }),
-    ).toThrow(DecryptError);
+    ).toThrow("DECRYPT_FAILED");
     expect(() =>
       decryptHistoryEntry({
         historyKey: alice.historyKey,

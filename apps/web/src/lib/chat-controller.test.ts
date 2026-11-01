@@ -14,6 +14,7 @@ import {
   chatPreview,
   contactLabel,
   mergeMessages,
+  unreadAfterHistoryMerge,
   type ChatControllerDependencies,
   type ChatMessage,
 } from "./chat-controller.js";
@@ -655,6 +656,90 @@ describe("ChatController", () => {
     const merged = mergeMessages([first], [duplicate]);
     expect(merged).toHaveLength(1);
     expect(merged[0]).toMatchObject({ id: "row-8", seq: "8", text: "once" });
+  });
+
+  it("compensates unread once when a live message arrives in history", () => {
+    const live: ChatMessage = {
+      id: "live-row",
+      replayId: "live-id",
+      replayAuthor: bobId,
+      countedUnread: true,
+      seq: "8",
+      text: "hello",
+      createdAt: "2025-01-01T00:00:08Z",
+      direction: "in",
+      arrivalOrder: 0,
+    };
+    const history = {
+      ...live,
+      id: "history-row",
+      seq: "4",
+      countedUnread: undefined,
+    };
+    const chat = { peerId: bobId, messages: [live], unreadCount: 1 };
+    const first = unreadAfterHistoryMerge(chat, [history]);
+    expect(first.unreadCount).toBe(0);
+    expect(mergeMessages(first.messages, [history])).toHaveLength(1);
+    const second = unreadAfterHistoryMerge(
+      {
+        ...chat,
+        unreadCount: first.unreadCount,
+        messages: mergeMessages(first.messages, [history]),
+      },
+      [history],
+    );
+    expect(second.unreadCount).toBe(0);
+    expect(mergeMessages(second.messages, [history])).toHaveLength(1);
+  });
+
+  it("does not compensate unread for messages loaded from history earlier", () => {
+    const live: ChatMessage[] = ["one", "two"].map((id, index) => ({
+      id,
+      replayId: id,
+      replayAuthor: bobId,
+      countedUnread: true,
+      text: id,
+      createdAt: "2025-01-01T00:00:00Z",
+      direction: "in",
+      arrivalOrder: index,
+    }));
+    const older: ChatMessage[] = ["old-one", "old-two"].map((id, index) => ({
+      id,
+      replayId: id,
+      replayAuthor: bobId,
+      text: id,
+      createdAt: "2024-12-31T00:00:00Z",
+      direction: "in",
+      arrivalOrder: index,
+    }));
+    const result = unreadAfterHistoryMerge(
+      { peerId: bobId, messages: live, unreadCount: 2 },
+      older,
+    );
+    expect(result.unreadCount).toBe(2);
+    expect(result.messages.every((message) => message.countedUnread)).toBe(
+      true,
+    );
+  });
+
+  it("does not change unread when the same history page is loaded twice", () => {
+    const live: ChatMessage = {
+      id: "live-row",
+      replayId: "live-id",
+      replayAuthor: bobId,
+      countedUnread: true,
+      text: "hello",
+      createdAt: "2025-01-01T00:00:00Z",
+      direction: "in",
+      arrivalOrder: 0,
+    };
+    const history = { ...live, id: "history-row", countedUnread: undefined };
+    const initial = { peerId: bobId, messages: [live], unreadCount: 1 };
+    const first = unreadAfterHistoryMerge(initial, [history]);
+    const once = { ...initial, ...first };
+    const second = unreadAfterHistoryMerge(once, [history]);
+    expect(first.unreadCount).toBe(0);
+    expect(second.unreadCount).toBe(0);
   });
 
   it("does not deduplicate legacy messages by equal text", () => {

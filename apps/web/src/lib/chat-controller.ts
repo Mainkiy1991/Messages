@@ -56,6 +56,7 @@ export type ChatMessage = {
   seq?: string;
   replayId?: string;
   replayAuthor?: string;
+  countedUnread?: boolean;
 };
 export type Chat = {
   peerId: string;
@@ -823,8 +824,16 @@ export class ChatController {
               ? (() => {
                   return {
                     ...item,
-                    unreadCount: unreadAfterHistoryMerge(item, messages),
-                    messages: mergeMessages(item.messages, messages),
+                    ...(() => {
+                      const reconciled = unreadAfterHistoryMerge(
+                        item,
+                        messages,
+                      );
+                      return {
+                        unreadCount: reconciled.unreadCount,
+                        messages: mergeMessages(reconciled.messages, messages),
+                      };
+                    })(),
                     hasMore: after ? item.hasMore : page.hasMore,
                     historyLoaded: true,
                     ...(after ? { historyAfterMore: page.hasMore } : {}),
@@ -1313,21 +1322,28 @@ export class ChatController {
         messages: [],
         unreadCount: 0,
       };
-      if (
-        replayId &&
-        chat.messages.some(
-          (item) =>
-            item.direction === "in" &&
-            item.replayId === replayId &&
-            item.replayAuthor === frame.from,
-        )
-      ) {
-        this.upsertMessage(frame.from, message);
+      const duplicate = replayId
+        ? chat.messages.find(
+            (item) =>
+              item.direction === "in" &&
+              item.replayId === replayId &&
+              item.replayAuthor === frame.from,
+          )
+        : undefined;
+      if (duplicate) {
+        this.upsertMessage(frame.from, {
+          ...message,
+          countedUnread: duplicate.countedUnread,
+        });
         return;
       }
-      const unreadCount =
-        this.state.activePeer === frame.from ? 0 : chat.unreadCount + 1;
-      this.upsertMessage(frame.from, message, unreadCount);
+      const countedUnread = this.state.activePeer !== frame.from;
+      const unreadCount = countedUnread ? chat.unreadCount + 1 : 0;
+      this.upsertMessage(
+        frame.from,
+        countedUnread ? { ...message, countedUnread: true } : message,
+        unreadCount,
+      );
       if (this.state.activePeer === frame.from) this.scheduleRead(frame.from);
       return;
     }
@@ -1514,22 +1530,31 @@ export class ChatController {
 
 export const WAKING_TIMEOUT_MS = 90_000;
 
-function unreadAfterHistoryMerge(
+export function unreadAfterHistoryMerge(
   chat: Chat,
   historyMessages: ChatMessage[],
-): number {
-  const deliveredLiveCount = historyMessages.filter(
-    (message) =>
-      message.direction === "in" &&
-      !!message.replayId &&
-      chat.messages.some(
-        (existing) =>
-          existing.direction === "in" &&
-          existing.replayId === message.replayId &&
-          existing.replayAuthor === message.replayAuthor,
-      ),
-  ).length;
-  return Math.max(0, chat.unreadCount - deliveredLiveCount);
+): { unreadCount: number; messages: ChatMessage[] } {
+  const compensated = new Set<string>();
+  const messages = chat.messages.map((existing) => {
+    if (
+      existing.direction !== "in" ||
+      !existing.countedUnread ||
+      !existing.replayId ||
+      !historyMessages.some(
+        (message) =>
+          message.direction === "in" &&
+          message.replayId === existing.replayId &&
+          message.replayAuthor === existing.replayAuthor,
+      )
+    )
+      return existing;
+    compensated.add(`${existing.replayAuthor}\n${existing.replayId}`);
+    return { ...existing, countedUnread: false };
+  });
+  return {
+    unreadCount: Math.max(0, chat.unreadCount - compensated.size),
+    messages,
+  };
 }
 
 function isV2Envelope(value: string): boolean {
@@ -1580,6 +1605,7 @@ export function mergeMessages(
         ...chosen,
         status: mergeStatus(previous.status, message.status),
         frame: message.frame ?? previous.frame,
+        countedUnread: previous.countedUnread || message.countedUnread,
       };
     }
   }
