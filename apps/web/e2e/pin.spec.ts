@@ -87,6 +87,99 @@ test("PIN locks the page on reload and unlocks after a wrong attempt", async ({
   await expect(page.getByTestId("profile")).toBeVisible();
 });
 
+test("locked PIN controls keep their geometry at 360px in every language", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 360, height: 800 });
+  await page.addInitScript(() => localStorage.setItem("messages-lang", "en"));
+  await createAccount(page);
+  await enablePin(page);
+  await page.clock.install();
+
+  for (const language of ["ru", "en", "uk"] as const) {
+    await page.evaluate(
+      (value) => localStorage.setItem("messages-lang", value),
+      language,
+    );
+    await page.reload();
+    const panel = page.locator(".pin-lock-screen");
+    const button = panel.locator(".pin-action");
+    const forgotLink = panel.locator(".text-button");
+    await expect(panel).toBeVisible();
+    await expect(button).toBeVisible();
+    await expect(forgotLink).toBeVisible();
+
+    const before = await page.evaluate(() => {
+      const button = document.querySelector<HTMLElement>(
+        ".pin-lock-screen .pin-action",
+      )!;
+      const link = document.querySelector<HTMLElement>(
+        ".pin-lock-screen .text-button",
+      )!;
+      const card = document.querySelector<HTMLElement>(".card")!;
+      const rect = (element: HTMLElement) => {
+        const bounds = element.getBoundingClientRect();
+        return {
+          x: bounds.x,
+          y: bounds.y,
+          width: bounds.width,
+          height: bounds.height,
+        };
+      };
+      return { button: rect(button), link: rect(link), card: rect(card) };
+    });
+    await page.getByLabel("PIN").fill("wrong000");
+    await button.click();
+    await expect(button).toHaveClass(/pin-action-error/);
+    await expect(button).toContainText(
+      language === "ru"
+        ? "Неверный PIN"
+        : language === "uk"
+          ? "Невірний PIN"
+          : "Incorrect PIN",
+    );
+    const after = await page.evaluate(() => {
+      const button = document.querySelector<HTMLElement>(
+        ".pin-lock-screen .pin-action",
+      )!;
+      const link = document.querySelector<HTMLElement>(
+        ".pin-lock-screen .text-button",
+      )!;
+      const card = document.querySelector<HTMLElement>(".card")!;
+      const rect = (element: HTMLElement) => {
+        const bounds = element.getBoundingClientRect();
+        return {
+          x: bounds.x,
+          y: bounds.y,
+          width: bounds.width,
+          height: bounds.height,
+        };
+      };
+      return {
+        button: rect(button),
+        link: rect(link),
+        card: rect(card),
+        textFits: button.scrollWidth <= button.clientWidth,
+      };
+    });
+    for (const key of ["x", "y", "width", "height"] as const) {
+      expect(
+        Math.abs(after.button[key] - before.button[key]),
+      ).toBeLessThanOrEqual(1);
+    }
+    expect(Math.abs(after.link.y - before.link.y)).toBeLessThanOrEqual(1);
+    expect(
+      Math.abs(after.card.height - before.card.height),
+    ).toBeLessThanOrEqual(1);
+    expect(after.textFits).toBe(true);
+
+    await page.clock.fastForward(2100);
+    await page.getByLabel("PIN").fill("secure123");
+    await button.click();
+    await expect(page.getByTestId("profile")).toBeVisible();
+  }
+});
+
 test("Forgot PIN clears local data and returns to the start page", async ({
   page,
 }) => {
