@@ -1142,6 +1142,11 @@ test.describe("real browser chat", () => {
   test("logout panels stack their buttons at desktop and 360px", async ({
     browser,
   }) => {
+    const buttonColors = async (button: Locator) =>
+      button.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { backgroundColor: style.backgroundColor, color: style.color };
+      });
     for (const viewport of [
       { width: 1280, height: 800 },
       { width: 360, height: 640 },
@@ -1157,11 +1162,24 @@ test.describe("real browser chat", () => {
         page.getByTestId("logout-skip"),
         page.getByRole("button", { name: "Cancel", exact: true }),
       ]);
+      const verifyColors = await buttonColors(
+        page.getByTestId("logout-verify"),
+      );
+      const skipColors = await buttonColors(page.getByTestId("logout-skip"));
+      expect(verifyColors.backgroundColor).not.toBe(skipColors.backgroundColor);
+      expect(
+        await page
+          .getByTestId("logout-skip")
+          .evaluate((element) => getComputedStyle(element).borderTopWidth),
+      ).not.toBe("0px");
       await page.getByTestId("logout-skip").click();
       await expectStackedButtons(page, [
         page.getByTestId("confirm-logout"),
         page.getByRole("button", { name: "Back", exact: true }),
       ]);
+      expect(await buttonColors(page.getByTestId("confirm-logout"))).toEqual(
+        skipColors,
+      );
     }
   });
 
