@@ -29,6 +29,7 @@ import {
   disablePin,
 } from "./session.js";
 import { indexedDbOutbox } from "./lib/outbox.js";
+import { phraseMatchesAccount } from "./lib/seed-check.js";
 import {
   ChatController,
   chatPreview,
@@ -76,6 +77,9 @@ function App() {
   const [hasError, setHasError] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showLogoutConfirmation, setShowLogoutConfirmation] = useState(false);
+  const [showLogoutSkipWarning, setShowLogoutSkipWarning] = useState(false);
+  const [logoutPhrase, setLogoutPhrase] = useState("");
+  const [logoutError, setLogoutError] = useState(false);
   const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
   const [showForgotPinConfirmation, setShowForgotPinConfirmation] =
     useState(false);
@@ -420,6 +424,34 @@ function App() {
     }
   }
 
+  function openLogoutCheck() {
+    setLogoutPhrase("");
+    setLogoutError(false);
+    setShowLogoutSkipWarning(false);
+    setShowLogoutConfirmation(true);
+  }
+
+  function cancelLogout() {
+    setLogoutPhrase("");
+    setLogoutError(false);
+    setShowLogoutSkipWarning(false);
+    setShowLogoutConfirmation(false);
+  }
+
+  function backToLogoutCheck() {
+    setLogoutPhrase("");
+    setLogoutError(false);
+    setShowLogoutSkipWarning(false);
+  }
+
+  function verifyAndLogout() {
+    if (!phraseMatchesAccount(logoutPhrase, userId)) {
+      setLogoutError(true);
+      return;
+    }
+    void confirmLogout();
+  }
+
   async function confirmLogout() {
     await controllerRef.current?.logout();
     controllerRef.current = null;
@@ -438,6 +470,9 @@ function App() {
       presence: {},
     });
     setPhrase("");
+    setLogoutPhrase("");
+    setLogoutError(false);
+    setShowLogoutSkipWarning(false);
     setShowLogoutConfirmation(false);
     setScreen("welcome");
   }
@@ -883,7 +918,7 @@ function App() {
                   <button
                     data-testid="logout"
                     className="danger profile-item profile-logout"
-                    onClick={() => setShowLogoutConfirmation(true)}
+                    onClick={openLogoutCheck}
                   >
                     {t.logout}
                   </button>
@@ -1419,25 +1454,72 @@ function App() {
             {chatState.error === "outbox_clear_failed" && (
               <p className="error">{t.outboxClearFailed}</p>
             )}
-            {showLogoutConfirmation && (
+            {showLogoutConfirmation && !showLogoutSkipWarning && (
               <div
                 className="confirm-panel"
                 role="alertdialog"
-                aria-labelledby="logout-message"
+                aria-labelledby="logout-check-title"
+                aria-describedby="logout-check-hint"
               >
-                <p id="logout-message">{t.confirmLogout}</p>
+                <h2 id="logout-check-title">{t.logoutCheckTitle}</h2>
+                <p id="logout-check-hint">{t.logoutCheckHint}</p>
+                <label>
+                  {t.phrase}
+                  <textarea
+                    data-testid="logout-phrase"
+                    rows={4}
+                    value={logoutPhrase}
+                    onChange={(e) => {
+                      setLogoutPhrase(e.target.value);
+                      setLogoutError(false);
+                    }}
+                    autoComplete="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                  />
+                </label>
+                {logoutError && (
+                  <p className="error" data-testid="logout-error" role="alert">
+                    {t.logoutCheckWrong}
+                  </p>
+                )}
+                <button
+                  data-testid="logout-verify"
+                  className="danger"
+                  onClick={verifyAndLogout}
+                >
+                  {t.logoutCheckSubmit}
+                </button>
+                <button
+                  data-testid="logout-skip"
+                  className="text-button"
+                  onClick={() => setShowLogoutSkipWarning(true)}
+                >
+                  {t.logoutSkip}
+                </button>
+                <button className="secondary" onClick={cancelLogout}>
+                  {t.cancel}
+                </button>
+              </div>
+            )}
+            {showLogoutConfirmation && showLogoutSkipWarning && (
+              <div
+                className="confirm-panel"
+                role="alertdialog"
+                aria-labelledby="logout-skip-warning"
+              >
+                <p id="logout-skip-warning" className="warning">
+                  {t.logoutSkipWarning}
+                </p>
                 <button
                   data-testid="confirm-logout"
                   className="danger"
                   onClick={() => void confirmLogout()}
                 >
-                  {t.logout}
+                  {t.logoutSkipConfirm}
                 </button>
-                <button
-                  className="secondary"
-                  onClick={() => setShowLogoutConfirmation(false)}
-                >
-                  {t.cancel}
+                <button className="secondary" onClick={backToLogoutCheck}>
+                  {t.back}
                 </button>
               </div>
             )}

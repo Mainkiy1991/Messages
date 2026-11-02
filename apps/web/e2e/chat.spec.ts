@@ -152,10 +152,11 @@ async function signIn(page: Page, phrase: string): Promise<string> {
   return revealUserId(page);
 }
 
-async function logout(page: Page): Promise<void> {
+async function logout(page: Page, phrase: string): Promise<void> {
   await page.getByTestId("profile").click();
   await page.getByTestId("logout").click();
-  await page.getByTestId("confirm-logout").click();
+  await page.getByTestId("logout-phrase").fill(phrase);
+  await page.getByTestId("logout-verify").click();
   await expect(page.getByTestId("open-login")).toBeVisible();
 }
 
@@ -394,14 +395,14 @@ test.describe("real browser chat", () => {
       a.page.getByTestId("message-status").filter({ hasText: "Read" }),
     ).toBeVisible();
 
-    await logout(b.page);
+    await logout(b.page, bob.phrase);
     await send(a.page, "Read this after reconnecting");
     await expect(
       a.page.locator(
         '[data-testid="message"][data-direction="out"][data-status="sent"]',
       ),
     ).toContainText("Read this after reconnecting");
-    await logout(a.page);
+    await logout(a.page, alice.phrase);
     expect(await signIn(b.page, bob.phrase)).toBe(bob.id);
     await chatWith(b.page, alice.id).click();
     await expect(
@@ -717,8 +718,8 @@ test.describe("real browser chat", () => {
         "connected",
       );
     }
-    await logout(a.page);
-    await logout(b.page);
+    await logout(a.page, alice.phrase);
+    await logout(b.page, bob.phrase);
     expect(await signIn(a.page, alice.phrase)).toBe(alice.id);
     expect(await signIn(b.page, bob.phrase)).toBe(bob.id);
 
@@ -760,7 +761,7 @@ test.describe("real browser chat", () => {
       chat: bob.id,
     });
     expect(a.page.url()).not.toContain(bob.id);
-    await logout(b.page);
+    await logout(b.page, bob.phrase);
     await send(a.page, "Queued one");
     await send(a.page, "Queued two");
 
@@ -815,7 +816,7 @@ test.describe("real browser chat", () => {
     const alice = await createAccount(a.page);
     const bob = await createAccount(b.page);
     await openChat(a.page, bob.id);
-    await logout(b.page);
+    await logout(b.page, bob.phrase);
     await send(a.page, "History survives a reload");
     await expect(
       a.page
@@ -899,7 +900,7 @@ test.describe("real browser chat", () => {
     await createAccount(a.page);
     const bob = await createAccount(b.page);
     await openChat(a.page, bob.id);
-    await logout(b.page);
+    await logout(b.page, bob.phrase);
     await send(a.page, "Persisted outgoing history");
     await expect(
       a.page.locator('[data-testid="message"][data-status="sent"]'),
@@ -1050,7 +1051,7 @@ test.describe("real browser chat", () => {
   }) => {
     const user = await openUser(browser);
     const account = await createAccount(user.page);
-    await logout(user.page);
+    await logout(user.page, account.phrase);
     const sessionDatabases = await user.page.evaluate(async () =>
       (await indexedDB.databases()).filter(
         (database) => database.name === "messages-session",
@@ -1058,6 +1059,49 @@ test.describe("real browser chat", () => {
     );
     expect(sessionDatabases).toEqual([]);
     expect(await signIn(user.page, account.phrase)).toBe(account.id);
+  });
+  test("a wrong seed phrase keeps the session and shows an error", async ({
+    browser,
+  }) => {
+    const user = await openUser(browser);
+    await createAccount(user.page);
+    await user.page.getByTestId("profile").click();
+    await user.page.getByTestId("logout").click();
+    const phraseInput = user.page.getByTestId("logout-phrase");
+    const wrongPhrase =
+      "legal winner thank year wave sausage worth useful legal winner thank yellow";
+    await phraseInput.fill(wrongPhrase);
+    await user.page.getByTestId("logout-verify").click();
+    await expect(user.page.getByTestId("logout-error")).toHaveText(
+      "This phrase does not match your account. Check the words and their order.",
+    );
+    await expect(phraseInput).toHaveValue(wrongPhrase);
+    await expect(user.page.getByTestId("profile")).toBeVisible();
+    await expect(user.page.getByTestId("connection-status")).toHaveAttribute(
+      "data-state",
+      "connected",
+    );
+    await expect(user.page.getByTestId("open-login")).toHaveCount(0);
+  });
+
+  test("signing out without checking shows the warning before leaving", async ({
+    browser,
+  }) => {
+    const user = await openUser(browser);
+    const account = await createAccount(user.page);
+    await user.page.getByTestId("profile").click();
+    await user.page.getByTestId("logout").click();
+    await user.page.getByTestId("logout-skip").click();
+    const skipPanel = user.page.getByRole("alertdialog");
+    await expect(skipPanel).toContainText(
+      "you will not be able to sign in to this account again",
+    );
+    await skipPanel.getByRole("button", { name: "Back" }).click();
+    await expect(user.page.getByTestId("logout-phrase")).toBeVisible();
+    await user.page.getByTestId("logout-skip").click();
+    await user.page.getByTestId("confirm-logout").click();
+    await expect(user.page.getByTestId("open-login")).toBeVisible();
+    expect(account.id).toHaveLength(64);
   });
 
   test("Ukrainian profile language persists and fits a 360px viewport", async ({
@@ -1149,7 +1193,7 @@ test.describe("real browser chat", () => {
         .locator('[data-testid="message"][data-direction="out"]')
         .filter({ hasText: "Keep the chat in the conversation list" }),
     ).toHaveAttribute("data-status", /^(sent|delivered)$/u);
-    await logout(a.page);
+    await logout(a.page, alice.phrase);
     await a.page.setViewportSize({ width: 360, height: 640 });
     expect(await signIn(a.page, alice.phrase)).toBe(alice.id);
     await expect(a.page.locator(".chat-sidebar")).toBeVisible();

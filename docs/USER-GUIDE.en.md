@@ -61,7 +61,7 @@ The PIN encrypts the local keys on this device. It is never sent to the server: 
 
 ## Sign out
 
-Tap **Sign out** in Profile. This erases keys from this device. You can sign in again only with your seed phrase. Make sure you have saved it before signing out.
+Tap **Sign out** in Profile. The app asks you to enter this account's seed phrase and checks that it matches, then erases the keys from this device. You can also sign out without checking with **Sign out without checking**, but a warning appears first. Either way, you can sign in again only with your seed phrase, and without it the account is lost forever.
 
 ## Language
 
