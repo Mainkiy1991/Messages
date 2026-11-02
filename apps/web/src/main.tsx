@@ -976,7 +976,7 @@ function App() {
         )}
         {showForgotPinConfirmation && (
           <div
-            className="confirm-panel"
+            className="confirm-panel confirm-stack"
             role="alertdialog"
             aria-labelledby="forgot-pin-message"
           >
@@ -1456,7 +1456,7 @@ function App() {
             )}
             {showLogoutConfirmation && !showLogoutSkipWarning && (
               <div
-                className="confirm-panel"
+                className="confirm-panel confirm-stack"
                 role="alertdialog"
                 aria-labelledby="logout-check-title"
                 aria-describedby="logout-check-hint"
@@ -1504,7 +1504,7 @@ function App() {
             )}
             {showLogoutConfirmation && showLogoutSkipWarning && (
               <div
-                className="confirm-panel"
+                className="confirm-panel confirm-stack"
                 role="alertdialog"
                 aria-labelledby="logout-skip-warning"
               >
@@ -1525,7 +1525,7 @@ function App() {
             )}
             {showDeleteConfirmation && (
               <div
-                className="confirm-panel"
+                className="confirm-panel confirm-stack"
                 role="alertdialog"
                 aria-labelledby="delete-chat-message"
                 aria-describedby="delete-chat-description"

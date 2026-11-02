@@ -3,6 +3,7 @@ import {
   test as base,
   type Browser,
   type BrowserContext,
+  type Locator,
   type Page,
 } from "@playwright/test";
 import { createRequire } from "node:module";
@@ -158,6 +159,40 @@ async function logout(page: Page, phrase: string): Promise<void> {
   await page.getByTestId("logout-phrase").fill(phrase);
   await page.getByTestId("logout-verify").click();
   await expect(page.getByTestId("open-login")).toBeVisible();
+}
+
+async function expectStackedButtons(
+  page: Page,
+  buttons: Locator[],
+): Promise<void> {
+  const panel = page.locator(".confirm-panel");
+  await expect(panel).toHaveCount(1);
+  const panelBox = await panel.boundingBox();
+  if (!panelBox) throw new Error("The confirmation panel is not visible");
+  const viewport = page.viewportSize();
+  if (!viewport) throw new Error("The viewport size is not set");
+  expect(
+    await panel.evaluate((element) => getComputedStyle(element).display),
+  ).toBe("grid");
+  expect(panelBox.x).toBeGreaterThanOrEqual(0);
+  expect(panelBox.x + panelBox.width).toBeLessThanOrEqual(viewport.width);
+  const boxes: { x: number; y: number; width: number; height: number }[] = [];
+  for (const button of buttons) {
+    const box = await button.boundingBox();
+    if (!box) throw new Error("A stacked button is not visible");
+    boxes.push(box);
+  }
+  expect(boxes).toHaveLength(buttons.length);
+  for (const box of boxes) {
+    expect(box.width).toBeGreaterThanOrEqual(panelBox.width - 48 - 2);
+    expect(Math.abs(box.width - boxes[0]!.width)).toBeLessThanOrEqual(2);
+  }
+  for (let index = 1; index < boxes.length; index += 1) {
+    const previous = boxes[index - 1]!;
+    expect(boxes[index]!.y).toBeGreaterThanOrEqual(
+      previous.y + previous.height,
+    );
+  }
 }
 
 async function openChat(page: Page, peerId: string): Promise<void> {
@@ -1102,6 +1137,32 @@ test.describe("real browser chat", () => {
     await user.page.getByTestId("confirm-logout").click();
     await expect(user.page.getByTestId("open-login")).toBeVisible();
     expect(account.id).toHaveLength(64);
+  });
+
+  test("logout panels stack their buttons at desktop and 360px", async ({
+    browser,
+  }) => {
+    for (const viewport of [
+      { width: 1280, height: 800 },
+      { width: 360, height: 640 },
+    ]) {
+      const user = await openUser(browser);
+      const page = user.page;
+      await page.setViewportSize(viewport);
+      await createAccount(page);
+      await page.getByTestId("profile").click();
+      await page.getByTestId("logout").click();
+      await expectStackedButtons(page, [
+        page.getByTestId("logout-verify"),
+        page.getByTestId("logout-skip"),
+        page.getByRole("button", { name: "Cancel", exact: true }),
+      ]);
+      await page.getByTestId("logout-skip").click();
+      await expectStackedButtons(page, [
+        page.getByTestId("confirm-logout"),
+        page.getByRole("button", { name: "Back", exact: true }),
+      ]);
+    }
   });
 
   test("Ukrainian profile language persists and fits a 360px viewport", async ({
