@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   bytesToHex,
   decryptContactBook,
+  decryptTextMessage,
   deriveKeys,
   encryptContactBook,
   encryptHistoryEntry,
@@ -2265,6 +2266,174 @@ describe("ChatController linked Alice and Bob", () => {
     );
     aliceController.stop();
     bobController.stop();
+  });
+
+  it("opens saved messages for your own ID without asking the server for keys", async () => {
+    const f = makeController({
+      initialSession: session("token"),
+      getConversations: async () => ({ conversations: [] }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () => ({ messages: [], hasMore: false }),
+    });
+    f.controller.start();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await authenticate(f.sockets[0]!);
+    await f.controller.openChat(aliceId);
+    const state = f.controller.getSnapshot();
+    expect(state.error).toBe("");
+    expect(state.activePeer).toBe(aliceId);
+    expect(state.chats.find((chat) => chat.peerId === aliceId)).toMatchObject({
+      unreadCount: 0,
+    });
+
+    await f.controller.sendText("note to myself");
+    const send = f.sockets[0]!.decoded().find((frame) => frame.type === "send");
+    expect(send?.to).toBe(aliceId);
+    expect(f.tokens).toEqual([]);
+    expect(
+      decryptTextMessage({
+        recipientEncryptionPrivateKey: alice.encryption.privateKey,
+        senderEncryptionPublicKey: alice.encryption.publicKey,
+        senderId: aliceId,
+        recipientId: aliceId,
+        ciphertext: String(send?.ciphertext),
+      }),
+    ).toMatchObject({ text: "note to myself" });
+    f.controller.stop();
+  });
+
+  it("keeps your own notes out of unread counters and read markers", async () => {
+    const f = makeController({
+      initialSession: session("token"),
+      isVisible: () => true,
+      getConversations: async () => ({ conversations: [] }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () => ({ messages: [], hasMore: false }),
+    });
+    f.controller.start();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await authenticate(f.sockets[0]!);
+    await f.controller.openChat(bobId);
+    f.sockets[0]!.frame({
+      type: "message",
+      id: "self-row",
+      from: aliceId,
+      seq: "31",
+      ciphertext: encryptTextMessage({
+        senderEncryptionPrivateKey: alice.encryption.privateKey,
+        recipientEncryptionPublicKey: alice.encryption.publicKey,
+        senderId: aliceId,
+        recipientId: aliceId,
+        text: "note while another chat is open",
+        sentAt: Date.now(),
+      }),
+      createdAt: new Date().toISOString(),
+    });
+    await waitFor(() =>
+      f.controller
+        .getSnapshot()
+        .chats.some(
+          (chat) => chat.peerId === aliceId && chat.messages.length > 0,
+        ),
+    );
+    const saved = f.controller
+      .getSnapshot()
+      .chats.find((chat) => chat.peerId === aliceId)!;
+    expect(saved.unreadCount).toBe(0);
+    expect(saved.messages[0]).toMatchObject({
+      direction: "out",
+      text: "note while another chat is open",
+    });
+    expect(saved.messages[0]?.countedUnread).toBeUndefined();
+
+    await f.controller.openChat(aliceId);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(
+      f.sockets[0]!.decoded().filter((frame) => frame.type === "read"),
+    ).toEqual([]);
+    f.controller.stop();
+  });
+
+  it("shows a note to yourself once after sent, message and a history load", async () => {
+    const text = "single note to myself";
+    const sentAt = Date.now();
+    let sentClientMsgId = "";
+    const f = makeController({
+      initialSession: session("token"),
+      isVisible: () => true,
+      getConversations: async () => ({ conversations: [] }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () => ({
+        hasMore: false,
+        messages: sentClientMsgId
+          ? [
+              {
+                id: "server-self-row",
+                seq: "41",
+                direction: "out" as const,
+                clientMsgId: sentClientMsgId,
+                payload: encryptHistoryEntry({
+                  historyKey: alice.historyKey,
+                  clientMsgId: sentClientMsgId,
+                  peerId: aliceId,
+                  senderId: aliceId,
+                  text,
+                  sentAt,
+                }),
+                createdAt: new Date(sentAt).toISOString(),
+                deliveredAt: null,
+              },
+            ]
+          : [],
+      }),
+    });
+    f.controller.start();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await authenticate(f.sockets[0]!);
+    await f.controller.openChat(aliceId);
+    await waitFor(
+      () =>
+        f.controller.getSnapshot().chats.find((chat) => chat.peerId === aliceId)
+          ?.hasMore === false,
+    );
+    await f.controller.sendText(text);
+    const send = f.sockets[0]!.decoded().find(
+      (frame) => frame.type === "send",
+    )!;
+    sentClientMsgId = String(send.clientMsgId);
+    const createdAt = new Date(sentAt).toISOString();
+    f.sockets[0]!.frame({
+      type: "sent",
+      clientMsgId: sentClientMsgId,
+      id: "server-self-row",
+      seq: "41",
+      createdAt,
+    });
+    f.sockets[0]!.frame({
+      type: "message",
+      id: "server-self-row",
+      from: aliceId,
+      seq: "41",
+      ciphertext: String(send.ciphertext),
+      createdAt,
+    });
+    await waitFor(
+      () =>
+        f.controller.getSnapshot().chats.find((chat) => chat.peerId === aliceId)
+          ?.messages.length === 1,
+    );
+    await f.controller.loadHistory(aliceId);
+    const saved = f.controller
+      .getSnapshot()
+      .chats.find((chat) => chat.peerId === aliceId)!;
+    expect(saved.messages).toHaveLength(1);
+    expect(saved.messages[0]).toMatchObject({
+      id: "server-self-row",
+      text,
+      direction: "out",
+    });
+    expect(saved.unreadCount).toBe(0);
+    f.controller.stop();
   });
 });
 

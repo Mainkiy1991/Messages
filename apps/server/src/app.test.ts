@@ -2421,4 +2421,173 @@ suite("server authentication (PostgreSQL)", () => {
     ).toMatchObject({ v: 2, id: replayId, type: "text", text, sentAt });
     socket.close();
   });
+
+  it("delivers a note to yourself with sent and message frames and ignores a repeated clientMsgId", async () => {
+    const alice = await createAccount();
+    const clientMsgId = randomId();
+    const replayId = newReplayMessageId();
+    const sentAt = 1_700_000_000_000;
+    const text = "Заметка себе 🗒";
+    const ciphertext = encryptTextMessage({
+      senderEncryptionPrivateKey: alice.keys.encryption.privateKey,
+      recipientEncryptionPublicKey: alice.keys.encryption.publicKey,
+      senderId: alice.userId,
+      recipientId: alice.userId,
+      text,
+      sentAt,
+      messageId: replayId,
+    });
+    const senderCopy = encryptHistoryEntry({
+      historyKey: alice.keys.historyKey,
+      clientMsgId,
+      peerId: alice.userId,
+      senderId: alice.userId,
+      messageId: replayId,
+      text,
+      sentAt,
+    });
+    const url = await listen();
+    const socket = (await connectAuth(alice.token, url)).socket;
+    const sent = nextFrame(socket, (frame) => frame.type === "sent");
+    const message = nextFrame(socket, (frame) => frame.type === "message");
+    sendFrame(socket, {
+      type: "send",
+      clientMsgId,
+      to: alice.userId,
+      ciphertext,
+      senderCopy,
+    });
+    const [sentFrame, messageFrame] = await Promise.all([sent, message]);
+    expect(sentFrame.clientMsgId).toBe(clientMsgId);
+    expect(messageFrame).toMatchObject({
+      type: "message",
+      from: alice.userId,
+      id: sentFrame.id,
+      seq: sentFrame.seq,
+    });
+    expect(
+      decryptTextMessage({
+        recipientEncryptionPrivateKey: alice.keys.encryption.privateKey,
+        senderEncryptionPublicKey: alice.keys.encryption.publicKey,
+        senderId: alice.userId,
+        recipientId: alice.userId,
+        ciphertext: messageFrame.ciphertext as string,
+      }),
+    ).toMatchObject({ v: 2, id: replayId, type: "text", text, sentAt });
+
+    const repeated = nextFrame(
+      socket,
+      (frame) => frame.type === "sent" && frame.clientMsgId === clientMsgId,
+    );
+    sendFrame(socket, {
+      type: "send",
+      clientMsgId,
+      to: alice.userId,
+      ciphertext,
+      senderCopy,
+    });
+    expect((await repeated).id).toBe(sentFrame.id);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(
+      (frameBuffers.get(socket) ?? []).filter(
+        (frame) => frame.type === "message",
+      ),
+    ).toEqual([]);
+    const rows = await pool!.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM messages WHERE sender_id=$1 AND recipient_id=$1",
+      [alice.userId],
+    );
+    expect(rows.rows[0]!.count).toBe("1");
+    socket.close();
+  });
+
+  it("returns a note to yourself once with direction out in history", async () => {
+    const alice = await createAccount();
+    const clientMsgId = randomId();
+    const ciphertext = Buffer.from("self-cipher").toString("base64");
+    const senderCopy = Buffer.from("self-copy").toString("base64");
+    const url = await listen();
+    const socket = (await connectAuth(alice.token, url)).socket;
+    const sent = nextFrame(socket, (frame) => frame.type === "sent");
+    sendFrame(socket, {
+      type: "send",
+      clientMsgId,
+      to: alice.userId,
+      ciphertext,
+      senderCopy,
+    });
+    const sentFrame = await sent;
+    const history = await app.inject({
+      method: "GET",
+      url: `/history/${alice.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(history.json().messages).toHaveLength(1);
+    expect(history.json()).toMatchObject({
+      hasMore: false,
+      peerReadUpToSeq: null,
+      messages: [
+        {
+          seq: sentFrame.seq,
+          direction: "out",
+          clientMsgId,
+          payload: senderCopy,
+        },
+      ],
+    });
+    socket.close();
+  });
+
+  it("lists the saved chat with your own ID once and clears it through the usual route", async () => {
+    const alice = await createAccount();
+    const inserted = await pool!.query<{ seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$1,$2,'self-1','self-copy-1'),($1,$1,$3,'self-2','self-copy-2')
+       RETURNING seq::text AS seq`,
+      [alice.userId, randomId(), randomId()],
+    );
+    const conversations = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(conversations.json().conversations).toHaveLength(1);
+    expect(conversations.json().conversations[0].peerId).toBe(alice.userId);
+    const clear = await app.inject({
+      method: "DELETE",
+      url: `/conversations/${alice.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(clear.statusCode).toBe(200);
+    expect(clear.json()).toEqual({
+      clearedBeforeSeq: inserted.rows[1]!.seq,
+    });
+    const afterClear = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(afterClear.json().conversations).toEqual([]);
+    const history = await app.inject({
+      method: "GET",
+      url: `/history/${alice.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(history.json().messages).toEqual([]);
+  });
+
+  it("does not report presence for your own ID", async () => {
+    const alice = await createAccount();
+    const url = await listen();
+    const socket = (await connectAuth(alice.token, url)).socket;
+    const presence = nextFrame(socket, (frame) => frame.type === "presence");
+    sendFrame(socket, {
+      type: "presence_subscribe",
+      peerIds: [alice.userId],
+    });
+    expect((await presence).presences).toEqual([
+      { peerId: alice.userId, online: false, lastSeenAt: null },
+    ]);
+    socket.close();
+  });
 });

@@ -625,6 +625,80 @@ test.describe("real browser chat", () => {
     ).toBeVisible();
   });
 
+  test("saved messages open from your own ID, stay single and sync to a second device", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const alice = await createAccount(a.page);
+
+    await a.page.getByRole("button", { name: /New chat/u }).click();
+    await a.page.getByTestId("peer-id-input").fill(alice.id);
+    await a.page.getByTestId("new-chat").click();
+    await expect(a.page.getByTestId("saved-chat-title")).toHaveText(
+      "Saved messages",
+    );
+
+    await send(a.page, "Note to myself");
+    const notes = a.page.locator(".message-list .message-text");
+    await expect(notes).toHaveText(["Note to myself"]);
+    await expect(a.page.getByTestId("unread-count")).toHaveCount(0);
+    const status = a.page.getByTestId("message-status");
+    await expect(status).toHaveCount(1);
+    expect(await status.innerText()).not.toMatch(
+      /(sending|sent|delivered|read)/u,
+    );
+    await expect(a.page.getByTestId("presence-label")).toHaveCount(0);
+    await expect(a.page.getByTestId("presence-dot")).toHaveCount(0);
+
+    await a.page.reload();
+    await expect(a.page.getByTestId("connection-status")).toHaveAttribute(
+      "data-state",
+      "connected",
+    );
+    await chatWith(a.page, alice.id).click();
+    await expect(a.page.locator(".message-list .message-text")).toHaveText([
+      "Note to myself",
+    ]);
+    await expect(a.page.getByTestId("unread-count")).toHaveCount(0);
+
+    const second = await openUser(browser);
+    expect(await signIn(second.page, alice.phrase)).toBe(alice.id);
+    await chatWith(second.page, alice.id).click();
+    await expect(second.page.locator(".message-list .message-text")).toHaveText(
+      ["Note to myself"],
+    );
+    await expect(second.page.getByTestId("unread-count")).toHaveCount(0);
+  });
+
+  test("shows the empty saved messages row first with a hint", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const alice = await createAccount(a.page);
+
+    const rows = a.page.locator('[data-testid="chat-item"]');
+    await expect(rows).toHaveCount(1);
+    await expect(rows.first()).toHaveAttribute("data-peer-id", alice.id);
+    await chatWith(a.page, alice.id).click();
+    await expect(a.page.getByTestId("saved-chat-title")).toHaveText(
+      "Saved messages",
+    );
+    await expect(a.page.getByTestId("saved-hint")).toHaveText(
+      "Notes to yourself. They are stored encrypted and available on all your devices.",
+    );
+    await expect(a.page.getByLabel("Contact name (optional)")).toHaveCount(0);
+
+    const b = await openUser(browser);
+    const bob = await createAccount(b.page);
+    await openChat(a.page, bob.id);
+    await send(a.page, "A newer chat with Bob");
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
+    await expect(
+      a.page.locator('[data-testid="chat-item"]').first(),
+    ).toHaveAttribute("data-peer-id", alice.id);
+    await expect(chatWith(a.page, alice.id)).toContainText("Saved messages");
+  });
+
   test.afterEach(async () => {
     const errors = activeUsers.flatMap((user, index) =>
       user.errors.map((error) => `user ${index + 1}: ${error}`),

@@ -34,6 +34,7 @@ import {
   ChatController,
   chatPreview,
   contactLabel,
+  type Chat,
   type ChatControllerState,
 } from "./lib/chat-controller.js";
 import type { ChatMessage } from "./lib/chat-controller.js";
@@ -508,9 +509,14 @@ function App() {
   }
   const pinActionDisabled = (operation: "enable" | "change" | "disable") =>
     Boolean(pinOperation || (operation !== "enable" && pinCountdown > 0));
-  const chats = chatState.chats;
+  const chats = withSavedChat(chatState.chats, userId);
   const activePeer = chatState.activePeer;
   const socketState = chatState.connectionState;
+  const isSavedChat = activePeer !== "" && activePeer === userId;
+  const chatTitle = (peerId: string) =>
+    peerId === userId
+      ? t.savedMessages
+      : contactLabel(peerId, chatState.contacts);
   const activeChat = chats.find((chat) => chat.peerId === activePeer);
   const activeMessages = activeChat?.messages ?? [];
   useEffect(() => {
@@ -556,17 +562,15 @@ function App() {
   const errorText = (code: string) =>
     code === "invalid_id"
       ? t.invalidId
-      : code === "self_chat"
-        ? t.selfChat
-        : code === "user_not_found"
-          ? t.userNotFound
-          : code === "server_unavailable"
-            ? t.serverUnavailable
-            : code === "invalid_text"
-              ? t.invalidText
-              : code === "send_failed"
-                ? t.sendFailed
-                : t.badPeerKey;
+      : code === "user_not_found"
+        ? t.userNotFound
+        : code === "server_unavailable"
+          ? t.serverUnavailable
+          : code === "invalid_text"
+            ? t.invalidText
+            : code === "send_failed"
+              ? t.sendFailed
+              : t.badPeerKey;
   useEffect(() => {
     if (!keys || screen !== "home") return;
     let cancelled = false;
@@ -601,7 +605,7 @@ function App() {
     const next = controllerRef.current?.getSnapshot();
     setChatError(next?.error ? errorText(next.error) : "");
     if (next?.activePeer) {
-      if (newContactName.trim()) {
+      if (newContactName.trim() && next.activePeer !== userId) {
         const saved = await controllerRef.current?.saveContactName(
           next.activePeer,
           newContactName,
@@ -1181,12 +1185,14 @@ function App() {
                     >
                       <span className="chat-item-copy">
                         <strong>
-                          {contactLabel(chat.peerId, chatState.contacts)}
-                          <PresenceDot
-                            connectionState={socketState}
-                            presence={chatState.presence[chat.peerId]}
-                            onlineLabel={t.presenceOnline}
-                          />
+                          {chatTitle(chat.peerId)}
+                          {chat.peerId !== userId && (
+                            <PresenceDot
+                              connectionState={socketState}
+                              presence={chatState.presence[chat.peerId]}
+                              onlineLabel={t.presenceOnline}
+                            />
+                          )}
                         </strong>
                         <span>{chatPreview(chat, t)}</span>
                       </span>
@@ -1225,7 +1231,14 @@ function App() {
                       >
                         ← {t.back}
                       </button>
-                      {!editingName ? (
+                      {isSavedChat ? (
+                        <div
+                          className="contact-name-trigger saved-title"
+                          data-testid="saved-chat-title"
+                        >
+                          <strong>{t.savedMessages}</strong>
+                        </div>
+                      ) : !editingName ? (
                         <button
                           className="contact-name-trigger"
                           onClick={() => {
@@ -1363,6 +1376,17 @@ function App() {
                           {activeChat.loadingHistory ? t.loading : t.loadMore}
                         </button>
                       )}
+                      {isSavedChat &&
+                        !activeChat?.loadingHistory &&
+                        activeMessages.length === 0 &&
+                        activeChat?.hasMore === false && (
+                          <p
+                            className="muted saved-hint"
+                            data-testid="saved-hint"
+                          >
+                            {t.savedHint}
+                          </p>
+                        )}
                       {activeMessages.map((message) => (
                         <article
                           data-testid="message"
@@ -1382,6 +1406,7 @@ function App() {
                               { hour: "2-digit", minute: "2-digit" },
                             )}{" "}
                             {message.direction === "out" &&
+                              !isSavedChat &&
                               (message.status === "read"
                                 ? t.read
                                 : message.status === "delivered"
@@ -1567,6 +1592,24 @@ function App() {
       </section>
     </main>
   );
+}
+
+/**
+ * “Saved messages” is always the first row, even before any note exists.
+ */
+function withSavedChat(chats: Chat[], userId: string): Chat[] {
+  const saved = chats.find((chat) => chat.peerId === userId);
+  const row: Chat = saved ?? {
+    peerId: userId,
+    messages: [],
+    unreadCount: 0,
+    hasMore: true,
+  };
+  /* Your own notes never count as unread. */
+  return [
+    { ...row, peerId: userId, unreadCount: 0 },
+    ...chats.filter((chat) => chat.peerId !== userId),
+  ];
 }
 
 createRoot(document.getElementById("root")!).render(

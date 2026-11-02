@@ -722,6 +722,16 @@ select {
   margin: auto;
   text-align: center;
 }
+.saved-title {
+  cursor: default;
+}
+.saved-hint {
+  margin: auto;
+  max-width: 420px;
+  text-align: center;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
 .mobile-back {
   display: none;
   margin: 0;
