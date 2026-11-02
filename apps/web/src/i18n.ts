@@ -41,8 +41,16 @@ export const strings = {
     copy: "Копировать",
     copied: "Скопировано",
     logout: "Выйти",
-    confirmLogout:
-      "Выйти? Ключи будут стёрты с этого устройства. Войти снова можно только по сид-фразе. Убедитесь, что она сохранена.",
+    logoutCheckTitle: "Перед выходом проверим сид-фразу",
+    logoutCheckHint:
+      "Введите всю сид-фразу этого аккаунта. После выхода войти можно только с ней, восстановить её нельзя.",
+    logoutCheckSubmit: "Проверить и выйти",
+    logoutCheckWrong:
+      "Эта фраза не подходит к вашему аккаунту. Проверьте слова и порядок.",
+    logoutSkip: "Выйти без проверки",
+    logoutSkipWarning:
+      "Если вы не помните сид-фразу, после выхода вы не сможете войти в этот аккаунт. Потеря фразы означает потерю аккаунта и переписки: восстановить доступ невозможно. Убедитесь, что фраза записана в надёжном месте.",
+    logoutSkipConfirm: "Всё равно выйти",
     confirm: "Выйти",
     cancel: "Отмена",
     deleteChatMenu: "Удалить чат",
@@ -148,8 +156,16 @@ export const strings = {
     copy: "Copy",
     copied: "Copied",
     logout: "Sign out",
-    confirmLogout:
-      "Sign out? Keys will be erased from this device. You can sign in again only with your seed phrase. Make sure you have saved it.",
+    logoutCheckTitle: "Check your seed phrase before signing out",
+    logoutCheckHint:
+      "Enter the full seed phrase of this account. After signing out, it is the only way back in, and it cannot be recovered.",
+    logoutCheckSubmit: "Verify and sign out",
+    logoutCheckWrong:
+      "This phrase does not match your account. Check the words and their order.",
+    logoutSkip: "Sign out without checking",
+    logoutSkipWarning:
+      "If you do not remember your seed phrase, you will not be able to sign in to this account again. Losing the phrase means losing the account and its history: there is no recovery. Make sure the phrase is stored somewhere safe.",
+    logoutSkipConfirm: "Sign out anyway",
     confirm: "Sign out",
     cancel: "Cancel",
     deleteChatMenu: "Delete chat",
@@ -254,8 +270,16 @@ export const strings = {
     copy: "Копіювати",
     copied: "Скопійовано",
     logout: "Вийти",
-    confirmLogout:
-      "Вийти? Ключі буде стерто з цього пристрою. Увійти знову можна лише за сід-фразою. Переконайтеся, що зберегли її.",
+    logoutCheckTitle: "Перед виходом перевіримо сід-фразу",
+    logoutCheckHint:
+      "Введіть усю сід-фразу цього акаунта. Після виходу увійти можна лише з нею, відновити її неможливо.",
+    logoutCheckSubmit: "Перевірити й вийти",
+    logoutCheckWrong:
+      "Ця фраза не підходить до вашого акаунта. Перевірте слова та їх порядок.",
+    logoutSkip: "Вийти без перевірки",
+    logoutSkipWarning:
+      "Якщо ви не пам’ятаєте сід-фразу, після виходу ви не зможете увійти в цей акаунт. Втрата фрази означає втрату акаунта та листування: відновити доступ неможливо. Переконайтеся, що фразу записано в надійному місці.",
+    logoutSkipConfirm: "Усе одно вийти",
     confirm: "Вийти",
     cancel: "Скасувати",
     deleteChatMenu: "Видалити чат",
