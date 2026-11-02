@@ -30,6 +30,15 @@ Messages is an open-source non-commercial messenger without email or phone. Sign
 3. To start a chat, tap **Create chat**, enter the **Contact ID** (64 lowercase hex characters) and tap **New chat**.
 4. If you have not set a contact name, the last 10 characters of their ID are shown instead of a name in the chat list. To set a name, open the chat, choose **Contact name (optional)**, enter a name and tap **Save name**.
 
+## Saved messages
+
+Saved messages is a chat with yourself: notes, links, anything you do not want to lose.
+
+- Open **New chat** and enter your own ID from Profile — **Saved messages** opens. Its row is always the first one in the chat list.
+- Notes are encrypted exactly like normal messages and synced: after signing in with the seed phrase they are available on all your devices.
+- Saved messages have no delivery or read statuses, no unread counter and no "online" status: you write only to yourself. The name cannot be changed, and clearing the chat deletes the notes only for you.
+- Honestly about metadata: the server can see that you wrote notes to yourself and when, but never their contents.
+
 ## Messages and statuses
 
 The status of your message is shown under it and changes in order:

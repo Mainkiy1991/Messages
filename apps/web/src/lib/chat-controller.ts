@@ -82,7 +82,6 @@ export type ChatControllerState = {
 };
 export type ChatError =
   | "invalid_id"
-  | "self_chat"
   | "user_not_found"
   | "bad_peer_key"
   | "server_unavailable"
@@ -877,6 +876,8 @@ export class ChatController {
   }
 
   async saveContactName(peerId: string, value: string): Promise<boolean> {
+    /* The saved chat is named by the translation and never enters the contact book. */
+    if (peerId === this.userId) return true;
     const name = value.trim();
     if (Array.from(name).length > 64) return false;
     const local = { ...this.state.contacts };
@@ -974,7 +975,7 @@ export class ChatController {
       return;
     }
     if (peerId === this.userId) {
-      this.setError("self_chat");
+      this.openSavedChat();
       return;
     }
     try {
@@ -1014,6 +1015,10 @@ export class ChatController {
   }
 
   selectChat(peerId: string): void {
+    if (peerId === this.userId) {
+      this.openSavedChat();
+      return;
+    }
     if (!this.state.chats.some((chat) => chat.peerId === peerId)) return;
     this.update({ activePeer: peerId, error: "" });
     this.resetUnread(peerId);
@@ -1021,6 +1026,37 @@ export class ChatController {
     if (chat?.historyStale) void this.loadMissedHistory(peerId);
     else if (!chat?.historyLoaded) void this.loadHistory(peerId);
     this.scheduleRead(peerId);
+  }
+
+  /**
+   * Saved messages: a chat with your own ID. Notes are encrypted and stored
+   * like any other message, so they sync between your devices.
+   */
+  private openSavedChat(): void {
+    const peerId = this.userId;
+    if (
+      !this.serverConversationPeers.has(peerId) &&
+      !this.state.chats.some((chat) => chat.peerId === peerId)
+    )
+      this.sessionLocalPeers.add(peerId);
+    const now = new Date((this.deps.now ?? Date.now)()).toISOString();
+    const chats = this.state.chats.some((chat) => chat.peerId === peerId)
+      ? this.state.chats
+      : [
+          ...this.state.chats,
+          {
+            peerId,
+            messages: [],
+            unreadCount: 0,
+            hasMore: true,
+            lastCreatedAt: now,
+          },
+        ];
+    this.update({ chats: sortChats(chats), activePeer: peerId, error: "" });
+    this.resetUnread(peerId);
+    const chat = this.state.chats.find((item) => item.peerId === peerId);
+    if (chat?.historyStale) void this.loadMissedHistory(peerId);
+    else if (!chat?.historyLoaded) void this.loadHistory(peerId);
   }
 
   visibilityChanged(): void {
@@ -1123,7 +1159,10 @@ export class ChatController {
     }
     let recipientEncryptionPublicKey: Uint8Array;
     try {
-      recipientEncryptionPublicKey = await this.getVerifiedPeerKey(peerId);
+      recipientEncryptionPublicKey =
+        peerId === this.userId
+          ? this.keys.encryption.publicKey
+          : await this.getVerifiedPeerKey(peerId);
     } catch (error) {
       this.setError(this.peerKeyError(error));
       return;
@@ -1279,10 +1318,12 @@ export class ChatController {
       let replayId: string | undefined;
       let sentAt: number | undefined;
       let decryptFailed = false;
+      /* A note to yourself is encrypted with your own public key. */
+      const isSavedMessage = frame.from === this.userId;
       try {
-        const senderEncryptionPublicKey = await this.getVerifiedPeerKey(
-          frame.from,
-        );
+        const senderEncryptionPublicKey = isSavedMessage
+          ? this.keys.encryption.publicKey
+          : await this.getVerifiedPeerKey(frame.from);
         const decrypted = decryptTextMessage({
           recipientEncryptionPrivateKey: this.keys.encryption.privateKey,
           senderEncryptionPublicKey,
@@ -1307,7 +1348,7 @@ export class ChatController {
           sentAt !== undefined
             ? new Date(sentAt).toISOString()
             : frame.createdAt,
-        direction: "in",
+        direction: isSavedMessage ? "out" : "in",
         ...(typeof frame.seq === "string" && /^\d+$/u.test(frame.seq)
           ? { seq: frame.seq }
           : {}),
@@ -1325,7 +1366,7 @@ export class ChatController {
       const duplicate = replayId
         ? chat.messages.find(
             (item) =>
-              item.direction === "in" &&
+              item.direction === message.direction &&
               item.replayId === replayId &&
               item.replayAuthor === frame.from,
           )
@@ -1337,14 +1378,16 @@ export class ChatController {
         });
         return;
       }
-      const countedUnread = this.state.activePeer !== frame.from;
+      const countedUnread =
+        !isSavedMessage && this.state.activePeer !== frame.from;
       const unreadCount = countedUnread ? chat.unreadCount + 1 : 0;
       this.upsertMessage(
         frame.from,
         countedUnread ? { ...message, countedUnread: true } : message,
         unreadCount,
       );
-      if (this.state.activePeer === frame.from) this.scheduleRead(frame.from);
+      if (!isSavedMessage && this.state.activePeer === frame.from)
+        this.scheduleRead(frame.from);
       return;
     }
     if (frame.type === "sent" && typeof frame.clientMsgId === "string") {
@@ -1437,6 +1480,8 @@ export class ChatController {
   }
 
   private scheduleRead(peerId: string): void {
+    /* Your own notes never need a read marker. */
+    if (peerId === this.userId) return;
     if (this.stopped || this.state.activePeer !== peerId || !this.isVisible())
       return;
     const incoming =
@@ -1517,6 +1562,7 @@ export class ChatController {
     if (patch.chats) {
       const ids = this.state.chats
         .map((chat) => chat.peerId)
+        .filter((peerId) => peerId !== this.userId)
         .slice(0, MAX_CONVERSATIONS);
       const signature = ids.join(",");
       if (signature !== this.presencePeerSignature) {

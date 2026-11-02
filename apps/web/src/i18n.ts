@@ -71,7 +71,9 @@ export const strings = {
     peerId: "ID собеседника",
     newChat: "Новый чат",
     invalidId: "Введите ID из 64 строчных hex-символов.",
-    selfChat: "Нельзя создать чат с самим собой.",
+    savedMessages: "Избранное",
+    savedHint:
+      "Заметки для себя. Они хранятся зашифрованными и доступны на всех ваших устройствах.",
     userNotFound: "Пользователь не найден — он должен хотя бы раз войти.",
     badPeerKey: "Не удалось проверить ключ пользователя.",
     decryptFailed: "Не удалось расшифровать сообщение",
@@ -186,7 +188,9 @@ export const strings = {
     peerId: "Contact ID",
     newChat: "New chat",
     invalidId: "Enter a 64-character lowercase hex ID.",
-    selfChat: "You cannot start a chat with yourself.",
+    savedMessages: "Saved messages",
+    savedHint:
+      "Notes to yourself. They are stored encrypted and available on all your devices.",
     userNotFound: "User not found. They need to sign in at least once.",
     badPeerKey: "Could not verify this user's key.",
     decryptFailed: "Could not decrypt message",
@@ -300,7 +304,9 @@ export const strings = {
     peerId: "ID співрозмовника",
     newChat: "Новий чат",
     invalidId: "Введіть ID із 64 малих шістнадцяткових символів.",
-    selfChat: "Не можна створити чат із самим собою.",
+    savedMessages: "Збережене",
+    savedHint:
+      "Нотатки для себе. Вони зберігаються зашифрованими й доступні на всіх ваших пристроях.",
     userNotFound:
       "Користувача не знайдено. Він має хоча б раз увійти в обліковий запис.",
     badPeerKey: "Не вдалося перевірити ключ користувача.",
