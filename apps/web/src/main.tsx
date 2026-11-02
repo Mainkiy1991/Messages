@@ -1485,14 +1485,14 @@ function App() {
                 )}
                 <button
                   data-testid="logout-verify"
-                  className="danger"
+                  className="primary"
                   onClick={verifyAndLogout}
                 >
                   {t.logoutCheckSubmit}
                 </button>
                 <button
                   data-testid="logout-skip"
-                  className="text-button"
+                  className="danger"
                   onClick={() => setShowLogoutSkipWarning(true)}
                 >
                   {t.logoutSkip}
