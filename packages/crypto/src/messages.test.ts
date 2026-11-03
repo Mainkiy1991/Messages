@@ -8,10 +8,14 @@ import {
   decryptContactBook,
   decryptTextMessage,
   deriveKeys,
+  encryptEditMessage,
+  encryptHistoryEditEntry,
   encryptHistoryEntry,
   encryptContactBook,
   encryptTextMessage,
   newClientMsgId,
+  newReplayMessageId,
+  parseEditPayload,
 } from "./index.js";
 
 const alice = deriveKeys(
@@ -411,5 +415,176 @@ describe("sender history entries", () => {
           "AQMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA0gQ2LVLX0ZISjtniITtdIAyg+HM38K0SjQr9/8BXbYeMc0cZuf1UB0S7sYpBJdLyE+y54dqCLqstpzW76YNj1QvwR1UBHoapfcMoUI=",
       }),
     ).toEqual({ text: "Тест vector 👋", sentAt });
+  });
+});
+
+describe("message edits", () => {
+  const target = newReplayMessageId();
+  const clientMsgId = "03".repeat(16);
+
+  function encryptEdit(text: string, rev = 3) {
+    return encryptEditMessage({
+      senderEncryptionPrivateKey: alice.encryption.privateKey,
+      recipientEncryptionPublicKey: bob.encryption.publicKey,
+      senderId: aliceId,
+      recipientId: bobId,
+      target,
+      rev,
+      text,
+      sentAt,
+    });
+  }
+
+  it("round-trips an edit through the message and history envelopes", () => {
+    expect(
+      decryptTextMessage({
+        recipientEncryptionPrivateKey: bob.encryption.privateKey,
+        senderEncryptionPublicKey: alice.encryption.publicKey,
+        senderId: aliceId,
+        recipientId: bobId,
+        ciphertext: encryptEdit("Отредактировано 🚀"),
+      }),
+    ).toMatchObject({
+      v: 2,
+      type: "edit",
+      target,
+      rev: 3,
+      text: "Отредактировано 🚀",
+      sentAt,
+    });
+    expect(
+      decryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId,
+        senderId: aliceId,
+        peerId: bobId,
+        entry: encryptHistoryEditEntry({
+          historyKey: alice.historyKey,
+          clientMsgId,
+          senderId: aliceId,
+          peerId: bobId,
+          target,
+          rev: 3,
+          text: "Отредактировано 🚀",
+          sentAt,
+        }),
+      }),
+    ).toMatchObject({
+      v: 2,
+      type: "edit",
+      target,
+      rev: 3,
+      text: "Отредактировано 🚀",
+      sentAt,
+    });
+  });
+
+  it("binds an edit to the same participants, IDs and history entry", () => {
+    const ciphertext = encryptEdit("bound");
+    for (const participant of [
+      { senderId: bobId, recipientId: aliceId },
+      { senderId: aliceId, recipientId: aliceId },
+    ]) {
+      expect(() =>
+        decryptTextMessage({
+          recipientEncryptionPrivateKey: bob.encryption.privateKey,
+          senderEncryptionPublicKey: alice.encryption.publicKey,
+          ciphertext,
+          ...participant,
+        }),
+      ).toThrow(DecryptError);
+    }
+    const entry = encryptHistoryEditEntry({
+      historyKey: alice.historyKey,
+      clientMsgId,
+      senderId: aliceId,
+      peerId: bobId,
+      target,
+      rev: 1,
+      text: "bound",
+      sentAt,
+    });
+    expect(() =>
+      decryptHistoryEntry({
+        historyKey: bob.historyKey,
+        clientMsgId,
+        senderId: aliceId,
+        peerId: bobId,
+        entry,
+      }),
+    ).toThrow(DecryptError);
+    expect(() =>
+      decryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId: "04".repeat(16),
+        senderId: aliceId,
+        peerId: bobId,
+        entry,
+      }),
+    ).toThrow(DecryptError);
+  });
+
+  it("skips malformed edit payloads like unknown message types", () => {
+    expect(parseEditPayload({ target, rev: 1, text: "ok" })).toEqual({
+      target,
+      rev: 1,
+      text: "ok",
+    });
+    for (const invalid of [
+      null,
+      "edit",
+      { rev: 1, text: "ok" },
+      { target, rev: 1 },
+      { target: "bad", rev: 1, text: "ok" },
+      { target: "ab".repeat(16), rev: 1, text: "ok" },
+      { target, rev: 0, text: "ok" },
+      { target, rev: 101, text: "ok" },
+      { target, rev: 1.5, text: "ok" },
+      { target, rev: "1", text: "ok" },
+      { target, rev: 1, text: "   " },
+      { target, rev: 1, text: "x".repeat(4001) },
+    ])
+      expect(parseEditPayload(invalid)).toBeNull();
+  });
+
+  it("rejects invalid edit input before sending", () => {
+    const base = {
+      senderEncryptionPrivateKey: alice.encryption.privateKey,
+      recipientEncryptionPublicKey: bob.encryption.publicKey,
+      senderId: aliceId,
+      recipientId: bobId,
+      target,
+      rev: 1,
+      text: "ok",
+      sentAt,
+    };
+    expect(() => encryptEditMessage({ ...base, target: "bad" })).toThrow(
+      TypeError,
+    );
+    expect(() => encryptEditMessage({ ...base, rev: 0 })).toThrow(TypeError);
+    expect(() => encryptEditMessage({ ...base, rev: 101 })).toThrow(TypeError);
+    expect(() => encryptEditMessage({ ...base, rev: 2.5 })).toThrow(TypeError);
+    expect(() => encryptEditMessage({ ...base, text: "  " })).toThrow(
+      TypeError,
+    );
+    expect(() =>
+      encryptEditMessage({ ...base, text: "x".repeat(4001) }),
+    ).toThrow(TypeError);
+    const historyBase = {
+      historyKey: alice.historyKey,
+      clientMsgId,
+      senderId: aliceId,
+      peerId: bobId,
+      target,
+      rev: 1,
+      text: "ok",
+      sentAt,
+    };
+    expect(() =>
+      encryptHistoryEditEntry({ ...historyBase, target: "bad" }),
+    ).toThrow(TypeError);
+    expect(() => encryptHistoryEditEntry({ ...historyBase, rev: 101 })).toThrow(
+      TypeError,
+    );
   });
 });
