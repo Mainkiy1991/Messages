@@ -1498,16 +1498,16 @@ test.describe("real browser chat", () => {
     const bobText = b.page.locator(".message-list .message-text");
     await expect(bobText.filter({ hasText: "First version" })).toBeVisible();
 
-    const firstBubble = a.page
-      .locator('[data-testid="message"][data-direction="out"]')
-      .filter({ hasText: "First version" });
-    const widthBubble = a.page
-      .locator('[data-testid="message"][data-direction="out"]')
-      .filter({ hasText: "Width compare" });
+    const rows = a.page.locator('[data-testid="message-row"]');
+    const firstRow = rows.filter({ hasText: "First version" });
+    const widthRow = rows.filter({ hasText: "Width compare" });
+    const firstBubble = firstRow.getByTestId("message");
+    const widthBubble = widthRow.getByTestId("message");
     await expect(firstBubble).toHaveAttribute("data-status", "read");
     await expect(widthBubble).toHaveAttribute("data-status", "read");
 
-    const pencil = firstBubble.getByTestId("edit-message");
+    // The pencil lives in the row next to the bubble, not inside it.
+    const pencil = firstRow.getByTestId("edit-message");
     const opacity = () =>
       pencil.evaluate((element) => getComputedStyle(element).opacity);
     const outline = (locator: typeof firstBubble) =>
@@ -1602,13 +1602,12 @@ test.describe("real browser chat", () => {
     expect(markLayout.markColor).not.toBe(markLayout.textColor);
 
     // The note never widens a bubble: same text and status, different marks.
-    const bubbles = a.page.locator('[data-testid="message"]');
-    const editedBubble = bubbles.filter({
-      has: a.page.getByTestId("edited-mark"),
-    });
-    const plainBubble = bubbles.filter({
+    const editedRow = rows.filter({ has: a.page.getByTestId("edited-mark") });
+    const plainRow = rows.filter({
       hasNot: a.page.getByTestId("edited-mark"),
     });
+    const editedBubble = editedRow.getByTestId("message");
+    const plainBubble = plainRow.getByTestId("message");
     await expect(editedBubble).toHaveCount(1);
     await expect(plainBubble).toHaveCount(1);
     expect(await editedBubble.getAttribute("data-status")).toBe(
@@ -1624,7 +1623,7 @@ test.describe("real browser chat", () => {
     // Narrow screen: the pencil stays left of the bubble and nothing overflows.
     await a.page.setViewportSize({ width: 360, height: 640 });
     await editedBubble.hover();
-    const editedPencil = editedBubble.getByTestId("edit-message");
+    const editedPencil = editedRow.getByTestId("edit-message");
     await expect
       .poll(() =>
         editedPencil.evaluate((element) => getComputedStyle(element).opacity),
