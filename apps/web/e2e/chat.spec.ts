@@ -1689,8 +1689,12 @@ test.describe("real browser chat", () => {
     await expect(bobText.filter({ hasText: "Other" })).toBeVisible();
 
     const rows = a.page.locator('[data-testid="message-row"]');
-    const secretRow = rows.filter({ hasText: "Secret" });
-    const otherRow = rows.filter({ hasText: "Other" });
+    // The state note under a message also contains the word "other", so a row
+    // is matched by the beginning of its text, which is the message itself.
+    const rowWith = (text: string) =>
+      rows.filter({ hasText: new RegExp(`^${text}`, "u") });
+    const secretRow = rowWith("Secret");
+    const otherRow = rowWith("Other");
     const secretBubble = secretRow.getByTestId("message");
     const otherBubble = otherRow.getByTestId("message");
     await expect(secretBubble).toHaveAttribute("data-status", "read");
