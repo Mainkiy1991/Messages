@@ -4,7 +4,11 @@ import {
   decryptHistoryEntry,
   decryptTextMessage,
   encryptContactBook,
+  encryptDeleteAnswerMessage,
+  encryptDeleteRequestMessage,
   encryptEditMessage,
+  encryptHistoryDeleteAnswerEntry,
+  encryptHistoryDeleteRequestEntry,
   encryptHistoryEditEntry,
   encryptHistoryEntry,
   encryptTextMessage,
@@ -45,6 +49,8 @@ import {
 } from "./websocket.js";
 
 export type SendStatus = "sending" | "sent" | "delivered" | "read" | "error";
+/** Where a delete request of the original author stands in this chat. */
+export type DeletionStatus = "pending" | "accepted" | "declined";
 export type ChatMessage = {
   id: string;
   clientMsgId?: string;
@@ -61,6 +67,7 @@ export type ChatMessage = {
   replayAuthor?: string;
   countedUnread?: boolean;
   edited?: boolean;
+  deletion?: DeletionStatus;
 };
 export type Chat = {
   peerId: string;
@@ -99,6 +106,17 @@ export type SendEditError =
   | "edit_pending"
   | "edit_limit";
 export type SendEditResult = { ok: true } | { ok: false; error: SendEditError };
+/** Why a delete request or answer was rejected; the UI is a separate task. */
+export type SendDeleteError =
+  | ChatError
+  | "unknown_message"
+  | "not_deletable"
+  | "message_pending"
+  | "already_requested"
+  | "no_request"
+  | "already_answered";
+export type SendDeleteResult =
+  { ok: true } | { ok: false; error: SendDeleteError };
 
 export type ChatControllerDependencies = {
   fetcher?: FetchLike;
@@ -188,6 +206,8 @@ export class ChatController {
   private readonly peerReadMarkers = new Map<string, string>();
   /** Applied edit revisions per (chat, author, target message ID). */
   private readonly appliedEdits = new Map<string, AppliedEdit>();
+  /** Delete requests and answers per (chat, original author, target ID). */
+  private readonly deleteStates = new Map<string, DeleteState>();
   private readonly clearedBeforeSeqs = new Map<string, string>();
   private readonly sessionLocalPeers = new Set<string>();
   private serverConversationPeers = new Set<string>();
@@ -330,7 +350,8 @@ export class ChatController {
         let replayId: string | undefined;
         let createdAt = new Date().toISOString();
         let decryptFailed = false;
-        let queuedEdit = false;
+        /* Edits, delete requests and answers wait instead of a placeholder. */
+        let queuedState = false;
         try {
           const decrypted = decryptHistoryEntry({
             historyKey: this.keys.historyKey,
@@ -341,7 +362,7 @@ export class ChatController {
           });
           if (decrypted.type === "edit") {
             /* A queued edit waits for its original instead of a placeholder. */
-            queuedEdit = true;
+            queuedState = true;
             if (
               decrypted.target &&
               typeof decrypted.rev === "number" &&
@@ -354,6 +375,24 @@ export class ChatController {
                 rev: decrypted.rev,
                 text: decrypted.text,
               });
+          } else if (decrypted.type === "delete_request") {
+            queuedState = true;
+            if (decrypted.target)
+              this.applyDeleteRequest({
+                peerId: frame.to,
+                author: this.userId,
+                targetId: decrypted.target,
+              });
+          } else if (decrypted.type === "delete_answer") {
+            queuedState = true;
+            if (decrypted.target && typeof decrypted.accept === "boolean")
+              this.applyDeleteAnswer({
+                peerId: frame.to,
+                author: this.userId,
+                originalAuthor: frame.to,
+                targetId: decrypted.target,
+                accept: decrypted.accept,
+              });
           } else {
             text = decrypted.text ?? "";
             replayId = decrypted.id;
@@ -363,7 +402,7 @@ export class ChatController {
         } catch {
           decryptFailed = true;
         }
-        if (queuedEdit) continue;
+        if (queuedState) continue;
         this.upsertMessage(frame.to, {
           id: frame.clientMsgId,
           clientMsgId: frame.clientMsgId,
@@ -805,6 +844,30 @@ export class ChatController {
                   rev: decrypted.rev,
                   seq: entry.seq,
                   text: decrypted.text,
+                });
+              return null;
+            }
+            if (decrypted.type === "delete_request") {
+              /* Requests and answers are rows of the history, not messages. */
+              if (decrypted.target)
+                this.applyDeleteRequest({
+                  peerId,
+                  author: entry.direction === "out" ? this.userId : peerId,
+                  targetId: decrypted.target,
+                  seq: entry.seq,
+                });
+              return null;
+            }
+            if (decrypted.type === "delete_answer") {
+              if (decrypted.target && typeof decrypted.accept === "boolean")
+                this.applyDeleteAnswer({
+                  peerId,
+                  author: entry.direction === "out" ? this.userId : peerId,
+                  originalAuthor:
+                    entry.direction === "out" ? peerId : this.userId,
+                  targetId: decrypted.target,
+                  accept: decrypted.accept,
+                  seq: entry.seq,
                 });
               return null;
             }
@@ -1295,6 +1358,9 @@ export class ChatController {
       return { ok: false, error: "not_editable" };
     if (original.status === "sending")
       return { ok: false, error: "edit_pending" };
+    /* A hidden or requested message is not editable until the answer declines. */
+    if (original.deletion === "pending" || original.deletion === "accepted")
+      return { ok: false, error: "not_editable" };
     if (!text.trim() || Array.from(text).length > MAX_MESSAGE_CHARS)
       return { ok: false, error: "invalid_text" };
     const rev =
@@ -1353,6 +1419,151 @@ export class ChatController {
   }
 
   /**
+   * Asks the peer to hide your own message. The request travels as a normal
+   * encrypted frame (queue, statuses and retries are shared with text) and is
+   * applied locally right after it is queued.
+   */
+  async sendDeleteRequest(
+    peerId: string,
+    targetId: string,
+  ): Promise<SendDeleteResult> {
+    const original = this.state.chats
+      .find((chat) => chat.peerId === peerId)
+      ?.messages.find((message) => message.replayId === targetId);
+    if (!original) return { ok: false, error: "unknown_message" };
+    if (
+      !original.replayId ||
+      original.decryptFailed ||
+      original.direction !== "out" ||
+      original.replayAuthor !== this.userId ||
+      peerId === this.userId
+    )
+      return { ok: false, error: "not_deletable" };
+    if (original.status === "sending")
+      return { ok: false, error: "message_pending" };
+    if (this.deleteStates.get(editKey(peerId, this.userId, targetId))?.request)
+      return { ok: false, error: "already_requested" };
+    let recipientEncryptionPublicKey: Uint8Array;
+    try {
+      recipientEncryptionPublicKey = await this.getVerifiedPeerKey(peerId);
+    } catch (error) {
+      return { ok: false, error: this.peerKeyError(error) };
+    }
+    const sentAt = (this.deps.now ?? Date.now)();
+    const clientMsgId = (this.deps.makeClientMsgId ?? newClientMsgId)();
+    const frame: OutgoingFrame = {
+      type: "send",
+      clientMsgId,
+      to: peerId,
+      ciphertext: encryptDeleteRequestMessage({
+        senderEncryptionPrivateKey: this.keys.encryption.privateKey,
+        recipientEncryptionPublicKey,
+        senderId: this.userId,
+        recipientId: peerId,
+        target: targetId,
+        sentAt,
+      }),
+      senderCopy: encryptHistoryDeleteRequestEntry({
+        historyKey: this.keys.historyKey,
+        clientMsgId,
+        peerId,
+        senderId: this.userId,
+        target: targetId,
+        sentAt,
+      }),
+    };
+    try {
+      await (this.deps.outbox ?? indexedDbOutbox).put(this.userId, frame);
+    } catch {
+      return { ok: false, error: "server_unavailable" };
+    }
+    this.applyDeleteRequest({ peerId, author: this.userId, targetId });
+    this.update({ error: "" });
+    try {
+      this.connection.send(frame);
+    } catch {
+      this.setError("server_unavailable");
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Answers a peer's delete request: `accept` hides the original at its author
+   * and in this chat. The answer is applied locally as soon as it is queued.
+   */
+  async sendDeleteAnswer(
+    peerId: string,
+    targetId: string,
+    accept: boolean,
+  ): Promise<SendDeleteResult> {
+    const original = this.state.chats
+      .find((chat) => chat.peerId === peerId)
+      ?.messages.find((message) => message.replayId === targetId);
+    if (!original) return { ok: false, error: "unknown_message" };
+    if (
+      !original.replayId ||
+      original.decryptFailed ||
+      original.direction !== "in" ||
+      original.replayAuthor !== peerId ||
+      peerId === this.userId
+    )
+      return { ok: false, error: "not_deletable" };
+    const state = this.deleteStates.get(editKey(peerId, peerId, targetId));
+    if (!state?.request) return { ok: false, error: "no_request" };
+    if (state.answer) return { ok: false, error: "already_answered" };
+    let recipientEncryptionPublicKey: Uint8Array;
+    try {
+      recipientEncryptionPublicKey = await this.getVerifiedPeerKey(peerId);
+    } catch (error) {
+      return { ok: false, error: this.peerKeyError(error) };
+    }
+    const sentAt = (this.deps.now ?? Date.now)();
+    const clientMsgId = (this.deps.makeClientMsgId ?? newClientMsgId)();
+    const frame: OutgoingFrame = {
+      type: "send",
+      clientMsgId,
+      to: peerId,
+      ciphertext: encryptDeleteAnswerMessage({
+        senderEncryptionPrivateKey: this.keys.encryption.privateKey,
+        recipientEncryptionPublicKey,
+        senderId: this.userId,
+        recipientId: peerId,
+        target: targetId,
+        accept,
+        sentAt,
+      }),
+      senderCopy: encryptHistoryDeleteAnswerEntry({
+        historyKey: this.keys.historyKey,
+        clientMsgId,
+        peerId,
+        senderId: this.userId,
+        target: targetId,
+        accept,
+        sentAt,
+      }),
+    };
+    try {
+      await (this.deps.outbox ?? indexedDbOutbox).put(this.userId, frame);
+    } catch {
+      return { ok: false, error: "server_unavailable" };
+    }
+    this.applyDeleteAnswer({
+      peerId,
+      author: this.userId,
+      originalAuthor: peerId,
+      targetId,
+      accept,
+    });
+    this.update({ error: "" });
+    try {
+      this.connection.send(frame);
+    } catch {
+      this.setError("server_unavailable");
+    }
+    return { ok: true };
+  }
+
+  /**
    * Remembers an incoming edit so it applies to the original now, or later
    * when an older history page finally loads that message. Edits never become
    * chat messages, so they cannot add a bubble or an unread count.
@@ -1397,15 +1608,104 @@ export class ChatController {
     return true;
   }
 
+  /**
+   * A delete request is accepted only from the original author and only once
+   * per original; it never becomes a bubble, an unread count or a reorder.
+   */
+  private applyDeleteRequest(input: IncomingDeleteRequest): void {
+    /* Saved messages have no peer to ask, so nothing is tracked there. */
+    if (input.peerId === this.userId) return;
+    if (!this.registerDeleteRequest(input)) return;
+    this.refreshStoredState(input.peerId, input.targetId);
+  }
+
+  /**
+   * An answer counts only when it comes from the peer of the original author.
+   * It is stored even before its request is known, but acts after the request.
+   */
+  private applyDeleteAnswer(input: IncomingDeleteAnswer): void {
+    if (input.peerId === this.userId) return;
+    if (input.author === input.originalAuthor) return;
+    if (!this.registerDeleteAnswer(input)) return;
+    this.refreshStoredState(input.peerId, input.targetId);
+  }
+
+  /** One request per original; a lower server seq wins when both are known. */
+  private registerDeleteRequest(input: IncomingDeleteRequest): boolean {
+    const key = editKey(input.peerId, input.author, input.targetId);
+    const current = this.deleteStates.get(key);
+    if (
+      current?.request &&
+      (!input.seq ||
+        !current.request.seq ||
+        BigInt(input.seq) >= BigInt(current.request.seq))
+    )
+      return false;
+    this.deleteStates.set(key, {
+      ...current,
+      request: input.seq ? { seq: input.seq } : {},
+    });
+    return true;
+  }
+
+  /** The first answer is final; a lower server seq wins when both are known. */
+  private registerDeleteAnswer(input: IncomingDeleteAnswer): boolean {
+    const key = editKey(input.peerId, input.originalAuthor, input.targetId);
+    const current = this.deleteStates.get(key);
+    if (
+      current?.answer &&
+      (!input.seq ||
+        !current.answer.seq ||
+        BigInt(input.seq) >= BigInt(current.answer.seq))
+    )
+      return false;
+    this.deleteStates.set(key, {
+      ...current,
+      answer: {
+        accept: input.accept,
+        ...(input.seq ? { seq: input.seq } : {}),
+      },
+    });
+    return true;
+  }
+
+  /** Re-applies edits and delete states to a chat that already holds the row. */
+  private refreshStoredState(peerId: string, targetId: string): void {
+    const chat = this.state.chats.find((item) => item.peerId === peerId);
+    if (!chat?.messages.some((message) => message.replayId === targetId))
+      return;
+    const messages = this.applyStoredEdits(peerId, chat.messages);
+    if (messages === chat.messages) return;
+    this.update({
+      chats: this.state.chats.map((item) =>
+        item.peerId === peerId ? { ...item, messages } : item,
+      ),
+    });
+  }
+
   private applyStoredEdit(peerId: string, message: ChatMessage): ChatMessage {
     if (!message.replayId || !message.replayAuthor || message.decryptFailed)
       return message;
-    const edit = this.appliedEdits.get(
-      editKey(peerId, message.replayAuthor, message.replayId),
-    );
-    if (!edit) return message;
-    if (message.edited && message.text === edit.text) return message;
-    return { ...message, text: edit.text, edited: true };
+    const key = editKey(peerId, message.replayAuthor, message.replayId);
+    let result = message;
+    const edit = this.appliedEdits.get(key);
+    if (edit && !(result.edited && result.text === edit.text))
+      result = { ...result, text: edit.text, edited: true };
+    /* A request without an effective answer leaves the original untouched. */
+    const deletion = deletionStatus(this.deleteStates.get(key));
+    if (result.deletion !== deletion) {
+      const next: ChatMessage = { ...result };
+      if (deletion === undefined) delete next.deletion;
+      else next.deletion = deletion;
+      result = next;
+    }
+    /* The peer hid the text: keep it out of memory and drop late edits. */
+    if (result.deletion !== "accepted" || result.direction !== "in")
+      return result;
+    if (result.text === "" && result.edited === undefined) return result;
+    const cleared: ChatMessage = { ...result, text: "" };
+    delete cleared.edited;
+    return cleared;
   }
 
   private applyStoredEdits(
@@ -1550,6 +1850,33 @@ export class ChatController {
               targetId: decrypted.target,
               rev: decrypted.rev,
               text: decrypted.text,
+              ...(typeof frame.seq === "string" && /^\d+$/u.test(frame.seq)
+                ? { seq: frame.seq }
+                : {}),
+            });
+          return;
+        }
+        if (decrypted.type === "delete_request") {
+          /* A request is never a message either. */
+          if (decrypted.target)
+            this.applyDeleteRequest({
+              peerId: frame.from,
+              author: frame.from,
+              targetId: decrypted.target,
+              ...(typeof frame.seq === "string" && /^\d+$/u.test(frame.seq)
+                ? { seq: frame.seq }
+                : {}),
+            });
+          return;
+        }
+        if (decrypted.type === "delete_answer") {
+          if (decrypted.target && typeof decrypted.accept === "boolean")
+            this.applyDeleteAnswer({
+              peerId: frame.from,
+              author: frame.from,
+              originalAuthor: this.userId,
+              targetId: decrypted.target,
+              accept: decrypted.accept,
               ...(typeof frame.seq === "string" && /^\d+$/u.test(frame.seq)
                 ? { seq: frame.seq }
                 : {}),
@@ -1820,9 +2147,50 @@ type IncomingEdit = {
   text: string;
 };
 
+/** One request and at most one answer per (chat, original author, target). */
+type DeleteState = {
+  request?: { seq?: string };
+  answer?: { accept: boolean; seq?: string };
+};
+
+type IncomingDeleteRequest = {
+  peerId: string;
+  author: string;
+  targetId: string;
+  seq?: string;
+};
+
+type IncomingDeleteAnswer = {
+  peerId: string;
+  author: string;
+  originalAuthor: string;
+  targetId: string;
+  accept: boolean;
+  seq?: string;
+};
+
 /** An edit belongs to one chat, one author and one original message ID. */
 function editKey(peerId: string, author: string, targetId: string): string {
   return `${peerId}\n${author}\n${targetId}`;
+}
+
+/**
+ * A request without an effective answer is pending. An answer that is not
+ * newer than the request in the server sequence does not act.
+ */
+function deletionStatus(
+  state: DeleteState | undefined,
+): DeletionStatus | undefined {
+  if (!state?.request) return undefined;
+  const answer = state.answer;
+  if (
+    !answer ||
+    (answer.seq &&
+      state.request.seq &&
+      BigInt(answer.seq) <= BigInt(state.request.seq))
+  )
+    return "pending";
+  return answer.accept ? "accepted" : "declined";
 }
 
 export function unreadAfterHistoryMerge(
