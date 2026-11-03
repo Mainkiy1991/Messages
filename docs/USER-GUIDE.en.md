@@ -64,6 +64,16 @@ The other person sees the new text with an **edited** note next to the time. The
 
 Messages sent before editing appeared (the old format) cannot be changed.
 
+## Deletion request
+
+You can ask the other person to delete your message: hover over it (on a phone, tap it) and press the basket icon next to the pencil. A question appears above the input field; send the request with **Send request** or close the row with **Cancel**.
+
+The other person sees a notice under the message: **The other person asks to delete this message**, with the buttons **Delete for me** and **Keep**. If they accept, the text is replaced with **Message deleted**; if they refuse, the message stays. Under your own message you see what happened: **deletion requested**, **the other person deleted it on their side**, or **the other person kept the message**.
+
+You cannot ask again: after a refusal the message stays with the other person for good. Your own copy does not disappear — this is a request to the other person, not a deletion on your side.
+
+Nothing is guaranteed. This is hiding inside the other person's app: they may have read, copied or photographed the text earlier, a modified client can ignore the request, and the encrypted record stays on the server and is not erased. People who have not reloaded the page (F5) do not see the request, so you may see "deletion requested" indefinitely. Messages of the old format and Saved messages are not supported.
+
 ## PIN (optional)
 
 The PIN encrypts the local keys on this device. It is never sent to the server: the server does not know it and cannot check it.

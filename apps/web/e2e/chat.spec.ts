@@ -1669,4 +1669,179 @@ test.describe("real browser chat", () => {
     expect(await outline(editedBubble)).toBe("none");
     await expect(a.page.getByTestId("message-input")).toHaveValue("");
   });
+
+  test("requests deletion, answers it and keeps the state after reload", async ({
+    browser,
+  }) => {
+    test.setTimeout(180_000);
+
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+
+    await openChat(a.page, bob.id);
+    await send(a.page, "Secret");
+    await send(a.page, "Other");
+    await openChat(b.page, alice.id);
+    const bobText = b.page.locator(".message-list .message-text");
+    await expect(bobText.filter({ hasText: "Secret" })).toBeVisible();
+    await expect(bobText.filter({ hasText: "Other" })).toBeVisible();
+
+    const rows = a.page.locator('[data-testid="message-row"]');
+    // The state note under a message also contains the word "other", so a row
+    // is matched by the beginning of its text, which is the message itself.
+    const rowWith = (text: string) =>
+      rows.filter({ hasText: new RegExp(`^${text}`, "u") });
+    const secretRow = rowWith("Secret");
+    const otherRow = rowWith("Other");
+    const secretBubble = secretRow.getByTestId("message");
+    const otherBubble = otherRow.getByTestId("message");
+    await expect(secretBubble).toHaveAttribute("data-status", "read");
+
+    // The basket lives in the row next to the bubble, not inside it.
+    const basket = secretRow.getByTestId("request-delete");
+    const opacity = (locator: typeof basket) =>
+      locator.evaluate((element) => getComputedStyle(element).opacity);
+    // The hover-only basket stays in the DOM but is invisible until hovered.
+    expect(await opacity(basket)).toBe("0");
+    await secretBubble.hover();
+    await expect.poll(() => opacity(basket)).toBe("1");
+
+    // Icon only: no caption, a 32x32 hit area and a 14-16px icon.
+    expect((await basket.innerText()).trim()).toBe("");
+    expect(await basket.getAttribute("aria-label")).toBe(
+      "Request deletion from the other person",
+    );
+    const basketBox = (await basket.boundingBox())!;
+    expect(basketBox.width).toBeGreaterThanOrEqual(32);
+    expect(basketBox.height).toBeGreaterThanOrEqual(32);
+    const iconSize = await basket
+      .locator("svg")
+      .evaluate((icon) => Number.parseFloat(getComputedStyle(icon).width));
+    expect(iconSize).toBeGreaterThanOrEqual(14);
+    expect(iconSize).toBeLessThanOrEqual(16);
+
+    // Pencil first, then the basket, then the bubble.
+    const pencilBox = (await secretRow
+      .getByTestId("edit-message")
+      .boundingBox())!;
+    const secretBox = (await secretBubble.boundingBox())!;
+    expect(pencilBox.x).toBeLessThan(basketBox.x);
+    expect(basketBox.x + basketBox.width).toBeLessThanOrEqual(secretBox.x + 1);
+
+    // One confirmation row at a time, then the request is sent.
+    await basket.click();
+    const confirm = a.page.getByTestId("delete-confirm");
+    await expect(confirm).toBeVisible();
+    await expect(confirm).toContainText(
+      "Ask the other person to delete this message?",
+    );
+    await confirm.getByTestId("confirm-delete-request").click();
+    await expect(confirm).toHaveCount(0);
+    await expect(secretRow.getByTestId("deletion-mark")).toHaveText(
+      "deletion requested",
+    );
+    await expect(secretBubble).toContainText("Secret");
+
+    // The recipient sees the notice; the text is still there.
+    const notice = b.page.getByTestId("delete-notice");
+    await expect(notice).toHaveCount(1);
+    await expect(notice).toContainText(
+      "The other person asks to delete this message",
+    );
+    await expect(notice.getByTestId("accept-delete")).toBeVisible();
+    await expect(notice.getByTestId("keep-message")).toBeVisible();
+
+    // Narrow screen: the notice wraps instead of overflowing the message list,
+    // and the two actions stay left of the bubble inside the conversation.
+    await a.page.setViewportSize({ width: 360, height: 640 });
+    await b.page.setViewportSize({ width: 360, height: 640 });
+    await otherBubble.hover();
+    const narrowBasket = otherRow.getByTestId("request-delete");
+    const narrowPencil = otherRow.getByTestId("edit-message");
+    await expect.poll(() => opacity(narrowBasket)).toBe("1");
+    const narrowPencilBox = (await narrowPencil.boundingBox())!;
+    const narrowBasketBox = (await narrowBasket.boundingBox())!;
+    const narrowBubbleBox = (await otherBubble.boundingBox())!;
+    const conversation = (await a.page.locator(".conversation").boundingBox())!;
+    expect(narrowPencilBox.x).toBeGreaterThanOrEqual(conversation.x - 1);
+    expect(narrowBubbleBox.x).toBeGreaterThanOrEqual(
+      narrowBasketBox.x + narrowBasketBox.width - 1,
+    );
+    expect(narrowBubbleBox.x + narrowBubbleBox.width).toBeLessThanOrEqual(
+      conversation.x + conversation.width + 1,
+    );
+    await expect(notice).toBeVisible();
+    expect(
+      await b.page
+        .locator(".message-list")
+        .evaluate((list) => list.scrollWidth - list.clientWidth),
+    ).toBeLessThanOrEqual(0);
+    await a.page.setViewportSize({ width: 1440, height: 900 });
+    await b.page.setViewportSize({ width: 1440, height: 900 });
+
+    // "Keep": the notice disappears, the text stays and the author is told.
+    await notice.getByTestId("keep-message").click();
+    await expect(notice).toHaveCount(0);
+    await expect(bobText.filter({ hasText: "Secret" })).toBeVisible();
+    await expect(secretRow.getByTestId("deletion-mark")).toHaveText(
+      "the other person kept the message",
+    );
+    // A refused request cannot be repeated, so the basket is gone for good.
+    await expect(secretRow.getByTestId("request-delete")).toHaveCount(0);
+
+    // "Delete for me": the recipient loses the text, the author keeps it.
+    await otherBubble.hover();
+    await otherRow.getByTestId("request-delete").click();
+    await a.page.getByTestId("confirm-delete-request").click();
+    const secondNotice = b.page.getByTestId("delete-notice");
+    await expect(secondNotice).toHaveCount(1);
+    await secondNotice.getByTestId("accept-delete").click();
+    await expect(secondNotice).toHaveCount(0);
+    await expect(b.page.getByTestId("message-deleted")).toHaveCount(1);
+    await expect(b.page.getByTestId("message-deleted")).toHaveText(
+      "Message deleted",
+    );
+    await expect(bobText.filter({ hasText: "Other" })).toHaveCount(0);
+    await expect(otherRow.getByTestId("deletion-mark")).toHaveText(
+      "the other person deleted it on their side",
+    );
+    await expect(
+      a.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: "Other" }),
+    ).toBeVisible();
+    // The chat list preview does not reveal the hidden text either.
+    await expect(
+      chatWith(b.page, alice.id).locator(".chat-item-copy > span"),
+    ).toHaveText("Message deleted");
+
+    // The state comes from history, so a reload keeps it on both sides.
+    await a.page.reload();
+    await b.page.reload();
+    for (const user of [a, b]) {
+      await expect(user.page.getByTestId("connection-status")).toHaveAttribute(
+        "data-state",
+        "connected",
+      );
+    }
+    await expect(a.page.getByTestId("deletion-mark")).toHaveCount(2);
+    await expect(secretRow.getByTestId("deletion-mark")).toHaveText(
+      "the other person kept the message",
+    );
+    await expect(otherRow.getByTestId("deletion-mark")).toHaveText(
+      "the other person deleted it on their side",
+    );
+    await expect(
+      a.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: "Other" }),
+    ).toBeVisible();
+    await expect(a.page.getByTestId("request-delete")).toHaveCount(0);
+    await expect(b.page.getByTestId("delete-notice")).toHaveCount(0);
+    await expect(b.page.getByTestId("message-deleted")).toHaveCount(1);
+    await expect(bobText.filter({ hasText: "Other" })).toHaveCount(0);
+    await expect(bobText.filter({ hasText: "Secret" })).toBeVisible();
+  });
 });
