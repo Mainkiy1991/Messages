@@ -6,6 +6,7 @@ import {
   draftAfterEdit,
   startMessageEdit,
   submitMessageEdit,
+  toggleEditAction,
 } from "./message-edit.js";
 
 const aliceId = "a".repeat(64);
@@ -155,5 +156,55 @@ describe("message edit action visibility", () => {
     expect(canEditMessage(chatMessage({ decryptFailed: true }), aliceId)).toBe(
       false,
     );
+  });
+});
+
+describe("touch toggle of the edit action", () => {
+  const toggle = (input: {
+    current: string | null;
+    message: ChatMessage;
+    hasSelection?: boolean;
+  }) =>
+    toggleEditAction({
+      current: input.current,
+      message: input.message,
+      userId: aliceId,
+      hasSelection: input.hasSelection ?? false,
+    });
+
+  it("shows the pencil on the tapped message and hides it on the second tap", () => {
+    const message = chatMessage({ id: "row-1" });
+    expect(toggle({ current: null, message })).toBe("row-1");
+    expect(toggle({ current: "row-1", message })).toBeNull();
+  });
+
+  it("keeps only one active message and moves the pencil to another own bubble", () => {
+    const first = chatMessage({ id: "row-1" });
+    const second = chatMessage({ id: "row-2" });
+    expect(toggle({ current: "row-1", message: second })).toBe("row-2");
+    expect(toggle({ current: "row-2", message: first })).toBe("row-1");
+  });
+
+  it("hides the pencil when a message that cannot be edited is tapped", () => {
+    expect(
+      toggle({ current: "row-1", message: chatMessage({ direction: "in" }) }),
+    ).toBeNull();
+    expect(
+      toggle({ current: "row-1", message: chatMessage({ status: "error" }) }),
+    ).toBeNull();
+    expect(
+      toggle({
+        current: "row-1",
+        message: chatMessage({ replayId: undefined }),
+      }),
+    ).toBeNull();
+  });
+
+  it("changes nothing while a text selection is active", () => {
+    const message = chatMessage({ id: "row-2" });
+    expect(toggle({ current: "row-1", message, hasSelection: true })).toBe(
+      "row-1",
+    );
+    expect(toggle({ current: null, message, hasSelection: true })).toBeNull();
   });
 });

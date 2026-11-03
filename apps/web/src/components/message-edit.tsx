@@ -2,9 +2,10 @@ import type { ChatMessage } from "../lib/chat-controller.js";
 import { canEditMessage } from "../lib/message-edit.js";
 
 /**
- * Small pencil action of your own bubble. A native button keeps the action
- * reachable from the keyboard, so it follows the retry action of failed
- * messages instead of a hover-only menu.
+ * Pencil action of your own bubble. It is icon-only: the accessible name lives
+ * in `aria-label`/`title`, so the bubble does not grow and the caption is never
+ * visible. A native button keeps the action reachable from the keyboard even
+ * while hover styles hide it.
  */
 export function EditMessageButton({
   message,
@@ -38,7 +39,6 @@ export function EditMessageButton({
           fill="currentColor"
         />
       </svg>
-      {label}
     </button>
   );
 }
@@ -68,7 +68,7 @@ export function EditBanner({
   );
 }
 
-/** Muted "edited" note that sits in the time line of an edited bubble. */
+/** Muted "edited" note that sits on its own line under the status line. */
 export function EditedMark({ label }: { label: string }) {
   return (
     <span className="edited-mark" data-testid="edited-mark">

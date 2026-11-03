@@ -49,6 +49,32 @@ export function startMessageEdit(input: {
   };
 }
 
+/**
+ * Touch screens have no hover, so the pencil of an own bubble is revealed by
+ * tapping the bubble. Only one message can be active: tapping the same bubble
+ * again hides the pencil, tapping another own bubble moves it there and tapping
+ * a message that cannot be edited hides it. A tap that finishes a text
+ * selection changes nothing, so selecting text never flashes the action.
+ */
+export function toggleEditAction(input: {
+  current: string | null;
+  message: Pick<
+    ChatMessage,
+    | "id"
+    | "direction"
+    | "status"
+    | "replayId"
+    | "decryptFailed"
+    | "replayAuthor"
+  >;
+  userId?: string;
+  hasSelection: boolean;
+}): string | null {
+  if (input.hasSelection) return input.current;
+  if (!canEditMessage(input.message, input.userId)) return null;
+  return input.current === input.message.id ? null : input.message.id;
+}
+
 /** Sending stays disabled while the text is empty or was not changed. */
 export function canSubmitEdit(state: MessageEditState, draft: string): boolean {
   return draft.trim().length > 0 && draft !== state.originalText;

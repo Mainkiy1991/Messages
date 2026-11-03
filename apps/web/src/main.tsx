@@ -52,6 +52,7 @@ import {
   draftAfterEdit,
   startMessageEdit,
   submitMessageEdit,
+  toggleEditAction,
   type MessageEditState,
 } from "./lib/message-edit.js";
 import "./style.css";
@@ -112,6 +113,7 @@ function App() {
   const [contactNameDraft, setContactNameDraft] = useState("");
   const [draft, setDraft] = useState("");
   const [editState, setEditState] = useState<MessageEditState | null>(null);
+  const [activeEditId, setActiveEditId] = useState<string | null>(null);
   const [chatError, setChatError] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileSection, setProfileSection] = useState<
@@ -567,6 +569,9 @@ function App() {
     setDraft(draftAfterEdit(editState));
     setEditState(null);
   }, [activePeer, editState]);
+  useEffect(() => {
+    setActiveEditId(null);
+  }, [activePeer]);
   useLayoutEffect(() => {
     const list = messageListRef.current;
     if (!list) return;
@@ -694,12 +699,25 @@ function App() {
     });
     if (!next) return;
     setEditState(next);
+    setActiveEditId(null);
     setDraft(message.text);
     setChatError("");
     window.requestAnimationFrame(() => {
       composerRef.current?.focus();
       resizeComposer();
     });
+  }
+
+  /** Touch screens have no hover: a tap on an own bubble toggles its pencil. */
+  function selectMessageForEdit(message: ChatMessage) {
+    if (!window.matchMedia?.("(hover: none)").matches) return;
+    const selection = window.getSelection();
+    const hasSelection = Boolean(
+      selection && !selection.isCollapsed && selection.toString().trim(),
+    );
+    setActiveEditId((current) =>
+      toggleEditAction({ current, message, userId, hasSelection }),
+    );
   }
 
   function cancelEdit() {
@@ -1483,51 +1501,58 @@ function App() {
                           </p>
                         )}
                       {activeMessages.map((message) => (
-                        <article
-                          data-testid="message"
-                          data-status={message.status}
-                          data-direction={message.direction}
-                          className={`message ${message.direction}`}
+                        <div
+                          className={`message-row ${message.direction}${
+                            activeEditId === message.id ? " active" : ""
+                          }`}
+                          data-testid="message-row"
                           key={message.id}
                         >
-                          <div className="message-text">
-                            {message.decryptFailed
-                              ? t.decryptFailed
-                              : message.text}
-                          </div>
-                          <small data-testid="message-status">
-                            {new Date(message.createdAt).toLocaleTimeString(
-                              getLanguageLocale(language),
-                              { hour: "2-digit", minute: "2-digit" },
-                            )}
-                            {statusText(message) && ` ${statusText(message)}`}
-                            {message.edited && (
-                              <>
-                                {" · "}
-                                <EditedMark label={t.edited} />
-                              </>
-                            )}
-                          </small>
-                          {message.status === "error" && (
-                            <>
-                              <span className="error">
-                                {errorText(message.error ?? "send_failed")}
-                              </span>
-                              <button
-                                className="text-button"
-                                onClick={() => retryMessage(message)}
-                              >
-                                {t.retry}
-                              </button>
-                            </>
-                          )}
                           <EditMessageButton
                             message={message}
                             userId={userId}
                             label={t.edit}
                             onEdit={beginEdit}
                           />
-                        </article>
+                          <article
+                            data-testid="message"
+                            data-status={message.status}
+                            data-direction={message.direction}
+                            className={`message ${message.direction}${
+                              editState?.targetId === message.replayId
+                                ? " message-editing"
+                                : ""
+                            }`}
+                            onClick={() => selectMessageForEdit(message)}
+                          >
+                            <div className="message-text">
+                              {message.decryptFailed
+                                ? t.decryptFailed
+                                : message.text}
+                            </div>
+                            <small data-testid="message-status">
+                              {new Date(message.createdAt).toLocaleTimeString(
+                                getLanguageLocale(language),
+                                { hour: "2-digit", minute: "2-digit" },
+                              )}
+                              {statusText(message) && ` ${statusText(message)}`}
+                            </small>
+                            {message.edited && <EditedMark label={t.edited} />}
+                            {message.status === "error" && (
+                              <>
+                                <span className="error">
+                                  {errorText(message.error ?? "send_failed")}
+                                </span>
+                                <button
+                                  className="text-button"
+                                  onClick={() => retryMessage(message)}
+                                >
+                                  {t.retry}
+                                </button>
+                              </>
+                            )}
+                          </article>
+                        </div>
                       ))}
                     </div>
                     {editState && (

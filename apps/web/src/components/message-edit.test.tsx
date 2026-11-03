@@ -32,14 +32,17 @@ function renderAction(message: ChatMessage) {
 }
 
 describe("message edit action", () => {
-  it("renders a keyboard reachable pencil button with an aria-label", () => {
+  it("renders a keyboard reachable icon-only pencil with an aria-label", () => {
     const html = renderAction(chatMessage());
     expect(html).toContain('data-testid="edit-message"');
     expect(html).toContain('type="button"');
     expect(html).toContain('<svg class="message-edit-icon"');
     expect(html).toContain('aria-hidden="true"');
     expect(html).toContain('aria-label="Изменить"');
-    expect(html).toContain("Изменить</button>");
+    expect(html).toContain('title="Изменить"');
+    // No visible caption: the button contains the icon and nothing else.
+    expect(html).toContain("</svg></button>");
+    expect(html.replace(/<[^>]+>/gu, "")).toBe("");
   });
 
   it("renders nothing for a foreign message", () => {
@@ -72,10 +75,11 @@ describe("message edit banner", () => {
 });
 
 describe("edited mark", () => {
-  it("renders the muted note next to the time", () => {
+  it("renders the muted note as its own line under the status", () => {
     const html = renderToStaticMarkup(<EditedMark label="изменено" />);
     expect(html).toContain('class="edited-mark"');
     expect(html).toContain('data-testid="edited-mark"');
     expect(html).toContain("изменено</span>");
+    expect(html).not.toContain("·");
   });
 });

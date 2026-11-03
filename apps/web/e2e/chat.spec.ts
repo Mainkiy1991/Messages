@@ -1483,7 +1483,7 @@ test.describe("real browser chat", () => {
     expect(alice.id).toHaveLength(64);
   });
 
-  test("edits a sent message for both users and keeps the unsent draft", async ({
+  test("edits a sent message from the hover pencil and marks it for both users", async ({
     browser,
   }) => {
     const a = await openUser(browser);
@@ -1493,80 +1493,167 @@ test.describe("real browser chat", () => {
 
     await openChat(a.page, bob.id);
     await send(a.page, "First version");
+    await send(a.page, "Width compare");
     await openChat(b.page, alice.id);
     const bobText = b.page.locator(".message-list .message-text");
     await expect(bobText.filter({ hasText: "First version" })).toBeVisible();
 
-    const aliceBubble = a.page
+    const firstBubble = a.page
       .locator('[data-testid="message"][data-direction="out"]')
       .filter({ hasText: "First version" });
-    await expect(aliceBubble).toHaveAttribute(
-      "data-status",
-      /^(sent|delivered|read)$/u,
-    );
+    const widthBubble = a.page
+      .locator('[data-testid="message"][data-direction="out"]')
+      .filter({ hasText: "Width compare" });
+    await expect(firstBubble).toHaveAttribute("data-status", "read");
+    await expect(widthBubble).toHaveAttribute("data-status", "read");
+
+    const pencil = firstBubble.getByTestId("edit-message");
+    const opacity = () =>
+      pencil.evaluate((element) => getComputedStyle(element).opacity);
+    const outline = (locator: typeof firstBubble) =>
+      locator.evaluate((element) => getComputedStyle(element).outlineStyle);
+    // The hover-only pencil stays in the DOM but is invisible until hovered.
+    expect(await opacity()).toBe("0");
+    await firstBubble.hover();
+    await expect.poll(opacity).toBe("1");
+
+    // Icon only: no caption, a 32x32 hit area and a 14-16px icon.
+    expect((await pencil.innerText()).trim()).toBe("");
+    expect(await pencil.getAttribute("aria-label")).toBe("Edit");
+    const pencilBox = (await pencil.boundingBox())!;
+    expect(pencilBox.width).toBeGreaterThanOrEqual(32);
+    expect(pencilBox.height).toBeGreaterThanOrEqual(32);
+    const iconSize = await pencil
+      .locator("svg")
+      .evaluate((icon) => Number.parseFloat(getComputedStyle(icon).width));
+    expect(iconSize).toBeGreaterThanOrEqual(14);
+    expect(iconSize).toBeLessThanOrEqual(16);
 
     // The draft written before the edit comes back when the mode is left.
     await a.page.getByTestId("message-input").fill("draft to keep");
-    await aliceBubble.getByTestId("edit-message").click();
+    await firstBubble.hover();
+    await pencil.click();
     await expect(a.page.getByTestId("edit-banner")).toContainText(
       "Editing message",
     );
     await expect(a.page.getByTestId("message-input")).toHaveValue(
       "First version",
     );
+    // Only the message that is being edited gets the accent outline.
+    expect(await outline(firstBubble)).toBe("solid");
+    expect(await outline(widthBubble)).toBe("none");
     await a.page.getByTestId("message-input").press("Escape");
     await expect(a.page.getByTestId("edit-banner")).toHaveCount(0);
+    expect(await outline(firstBubble)).toBe("none");
     await expect(a.page.getByTestId("message-input")).toHaveValue(
       "draft to keep",
     );
 
     // Empty and unchanged text cannot be sent.
     await a.page.getByTestId("message-input").fill("");
-    await aliceBubble.getByTestId("edit-message").click();
+    await firstBubble.hover();
+    await pencil.click();
     await expect(a.page.getByTestId("edit-banner")).toBeVisible();
     await expect(a.page.getByTestId("send-message")).toBeDisabled();
     await a.page.getByTestId("message-input").fill("");
     await expect(a.page.getByTestId("send-message")).toBeDisabled();
-    await a.page.getByTestId("message-input").fill("Second version");
+    await a.page.getByTestId("message-input").fill("Width compare");
     await expect(a.page.getByTestId("send-message")).toBeEnabled();
     await a.page.getByTestId("send-message").click();
 
+    // Both users see the new text instead of the old one.
     await expect(a.page.getByTestId("edit-banner")).toHaveCount(0);
     await expect(a.page.getByTestId("message-input")).toHaveValue("");
-    await expect(
-      a.page
-        .locator(".message-list .message-text")
-        .filter({ hasText: "Second version" }),
-    ).toBeVisible();
-    await expect(bobText.filter({ hasText: "Second version" })).toBeVisible();
     await expect(bobText.filter({ hasText: "First version" })).toHaveCount(0);
-    await expect(a.page.getByTestId("edited-mark")).toHaveText("edited");
+    await expect(bobText.filter({ hasText: "Width compare" })).toHaveCount(2);
+    await expect(a.page.locator(".message-text")).toHaveCount(2);
+    await expect(a.page.getByTestId("edited-mark")).toHaveCount(1);
+    await expect(b.page.getByTestId("edited-mark")).toHaveCount(1);
     await expect(b.page.getByTestId("edited-mark")).toHaveText("edited");
 
-    const markStyle = await b.page
+    // "edited" is a separate line under the status, with the same type.
+    const markLayout = await b.page
       .getByTestId("edited-mark")
-      .evaluate((mark) => {
-        const text = mark.closest(".message")!.querySelector(".message-text")!;
+      .evaluate((element) => {
+        const bubble = element.closest(".message")!;
+        const status = bubble.querySelector('[data-testid="message-status"]')!;
+        const text = bubble.querySelector(".message-text")!;
+        const markStyle = getComputedStyle(element);
+        const statusStyle = getComputedStyle(status);
         return {
-          markSize: Number.parseFloat(getComputedStyle(mark).fontSize),
+          markTop: element.getBoundingClientRect().top,
+          statusBottom: status.getBoundingClientRect().bottom,
+          markDisplay: markStyle.display,
+          markSize: Number.parseFloat(markStyle.fontSize),
+          statusSize: Number.parseFloat(statusStyle.fontSize),
+          markColor: markStyle.color,
+          statusColor: statusStyle.color,
           textSize: Number.parseFloat(getComputedStyle(text).fontSize),
-          markColor: getComputedStyle(mark).color,
           textColor: getComputedStyle(text).color,
         };
       });
-    expect(markStyle.markSize).toBeLessThan(markStyle.textSize);
-    expect(markStyle.markColor).not.toBe(markStyle.textColor);
+    expect(markLayout.markTop).toBeGreaterThanOrEqual(
+      markLayout.statusBottom - 1,
+    );
+    expect(markLayout.markDisplay).toBe("block");
+    expect(markLayout.markSize).toBe(markLayout.statusSize);
+    expect(markLayout.markColor).toBe(markLayout.statusColor);
+    expect(markLayout.markSize).toBeLessThan(markLayout.textSize);
+    expect(markLayout.markColor).not.toBe(markLayout.textColor);
 
+    // The note never widens a bubble: same text and status, different marks.
+    const bubbles = a.page.locator('[data-testid="message"]');
+    const editedBubble = bubbles.filter({
+      has: a.page.getByTestId("edited-mark"),
+    });
+    const plainBubble = bubbles.filter({
+      hasNot: a.page.getByTestId("edited-mark"),
+    });
+    await expect(editedBubble).toHaveCount(1);
+    await expect(plainBubble).toHaveCount(1);
+    expect(await editedBubble.getAttribute("data-status")).toBe(
+      await plainBubble.getAttribute("data-status"),
+    );
+    expect(await editedBubble.locator(".message-text").innerText()).toBe(
+      await plainBubble.locator(".message-text").innerText(),
+    );
+    const editedBox = (await editedBubble.boundingBox())!;
+    const plainBox = (await plainBubble.boundingBox())!;
+    expect(editedBox.width).toBeLessThanOrEqual(plainBox.width + 1);
+
+    // Narrow screen: the pencil stays left of the bubble and nothing overflows.
     await a.page.setViewportSize({ width: 360, height: 640 });
-    const editButton = a.page.getByTestId("edit-message");
-    await expect(editButton).toBeVisible();
+    await editedBubble.hover();
+    const editedPencil = editedBubble.getByTestId("edit-message");
+    await expect
+      .poll(() =>
+        editedPencil.evaluate((element) => getComputedStyle(element).opacity),
+      )
+      .toBe("1");
+    const narrowPencil = (await editedPencil.boundingBox())!;
+    const narrowBubble = (await editedBubble.boundingBox())!;
     const conversation = (await a.page.locator(".conversation").boundingBox())!;
-    const button = (await editButton.boundingBox())!;
-    expect(button.x).toBeGreaterThanOrEqual(conversation.x - 1);
-    expect(button.x + button.width).toBeLessThanOrEqual(
+    expect(narrowPencil.x).toBeGreaterThanOrEqual(conversation.x - 1);
+    expect(narrowBubble.x).toBeGreaterThanOrEqual(
+      narrowPencil.x + narrowPencil.width - 1,
+    );
+    expect(narrowBubble.x + narrowBubble.width).toBeLessThanOrEqual(
       conversation.x + conversation.width + 1,
     );
-    await editButton.click();
+    expect(
+      Math.abs(
+        narrowPencil.y +
+          narrowPencil.height / 2 -
+          (narrowBubble.y + narrowBubble.height / 2),
+      ),
+    ).toBeLessThanOrEqual(1);
+    expect(
+      await a.page
+        .locator(".message-list")
+        .evaluate((list) => list.scrollWidth - list.clientWidth),
+    ).toBeLessThanOrEqual(0);
+
+    await editedPencil.click();
     const banner = a.page.getByTestId("edit-banner");
     await expect(banner).toBeVisible();
     const bannerBox = (await banner.boundingBox())!;
@@ -1577,8 +1664,10 @@ test.describe("real browser chat", () => {
         (element) => element.scrollWidth - element.clientWidth,
       ),
     ).toBeLessThanOrEqual(0);
+    expect(await outline(editedBubble)).toBe("solid");
     await a.page.getByTestId("cancel-edit").click();
     await expect(banner).toHaveCount(0);
+    expect(await outline(editedBubble)).toBe("none");
     await expect(a.page.getByTestId("message-input")).toHaveValue("");
   });
 });
