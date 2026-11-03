@@ -327,6 +327,10 @@ export const MAX_EDIT_REV = 100;
 
 export type EditPayload = { target: string; rev: number; text: string };
 
+export type DeleteRequestPayload = { target: string };
+
+export type DeleteAnswerPayload = { target: string; accept: boolean };
+
 export type DecryptedMessage = {
   text?: string;
   sentAt?: number;
@@ -335,6 +339,7 @@ export type DecryptedMessage = {
   type?: string;
   target?: string;
   rev?: number;
+  accept?: boolean;
 };
 
 type MessageBodyBuilder = (
@@ -447,6 +452,59 @@ export function encryptEditMessage(input: {
   });
 }
 
+export function encryptDeleteRequestMessage(input: {
+  senderEncryptionPrivateKey: Uint8Array;
+  recipientEncryptionPublicKey: Uint8Array;
+  senderId: string;
+  recipientId: string;
+  target: string;
+  sentAt?: number;
+  messageId?: string;
+}): string {
+  checkKey(input.senderEncryptionPrivateKey);
+  checkKey(input.recipientEncryptionPublicKey);
+  checkIds(input.senderId, input.recipientId);
+  checkMessageId(input.target);
+  return encryptMessageEnvelope({
+    ...input,
+    buildBody: (id, sentAt) => ({
+      v: 2,
+      id,
+      type: "delete_request",
+      target: input.target,
+      sentAt,
+    }),
+  });
+}
+
+export function encryptDeleteAnswerMessage(input: {
+  senderEncryptionPrivateKey: Uint8Array;
+  recipientEncryptionPublicKey: Uint8Array;
+  senderId: string;
+  recipientId: string;
+  target: string;
+  accept: boolean;
+  sentAt?: number;
+  messageId?: string;
+}): string {
+  checkKey(input.senderEncryptionPrivateKey);
+  checkKey(input.recipientEncryptionPublicKey);
+  checkIds(input.senderId, input.recipientId);
+  checkMessageId(input.target);
+  checkAccept(input.accept);
+  return encryptMessageEnvelope({
+    ...input,
+    buildBody: (id, sentAt) => ({
+      v: 2,
+      id,
+      type: "delete_answer",
+      target: input.target,
+      accept: input.accept,
+      sentAt,
+    }),
+  });
+}
+
 export function decryptTextMessage(input: {
   recipientEncryptionPrivateKey: Uint8Array;
   senderEncryptionPublicKey: Uint8Array;
@@ -510,6 +568,30 @@ export function decryptTextMessage(input: {
         const edit = parseEditPayload(value);
         return edit
           ? { v: 2, id, type: "edit", ...edit, sentAt: value.sentAt }
+          : { v: 2, id, type: value.type, sentAt: value.sentAt };
+      }
+      if (value.type === "delete_request") {
+        const request = parseDeleteRequestPayload(value);
+        return request
+          ? {
+              v: 2,
+              id,
+              type: "delete_request",
+              ...request,
+              sentAt: value.sentAt,
+            }
+          : { v: 2, id, type: value.type, sentAt: value.sentAt };
+      }
+      if (value.type === "delete_answer") {
+        const answer = parseDeleteAnswerPayload(value);
+        return answer
+          ? {
+              v: 2,
+              id,
+              type: "delete_answer",
+              ...answer,
+              sentAt: value.sentAt,
+            }
           : { v: 2, id, type: value.type, sentAt: value.sentAt };
       }
       if (value.type !== "text")
@@ -625,6 +707,63 @@ export function encryptHistoryEditEntry(input: {
   });
 }
 
+export function encryptHistoryDeleteRequestEntry(input: {
+  historyKey: Uint8Array;
+  clientMsgId: string;
+  peerId: string;
+  target: string;
+  sentAt: number;
+  senderId: string;
+  messageId?: string;
+}): string {
+  checkKey(input.historyKey);
+  checkId(input.clientMsgId, 32, /^[0-9a-f]{32}$/u);
+  checkId(input.peerId, 64, /^[0-9a-f]{64}$/u);
+  checkIds(input.senderId, input.peerId);
+  checkMessageId(input.target);
+  checkSentAt(input.sentAt);
+  return encryptHistoryEnvelope({
+    ...input,
+    buildBody: (id, sentAt) => ({
+      v: 2,
+      id,
+      type: "delete_request",
+      target: input.target,
+      sentAt,
+    }),
+  });
+}
+
+export function encryptHistoryDeleteAnswerEntry(input: {
+  historyKey: Uint8Array;
+  clientMsgId: string;
+  peerId: string;
+  target: string;
+  accept: boolean;
+  sentAt: number;
+  senderId: string;
+  messageId?: string;
+}): string {
+  checkKey(input.historyKey);
+  checkId(input.clientMsgId, 32, /^[0-9a-f]{32}$/u);
+  checkId(input.peerId, 64, /^[0-9a-f]{64}$/u);
+  checkIds(input.senderId, input.peerId);
+  checkMessageId(input.target);
+  checkAccept(input.accept);
+  checkSentAt(input.sentAt);
+  return encryptHistoryEnvelope({
+    ...input,
+    buildBody: (id, sentAt) => ({
+      v: 2,
+      id,
+      type: "delete_answer",
+      target: input.target,
+      accept: input.accept,
+      sentAt,
+    }),
+  });
+}
+
 export function decryptHistoryEntry(input: {
   historyKey: Uint8Array;
   clientMsgId: string;
@@ -670,6 +809,30 @@ export function decryptHistoryEntry(input: {
         const edit = parseEditPayload(value);
         return edit
           ? { v: 2, id, type: "edit", ...edit, sentAt: value.sentAt }
+          : { v: 2, id, type: value.type, sentAt: value.sentAt };
+      }
+      if (value.type === "delete_request") {
+        const request = parseDeleteRequestPayload(value);
+        return request
+          ? {
+              v: 2,
+              id,
+              type: "delete_request",
+              ...request,
+              sentAt: value.sentAt,
+            }
+          : { v: 2, id, type: value.type, sentAt: value.sentAt };
+      }
+      if (value.type === "delete_answer") {
+        const answer = parseDeleteAnswerPayload(value);
+        return answer
+          ? {
+              v: 2,
+              id,
+              type: "delete_answer",
+              ...answer,
+              sentAt: value.sentAt,
+            }
           : { v: 2, id, type: value.type, sentAt: value.sentAt };
       }
       if (value.type !== "text")
@@ -840,6 +1003,10 @@ function checkEditRev(rev: number): void {
     throw new TypeError("Invalid edit revision");
 }
 
+function checkAccept(accept: boolean): void {
+  if (typeof accept !== "boolean") throw new TypeError("Invalid delete answer");
+}
+
 /** Malformed edits are skipped exactly like unknown message types. */
 export function parseEditPayload(value: unknown): EditPayload | null {
   try {
@@ -851,6 +1018,37 @@ export function parseEditPayload(value: unknown): EditPayload | null {
     if (typeof edit.text !== "string") return null;
     checkText(edit.text);
     return { target: edit.target, rev: edit.rev as number, text: edit.text };
+  } catch {
+    return null;
+  }
+}
+
+/** Malformed delete requests are skipped exactly like unknown types. */
+export function parseDeleteRequestPayload(
+  value: unknown,
+): DeleteRequestPayload | null {
+  try {
+    if (!value || typeof value !== "object") return null;
+    const request = value as Record<string, unknown>;
+    if (typeof request.target !== "string") return null;
+    checkMessageId(request.target);
+    return { target: request.target };
+  } catch {
+    return null;
+  }
+}
+
+/** A delete answer carries an explicit boolean decision; anything else is null. */
+export function parseDeleteAnswerPayload(
+  value: unknown,
+): DeleteAnswerPayload | null {
+  try {
+    if (!value || typeof value !== "object") return null;
+    const answer = value as Record<string, unknown>;
+    if (typeof answer.target !== "string") return null;
+    checkMessageId(answer.target);
+    if (typeof answer.accept !== "boolean") return null;
+    return { target: answer.target, accept: answer.accept };
   } catch {
     return null;
   }

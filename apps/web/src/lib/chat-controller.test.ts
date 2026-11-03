@@ -6,7 +6,10 @@ import {
   decryptTextMessage,
   deriveKeys,
   encryptContactBook,
+  encryptDeleteAnswerMessage,
+  encryptDeleteRequestMessage,
   encryptEditMessage,
+  encryptHistoryDeleteRequestEntry,
   encryptHistoryEditEntry,
   encryptHistoryEntry,
   encryptTextMessage,
@@ -2692,6 +2695,714 @@ describe("ChatController message edits", () => {
       ok: false,
       error: "edit_limit",
     });
+    f.controller.stop();
+  });
+});
+
+describe("ChatController delete requests", () => {
+  const sentAt = 1_700_000_000_000;
+  const rowTime = (offset = 0) => new Date(sentAt + offset).toISOString();
+  const peerText = (target: string, text: string) =>
+    encryptTextMessage({
+      senderEncryptionPrivateKey: bob.encryption.privateKey,
+      recipientEncryptionPublicKey: alice.encryption.publicKey,
+      senderId: bobId,
+      recipientId: aliceId,
+      text,
+      sentAt,
+      messageId: target,
+    });
+  const peerEdit = (target: string, rev: number, text: string) =>
+    encryptEditMessage({
+      senderEncryptionPrivateKey: bob.encryption.privateKey,
+      recipientEncryptionPublicKey: alice.encryption.publicKey,
+      senderId: bobId,
+      recipientId: aliceId,
+      target,
+      rev,
+      text,
+      sentAt: sentAt + 1500,
+    });
+  const peerRequest = (target: string) =>
+    encryptDeleteRequestMessage({
+      senderEncryptionPrivateKey: bob.encryption.privateKey,
+      recipientEncryptionPublicKey: alice.encryption.publicKey,
+      senderId: bobId,
+      recipientId: aliceId,
+      target,
+      sentAt: sentAt + 500,
+    });
+  const peerAnswer = (target: string, accept: boolean) =>
+    encryptDeleteAnswerMessage({
+      senderEncryptionPrivateKey: bob.encryption.privateKey,
+      recipientEncryptionPublicKey: alice.encryption.publicKey,
+      senderId: bobId,
+      recipientId: aliceId,
+      target,
+      accept,
+      sentAt: sentAt + 1000,
+    });
+  const chatOf = (f: { controller: ChatController }, peerId: string) =>
+    f.controller.getSnapshot().chats.find((chat) => chat.peerId === peerId);
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+  const connected = async (
+    options: Parameters<typeof makeController>[0] = {},
+  ) => {
+    const f = makeController({
+      initialSession: session("token-a"),
+      ...options,
+    });
+    f.controller.start();
+    await waitFor(() => f.sockets.length === 1);
+    await authenticate(f.sockets[0]!);
+    return f;
+  };
+  const deliver = (
+    f: { sockets: TestSocket[] },
+    row: { id: string; seq: string; ciphertext: string; from?: string },
+  ) =>
+    f.sockets[0]!.frame({
+      type: "message",
+      id: row.id,
+      from: row.from ?? bobId,
+      seq: row.seq,
+      ciphertext: row.ciphertext,
+      createdAt: rowTime(Number(row.seq) * 500),
+    });
+
+  it("applies an incoming request without a bubble, unread or reorder", async () => {
+    const target = newReplayMessageId();
+    const f = await connected();
+    await f.controller.openChat(charlieId);
+    deliver(f, {
+      id: "row-1",
+      seq: "1",
+      ciphertext: peerText(target, "original"),
+    });
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
+    expect(chatOf(f, bobId)!.unreadCount).toBe(1);
+    const order = f.controller.getSnapshot().chats.map((chat) => chat.peerId);
+    deliver(f, { id: "row-2", seq: "2", ciphertext: peerRequest(target) });
+    await waitFor(() => chatOf(f, bobId)?.messages[0]?.deletion === "pending");
+    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
+    expect(chatOf(f, bobId)!.unreadCount).toBe(1);
+    expect(f.controller.getSnapshot().chats.map((chat) => chat.peerId)).toEqual(
+      order,
+    );
+    f.controller.stop();
+  });
+
+  it("ignores a request whose author does not own the original", async () => {
+    const f = await connected();
+    await f.controller.openChat(bobId);
+    await f.controller.sendText("mine");
+    const mine = chatOf(f, bobId)!.messages[0]!;
+    f.sockets[0]!.frame({
+      type: "sent",
+      clientMsgId: mine.clientMsgId!,
+      id: "row-1",
+      seq: "1",
+      createdAt: rowTime(),
+    });
+    await waitFor(() => chatOf(f, bobId)!.messages[0]!.status === "sent");
+    deliver(f, {
+      id: "row-2",
+      seq: "2",
+      ciphertext: peerRequest(mine.replayId!),
+    });
+    await settle();
+    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
+    expect(chatOf(f, bobId)!.messages[0]!.deletion).toBeUndefined();
+    f.controller.stop();
+  });
+
+  it("sends a delete request through the queue and applies it locally", async () => {
+    const f = await connected();
+    await f.controller.openChat(bobId);
+    await f.controller.sendText("hello");
+    const sent = chatOf(f, bobId)!.messages[0]!;
+    f.sockets[0]!.frame({
+      type: "sent",
+      clientMsgId: sent.clientMsgId!,
+      id: "row-1",
+      seq: "1",
+      createdAt: rowTime(),
+    });
+    await waitFor(() => chatOf(f, bobId)!.messages[0]!.status === "sent");
+    expect(await f.controller.sendDeleteRequest(bobId, sent.replayId!)).toEqual(
+      {
+        ok: true,
+      },
+    );
+    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
+    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
+      text: "hello",
+      deletion: "pending",
+      direction: "out",
+    });
+    const frames = f.sockets[0]!.decoded().filter(
+      (frame) => frame.type === "send",
+    );
+    expect(frames).toHaveLength(2);
+    expect(
+      decryptTextMessage({
+        recipientEncryptionPrivateKey: bob.encryption.privateKey,
+        senderEncryptionPublicKey: alice.encryption.publicKey,
+        senderId: aliceId,
+        recipientId: bobId,
+        ciphertext: String(frames[1]!.ciphertext),
+      }),
+    ).toMatchObject({ type: "delete_request", target: sent.replayId });
+    expect(
+      decryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId: String(frames[1]!.clientMsgId),
+        senderId: aliceId,
+        peerId: bobId,
+        entry: String(frames[1]!.senderCopy),
+      }),
+    ).toMatchObject({ type: "delete_request", target: sent.replayId });
+    expect(await f.controller.sendDeleteRequest(bobId, sent.replayId!)).toEqual(
+      {
+        ok: false,
+        error: "already_requested",
+      },
+    );
+    f.controller.stop();
+  });
+
+  it("rejects requests for unknown, incoming, saved and pending messages", async () => {
+    const f = await connected();
+    await f.controller.openChat(bobId);
+    expect(
+      await f.controller.sendDeleteRequest(bobId, newReplayMessageId()),
+    ).toEqual({ ok: false, error: "unknown_message" });
+    await f.controller.sendText("pending");
+    const pending = chatOf(f, bobId)!.messages[0]!;
+    expect(
+      await f.controller.sendDeleteRequest(bobId, pending.replayId!),
+    ).toEqual({ ok: false, error: "message_pending" });
+    f.sockets[0]!.frame({
+      type: "sent",
+      clientMsgId: pending.clientMsgId!,
+      id: "row-1",
+      seq: "1",
+      createdAt: rowTime(),
+    });
+    await waitFor(() => chatOf(f, bobId)!.messages[0]!.status === "sent");
+    const incoming = newReplayMessageId();
+    deliver(f, {
+      id: "row-2",
+      seq: "2",
+      ciphertext: peerText(incoming, "theirs"),
+    });
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 2);
+    expect(await f.controller.sendDeleteRequest(bobId, incoming)).toEqual({
+      ok: false,
+      error: "not_deletable",
+    });
+    /* A legacy v1 row carries no replay ID, so nothing can be addressed on it. */
+    deliver(f, { id: "row-3", seq: "3", ciphertext: "legacy-v1-row" });
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 3);
+    expect(
+      await f.controller.sendDeleteRequest(
+        bobId,
+        undefined as unknown as string,
+      ),
+    ).toEqual({ ok: false, error: "not_deletable" });
+    f.controller.stop();
+  });
+
+  it("refuses requests in saved messages", async () => {
+    const f = await connected();
+    await f.controller.openChat(aliceId);
+    await f.controller.sendText("note");
+    const note = chatOf(f, aliceId)!.messages[0]!;
+    f.sockets[0]!.frame({
+      type: "sent",
+      clientMsgId: note.clientMsgId!,
+      id: "row-1",
+      seq: "1",
+      createdAt: rowTime(),
+    });
+    await waitFor(() => chatOf(f, aliceId)!.messages[0]!.status === "sent");
+    expect(
+      await f.controller.sendDeleteRequest(aliceId, note.replayId!),
+    ).toEqual({ ok: false, error: "not_deletable" });
+    f.controller.stop();
+  });
+
+  it("accepts a request and hides the text of the incoming message", async () => {
+    const target = newReplayMessageId();
+    const f = await connected();
+    await f.controller.openChat(bobId);
+    deliver(f, {
+      id: "row-1",
+      seq: "1",
+      ciphertext: peerText(target, "original"),
+    });
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
+    expect(await f.controller.sendDeleteAnswer(bobId, target, true)).toEqual({
+      ok: false,
+      error: "no_request",
+    });
+    deliver(f, { id: "row-2", seq: "2", ciphertext: peerRequest(target) });
+    await waitFor(() => chatOf(f, bobId)?.messages[0]?.deletion === "pending");
+    expect(await f.controller.sendDeleteAnswer(bobId, target, true)).toEqual({
+      ok: true,
+    });
+    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
+    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
+      text: "",
+      deletion: "accepted",
+      direction: "in",
+    });
+    expect(chatOf(f, bobId)!.messages[0]!.edited).toBeUndefined();
+    const frames = f.sockets[0]!.decoded().filter(
+      (frame) => frame.type === "send",
+    );
+    expect(frames).toHaveLength(1);
+    expect(
+      decryptTextMessage({
+        recipientEncryptionPrivateKey: bob.encryption.privateKey,
+        senderEncryptionPublicKey: alice.encryption.publicKey,
+        senderId: aliceId,
+        recipientId: bobId,
+        ciphertext: String(frames[0]!.ciphertext),
+      }),
+    ).toMatchObject({ type: "delete_answer", target, accept: true });
+    expect(
+      decryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId: String(frames[0]!.clientMsgId),
+        senderId: aliceId,
+        peerId: bobId,
+        entry: String(frames[0]!.senderCopy),
+      }),
+    ).toMatchObject({ type: "delete_answer", target, accept: true });
+    expect(await f.controller.sendDeleteAnswer(bobId, target, true)).toEqual({
+      ok: false,
+      error: "already_answered",
+    });
+    f.controller.stop();
+  });
+
+  it("declines a request, keeps the text and rejects answers for own rows", async () => {
+    const target = newReplayMessageId();
+    const f = await connected();
+    await f.controller.openChat(bobId);
+    deliver(f, {
+      id: "row-1",
+      seq: "1",
+      ciphertext: peerText(target, "original"),
+    });
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
+    deliver(f, { id: "row-2", seq: "2", ciphertext: peerRequest(target) });
+    await waitFor(() => chatOf(f, bobId)?.messages[0]?.deletion === "pending");
+    expect(await f.controller.sendDeleteAnswer(bobId, target, false)).toEqual({
+      ok: true,
+    });
+    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
+      text: "original",
+      deletion: "declined",
+    });
+    await f.controller.sendText("mine");
+    const mine = chatOf(f, bobId)!.messages.at(-1)!;
+    expect(
+      await f.controller.sendDeleteAnswer(bobId, mine.replayId!, true),
+    ).toEqual({ ok: false, error: "not_deletable" });
+    f.controller.stop();
+  });
+
+  it("applies peer answers on the author side and keeps the text", async () => {
+    const f = await connected();
+    await f.controller.openChat(bobId);
+    await f.controller.sendText("first");
+    await f.controller.sendText("second");
+    const [first, second] = chatOf(f, bobId)!.messages;
+    f.sockets[0]!.frame({
+      type: "sent",
+      clientMsgId: first!.clientMsgId!,
+      id: "row-1",
+      seq: "1",
+      createdAt: rowTime(),
+    });
+    f.sockets[0]!.frame({
+      type: "sent",
+      clientMsgId: second!.clientMsgId!,
+      id: "row-2",
+      seq: "2",
+      createdAt: rowTime(1000),
+    });
+    await waitFor(() =>
+      chatOf(f, bobId)!.messages.every((message) => message.status === "sent"),
+    );
+    expect(
+      await f.controller.sendDeleteRequest(bobId, first!.replayId!),
+    ).toEqual({ ok: true });
+    expect(
+      await f.controller.sendDeleteRequest(bobId, second!.replayId!),
+    ).toEqual({ ok: true });
+    deliver(f, {
+      id: "row-3",
+      seq: "3",
+      ciphertext: peerAnswer(first!.replayId!, true),
+    });
+    deliver(f, {
+      id: "row-4",
+      seq: "4",
+      ciphertext: peerAnswer(second!.replayId!, false),
+    });
+    const byReplay = (target: string) =>
+      chatOf(f, bobId)!.messages.find((message) => message.replayId === target);
+    await waitFor(
+      () =>
+        byReplay(first!.replayId!)?.deletion === "accepted" &&
+        byReplay(second!.replayId!)?.deletion === "declined",
+    );
+    expect(chatOf(f, bobId)!.messages).toHaveLength(2);
+    expect(byReplay(first!.replayId!)).toMatchObject({
+      text: "first",
+      deletion: "accepted",
+      direction: "out",
+    });
+    expect(byReplay(second!.replayId!)).toMatchObject({
+      text: "second",
+      deletion: "declined",
+    });
+    f.controller.stop();
+  });
+
+  it("keeps the original visible when the peer answers its own request", async () => {
+    const target = newReplayMessageId();
+    const f = await connected();
+    await f.controller.openChat(bobId);
+    deliver(f, {
+      id: "row-1",
+      seq: "1",
+      ciphertext: peerText(target, "original"),
+    });
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
+    deliver(f, { id: "row-2", seq: "2", ciphertext: peerRequest(target) });
+    await waitFor(() => chatOf(f, bobId)?.messages[0]?.deletion === "pending");
+    /* Bob asked about his own message, so his answer must not hide it. */
+    deliver(f, { id: "row-3", seq: "3", ciphertext: peerAnswer(target, true) });
+    await settle();
+    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
+      text: "original",
+      deletion: "pending",
+    });
+    f.controller.stop();
+  });
+
+  it("activates an answer that arrived before its request", async () => {
+    const f = await connected();
+    await f.controller.openChat(bobId);
+    await f.controller.sendText("original");
+    const mine = chatOf(f, bobId)!.messages[0]!;
+    f.sockets[0]!.frame({
+      type: "sent",
+      clientMsgId: mine.clientMsgId!,
+      id: "row-1",
+      seq: "1",
+      createdAt: rowTime(),
+    });
+    await waitFor(() => chatOf(f, bobId)!.messages[0]!.status === "sent");
+    deliver(f, {
+      id: "row-3",
+      seq: "3",
+      ciphertext: peerAnswer(mine.replayId!, true),
+    });
+    await settle();
+    expect(chatOf(f, bobId)!.messages[0]!.deletion).toBeUndefined();
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
+    expect(await f.controller.sendDeleteRequest(bobId, mine.replayId!)).toEqual(
+      {
+        ok: true,
+      },
+    );
+    await waitFor(() => chatOf(f, bobId)?.messages[0]?.deletion === "accepted");
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
+    f.controller.stop();
+  });
+
+  it("ignores an answer whose sequence is not newer than the request", async () => {
+    const target = newReplayMessageId();
+    const textClientMsgId = "21".repeat(16);
+    const requestClientMsgId = "22".repeat(16);
+    const f = await connected({
+      getConversations: async () => ({
+        conversations: [
+          { peerId: bobId, lastSeq: "5", lastCreatedAt: rowTime(2500) },
+        ],
+      }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () => ({
+        hasMore: false,
+        peerReadUpToSeq: null,
+        messages: [
+          {
+            id: "row-1",
+            seq: "1",
+            direction: "out" as const,
+            clientMsgId: textClientMsgId,
+            payload: encryptHistoryEntry({
+              historyKey: alice.historyKey,
+              clientMsgId: textClientMsgId,
+              peerId: bobId,
+              senderId: aliceId,
+              text: "original",
+              sentAt,
+              messageId: target,
+            }),
+            createdAt: rowTime(),
+            deliveredAt: null,
+          },
+          {
+            id: "row-5",
+            seq: "5",
+            direction: "out" as const,
+            clientMsgId: requestClientMsgId,
+            payload: encryptHistoryDeleteRequestEntry({
+              historyKey: alice.historyKey,
+              clientMsgId: requestClientMsgId,
+              peerId: bobId,
+              senderId: aliceId,
+              target,
+              sentAt: sentAt + 500,
+            }),
+            createdAt: rowTime(2500),
+            deliveredAt: null,
+          },
+        ],
+      }),
+    });
+    await f.controller.openChat(bobId);
+    await waitFor(() => chatOf(f, bobId)?.messages[0]?.deletion === "pending");
+    deliver(f, { id: "row-4", seq: "4", ciphertext: peerAnswer(target, true) });
+    await settle();
+    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
+      text: "original",
+      deletion: "pending",
+    });
+    /* The first answer keeps its sequence, so a newer one cannot override it. */
+    deliver(f, { id: "row-6", seq: "6", ciphertext: peerAnswer(target, true) });
+    await settle();
+    expect(chatOf(f, bobId)!.messages[0]!.deletion).toBe("pending");
+    f.controller.stop();
+  });
+
+  it("restores the delete state from history without bubbles", async () => {
+    const target = newReplayMessageId();
+    const textClientMsgId = "23".repeat(16);
+    const requestClientMsgId = "24".repeat(16);
+    const answerClientMsgId = "25".repeat(16);
+    const f = await connected({
+      getConversations: async () => ({
+        conversations: [
+          { peerId: bobId, lastSeq: "3", lastCreatedAt: rowTime(1500) },
+        ],
+      }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () => ({
+        hasMore: false,
+        peerReadUpToSeq: null,
+        messages: [
+          {
+            id: "row-1",
+            seq: "1",
+            direction: "out" as const,
+            clientMsgId: textClientMsgId,
+            payload: encryptHistoryEntry({
+              historyKey: alice.historyKey,
+              clientMsgId: textClientMsgId,
+              peerId: bobId,
+              senderId: aliceId,
+              text: "original",
+              sentAt,
+              messageId: target,
+            }),
+            createdAt: rowTime(),
+            deliveredAt: null,
+          },
+          {
+            id: "row-2",
+            seq: "2",
+            direction: "out" as const,
+            clientMsgId: requestClientMsgId,
+            payload: encryptHistoryDeleteRequestEntry({
+              historyKey: alice.historyKey,
+              clientMsgId: requestClientMsgId,
+              peerId: bobId,
+              senderId: aliceId,
+              target,
+              sentAt: sentAt + 500,
+            }),
+            createdAt: rowTime(1000),
+            deliveredAt: null,
+          },
+          {
+            id: "row-3",
+            seq: "3",
+            direction: "in" as const,
+            clientMsgId: answerClientMsgId,
+            payload: peerAnswer(target, true),
+            createdAt: rowTime(1500),
+            deliveredAt: null,
+          },
+        ],
+      }),
+    });
+    await f.controller.openChat(bobId);
+    await waitFor(() => chatOf(f, bobId)?.messages[0]?.deletion === "accepted");
+    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
+    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
+      text: "original",
+      deletion: "accepted",
+      direction: "out",
+    });
+    expect(chatOf(f, bobId)!.unreadCount).toBe(0);
+    f.controller.stop();
+  });
+
+  it("registers a queued request from the outbox without a placeholder", async () => {
+    /* The outbox is restored only in a browser tab. */
+    vi.stubGlobal("window", {});
+    const target = newReplayMessageId();
+    const textClientMsgId = "26".repeat(16);
+    const requestClientMsgId = "27".repeat(16);
+    const f = await connected({
+      outbox: {
+        list: async () => [
+          {
+            type: "send" as const,
+            clientMsgId: requestClientMsgId,
+            to: bobId,
+            ciphertext: "queued-request",
+            senderCopy: encryptHistoryDeleteRequestEntry({
+              historyKey: alice.historyKey,
+              clientMsgId: requestClientMsgId,
+              peerId: bobId,
+              senderId: aliceId,
+              target,
+              sentAt: sentAt + 500,
+            }),
+          },
+        ],
+        put: async () => undefined,
+        remove: async () => undefined,
+        clear: async () => undefined,
+      },
+      getConversations: async () => ({
+        conversations: [
+          { peerId: bobId, lastSeq: "2", lastCreatedAt: rowTime(2000) },
+        ],
+      }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () => ({
+        hasMore: false,
+        peerReadUpToSeq: null,
+        messages: [
+          {
+            id: "row-1",
+            seq: "1",
+            direction: "out" as const,
+            clientMsgId: textClientMsgId,
+            payload: encryptHistoryEntry({
+              historyKey: alice.historyKey,
+              clientMsgId: textClientMsgId,
+              peerId: bobId,
+              senderId: aliceId,
+              text: "original",
+              sentAt,
+              messageId: target,
+            }),
+            createdAt: rowTime(),
+            deliveredAt: null,
+          },
+        ],
+      }),
+    });
+    await f.controller.openChat(bobId);
+    await waitFor(() => chatOf(f, bobId)?.messages[0]?.deletion === "pending");
+    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
+    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
+      text: "original",
+      deletion: "pending",
+      direction: "out",
+    });
+    f.controller.stop();
+    vi.unstubAllGlobals();
+  });
+
+  it("blocks edits while a request is pending and allows them after a decline", async () => {
+    const f = await connected();
+    await f.controller.openChat(bobId);
+    await f.controller.sendText("hello");
+    const mine = chatOf(f, bobId)!.messages[0]!;
+    f.sockets[0]!.frame({
+      type: "sent",
+      clientMsgId: mine.clientMsgId!,
+      id: "row-1",
+      seq: "1",
+      createdAt: rowTime(),
+    });
+    await waitFor(() => chatOf(f, bobId)!.messages[0]!.status === "sent");
+    expect(await f.controller.sendDeleteRequest(bobId, mine.replayId!)).toEqual(
+      {
+        ok: true,
+      },
+    );
+    expect(await f.controller.sendEdit(bobId, mine.replayId!, "next")).toEqual({
+      ok: false,
+      error: "not_editable",
+    });
+    deliver(f, {
+      id: "row-2",
+      seq: "2",
+      ciphertext: peerAnswer(mine.replayId!, false),
+    });
+    await waitFor(() => chatOf(f, bobId)?.messages[0]?.deletion === "declined");
+    expect(await f.controller.sendEdit(bobId, mine.replayId!, "next")).toEqual({
+      ok: true,
+    });
+    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
+      text: "next",
+      edited: true,
+      deletion: "declined",
+    });
+    f.controller.stop();
+  });
+
+  it("keeps the text hidden after an accepted deletion", async () => {
+    const target = newReplayMessageId();
+    const f = await connected();
+    await f.controller.openChat(bobId);
+    deliver(f, {
+      id: "row-1",
+      seq: "1",
+      ciphertext: peerText(target, "original"),
+    });
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
+    deliver(f, { id: "row-2", seq: "2", ciphertext: peerRequest(target) });
+    await waitFor(() => chatOf(f, bobId)?.messages[0]?.deletion === "pending");
+    expect(await f.controller.sendDeleteAnswer(bobId, target, true)).toEqual({
+      ok: true,
+    });
+    deliver(f, {
+      id: "row-3",
+      seq: "3",
+      ciphertext: peerEdit(target, 1, "late"),
+    });
+    await settle();
+    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
+    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
+      text: "",
+      deletion: "accepted",
+      direction: "in",
+    });
+    expect(chatOf(f, bobId)!.messages[0]!.edited).toBeUndefined();
     f.controller.stop();
   });
 });
