@@ -10,11 +10,17 @@ import {
   deriveKeys,
   encryptEditMessage,
   encryptHistoryEditEntry,
+  encryptHistoryDeleteAnswerEntry,
+  encryptHistoryDeleteRequestEntry,
+  encryptDeleteAnswerMessage,
+  encryptDeleteRequestMessage,
   encryptHistoryEntry,
   encryptContactBook,
   encryptTextMessage,
   newClientMsgId,
   newReplayMessageId,
+  parseDeleteAnswerPayload,
+  parseDeleteRequestPayload,
   parseEditPayload,
 } from "./index.js";
 
@@ -586,5 +592,244 @@ describe("message edits", () => {
     expect(() => encryptHistoryEditEntry({ ...historyBase, rev: 101 })).toThrow(
       TypeError,
     );
+  });
+});
+
+describe("message delete requests", () => {
+  const target = newReplayMessageId();
+  const clientMsgId = "0a".repeat(16);
+
+  const encryptRequest = () =>
+    encryptDeleteRequestMessage({
+      senderEncryptionPrivateKey: alice.encryption.privateKey,
+      recipientEncryptionPublicKey: bob.encryption.publicKey,
+      senderId: aliceId,
+      recipientId: bobId,
+      target,
+      sentAt,
+    });
+  const encryptAnswer = (accept: boolean) =>
+    encryptDeleteAnswerMessage({
+      senderEncryptionPrivateKey: bob.encryption.privateKey,
+      recipientEncryptionPublicKey: alice.encryption.publicKey,
+      senderId: bobId,
+      recipientId: aliceId,
+      target,
+      accept,
+      sentAt,
+    });
+  const historyRequest = () =>
+    encryptHistoryDeleteRequestEntry({
+      historyKey: alice.historyKey,
+      clientMsgId,
+      senderId: aliceId,
+      peerId: bobId,
+      target,
+      sentAt,
+    });
+  const historyAnswer = (accept: boolean) =>
+    encryptHistoryDeleteAnswerEntry({
+      historyKey: bob.historyKey,
+      clientMsgId,
+      senderId: bobId,
+      peerId: aliceId,
+      target,
+      accept,
+      sentAt,
+    });
+
+  it("round-trips a delete request through the message and history envelopes", () => {
+    expect(
+      decryptTextMessage({
+        recipientEncryptionPrivateKey: bob.encryption.privateKey,
+        senderEncryptionPublicKey: alice.encryption.publicKey,
+        senderId: aliceId,
+        recipientId: bobId,
+        ciphertext: encryptRequest(),
+      }),
+    ).toMatchObject({ v: 2, type: "delete_request", target, sentAt });
+    expect(
+      decryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId,
+        senderId: aliceId,
+        peerId: bobId,
+        entry: historyRequest(),
+      }),
+    ).toMatchObject({ v: 2, type: "delete_request", target, sentAt });
+  });
+
+  it("round-trips both delete answers through the message and history envelopes", () => {
+    for (const accept of [true, false]) {
+      expect(
+        decryptTextMessage({
+          recipientEncryptionPrivateKey: alice.encryption.privateKey,
+          senderEncryptionPublicKey: bob.encryption.publicKey,
+          senderId: bobId,
+          recipientId: aliceId,
+          ciphertext: encryptAnswer(accept),
+        }),
+      ).toMatchObject({ v: 2, type: "delete_answer", target, accept, sentAt });
+      expect(
+        decryptHistoryEntry({
+          historyKey: bob.historyKey,
+          clientMsgId,
+          senderId: bobId,
+          peerId: aliceId,
+          entry: historyAnswer(accept),
+        }),
+      ).toMatchObject({ v: 2, type: "delete_answer", target, accept, sentAt });
+    }
+  });
+
+  it("binds delete requests and answers to the same participants and history entry", () => {
+    const request = encryptRequest();
+    for (const participant of [
+      { senderId: bobId, recipientId: aliceId },
+      { senderId: aliceId, recipientId: aliceId },
+    ]) {
+      expect(() =>
+        decryptTextMessage({
+          recipientEncryptionPrivateKey: bob.encryption.privateKey,
+          senderEncryptionPublicKey: alice.encryption.publicKey,
+          ciphertext: request,
+          ...participant,
+        }),
+      ).toThrow(DecryptError);
+    }
+    const answer = encryptAnswer(true);
+    for (const participant of [
+      { senderId: aliceId, recipientId: bobId },
+      { senderId: bobId, recipientId: bobId },
+    ]) {
+      expect(() =>
+        decryptTextMessage({
+          recipientEncryptionPrivateKey: alice.encryption.privateKey,
+          senderEncryptionPublicKey: bob.encryption.publicKey,
+          ciphertext: answer,
+          ...participant,
+        }),
+      ).toThrow(DecryptError);
+    }
+    const entry = historyRequest();
+    for (const attempt of [
+      { historyKey: bob.historyKey, clientMsgId },
+      { historyKey: alice.historyKey, clientMsgId: "0b".repeat(16) },
+      {
+        historyKey: alice.historyKey,
+        clientMsgId,
+        senderId: bobId,
+        peerId: bobId,
+      },
+    ]) {
+      expect(() =>
+        decryptHistoryEntry({
+          senderId: aliceId,
+          peerId: bobId,
+          entry,
+          ...attempt,
+        }),
+      ).toThrow(DecryptError);
+    }
+  });
+
+  it("skips malformed delete payloads like unknown message types", () => {
+    expect(parseDeleteRequestPayload({ target })).toEqual({ target });
+    expect(parseDeleteAnswerPayload({ target, accept: false })).toEqual({
+      target,
+      accept: false,
+    });
+    for (const invalid of [
+      null,
+      "delete_request",
+      {},
+      { target: "bad" },
+      { target: "ab".repeat(16) },
+      { target: 42 },
+    ])
+      expect(parseDeleteRequestPayload(invalid)).toBeNull();
+    for (const invalid of [
+      null,
+      "delete_answer",
+      {},
+      { accept: true },
+      { target: "bad", accept: true },
+      { target },
+      { target, accept: "true" },
+      { target, accept: 1 },
+      { target, accept: null },
+    ])
+      expect(parseDeleteAnswerPayload(invalid)).toBeNull();
+  });
+
+  it("rejects invalid delete input before sending", () => {
+    const base = {
+      senderEncryptionPrivateKey: alice.encryption.privateKey,
+      recipientEncryptionPublicKey: bob.encryption.publicKey,
+      senderId: aliceId,
+      recipientId: bobId,
+      target,
+      sentAt,
+    };
+    expect(() =>
+      encryptDeleteRequestMessage({ ...base, target: "bad" }),
+    ).toThrow(TypeError);
+    expect(() =>
+      encryptDeleteRequestMessage({ ...base, target }),
+    ).not.toThrow();
+    expect(() =>
+      encryptDeleteRequestMessage({ ...base, senderId: "bad" }),
+    ).toThrow(TypeError);
+    expect(() =>
+      encryptDeleteRequestMessage({
+        ...base,
+        recipientEncryptionPublicKey: new Uint8Array(31),
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      encryptDeleteRequestMessage({ ...base, sentAt: Number.NaN }),
+    ).toThrow(TypeError);
+    expect(() =>
+      encryptDeleteAnswerMessage({
+        ...base,
+        accept: "true" as unknown as boolean,
+      }),
+    ).toThrow(TypeError);
+    const historyBase = {
+      historyKey: alice.historyKey,
+      clientMsgId,
+      senderId: aliceId,
+      peerId: bobId,
+      target,
+      sentAt,
+    };
+    expect(() =>
+      encryptHistoryDeleteRequestEntry({ ...historyBase, target: "bad" }),
+    ).toThrow(TypeError);
+    expect(() =>
+      encryptHistoryDeleteRequestEntry({
+        ...historyBase,
+        clientMsgId: "0c".repeat(15),
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      encryptHistoryDeleteRequestEntry({
+        ...historyBase,
+        peerId: "ff".repeat(31),
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      encryptHistoryDeleteAnswerEntry({
+        ...historyBase,
+        accept: 1 as unknown as boolean,
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      encryptHistoryDeleteAnswerEntry({
+        ...historyBase,
+        target: "bad",
+        accept: true,
+      }),
+    ).toThrow(TypeError);
   });
 });
