@@ -75,6 +75,21 @@ export function toggleEditAction(input: {
   return input.current === input.message.id ? null : input.message.id;
 }
 
+/**
+ * The outline marks only the message that is being edited right now. Messages
+ * of the old v1 format have no `replayId` and can never be a target: comparing
+ * two missing IDs would otherwise outline all of them while the mode is off.
+ */
+export function isEditingMessage(
+  state: MessageEditState | null,
+  message: Pick<ChatMessage, "replayId">,
+): boolean {
+  if (!state) return false;
+  const targetId = message.replayId;
+  if (typeof targetId !== "string" || targetId.length === 0) return false;
+  return targetId === state.targetId;
+}
+
 /** Sending stays disabled while the text is empty or was not changed. */
 export function canSubmitEdit(state: MessageEditState, draft: string): boolean {
   return draft.trim().length > 0 && draft !== state.originalText;

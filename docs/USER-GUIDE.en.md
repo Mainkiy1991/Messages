@@ -62,6 +62,8 @@ You can change a message you have already sent: hover over it (on a phone, tap i
 
 The other person sees the new text with an **edited** note next to the time. The note only says that the text was changed; it does not confirm that the edit reached the other person. They may have read or copied the old text already — an edit does not recall it and does not remove it from the conversation.
 
+Messages sent before editing appeared (the old format) cannot be changed.
+
 ## PIN (optional)
 
 The PIN encrypts the local keys on this device. It is never sent to the server: the server does not know it and cannot check it.

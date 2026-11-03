@@ -50,6 +50,7 @@ import {
 import {
   canSubmitEdit,
   draftAfterEdit,
+  isEditingMessage,
   startMessageEdit,
   submitMessageEdit,
   toggleEditAction,
@@ -1519,7 +1520,7 @@ function App() {
                             data-status={message.status}
                             data-direction={message.direction}
                             className={`message ${message.direction}${
-                              editState?.targetId === message.replayId
+                              isEditingMessage(editState, message)
                                 ? " message-editing"
                                 : ""
                             }`}
