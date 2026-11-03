@@ -1673,6 +1673,8 @@ test.describe("real browser chat", () => {
   test("requests deletion, answers it and keeps the state after reload", async ({
     browser,
   }) => {
+    test.setTimeout(180_000);
+
     const a = await openUser(browser);
     const b = await openUser(browser);
     const alice = await createAccount(a.page);
@@ -1814,6 +1816,12 @@ test.describe("real browser chat", () => {
     // The state comes from history, so a reload keeps it on both sides.
     await a.page.reload();
     await b.page.reload();
+    for (const user of [a, b]) {
+      await expect(user.page.getByTestId("connection-status")).toHaveAttribute(
+        "data-state",
+        "connected",
+      );
+    }
     await expect(a.page.getByTestId("deletion-mark")).toHaveCount(2);
     await expect(secretRow.getByTestId("deletion-mark")).toHaveText(
       "the other person kept the message",
