@@ -694,6 +694,51 @@ select {
   text-align: right;
   font-size: 0.72rem;
 }
+.edited-mark {
+  color: #73798a;
+  font-size: 0.72rem;
+}
+.message-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 2px 4px;
+  border: 0;
+  background: none;
+  color: #5145cd;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+.message-edit:hover {
+  text-decoration: underline;
+}
+.message-edit-icon {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+}
+.edit-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 12px;
+  border-top: 1px solid #e4e6ee;
+  background: #f7f8fc;
+}
+.edit-banner-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #34394a;
+  font-size: 0.85rem;
+}
+.edit-banner-cancel {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
 .composer {
   display: flex;
   gap: 8px;

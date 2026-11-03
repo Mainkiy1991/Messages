@@ -1482,4 +1482,103 @@ test.describe("real browser chat", () => {
     await expect(a.page.getByTestId("profile")).toBeVisible();
     expect(alice.id).toHaveLength(64);
   });
+
+  test("edits a sent message for both users and keeps the unsent draft", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+
+    await openChat(a.page, bob.id);
+    await send(a.page, "First version");
+    await openChat(b.page, alice.id);
+    const bobText = b.page.locator(".message-list .message-text");
+    await expect(bobText.filter({ hasText: "First version" })).toBeVisible();
+
+    const aliceBubble = a.page
+      .locator('[data-testid="message"][data-direction="out"]')
+      .filter({ hasText: "First version" });
+    await expect(aliceBubble).toHaveAttribute(
+      "data-status",
+      /^(sent|delivered|read)$/u,
+    );
+
+    // The draft written before the edit comes back when the mode is left.
+    await a.page.getByTestId("message-input").fill("draft to keep");
+    await aliceBubble.getByTestId("edit-message").click();
+    await expect(a.page.getByTestId("edit-banner")).toContainText(
+      "Editing message",
+    );
+    await expect(a.page.getByTestId("message-input")).toHaveValue(
+      "First version",
+    );
+    await a.page.getByTestId("message-input").press("Escape");
+    await expect(a.page.getByTestId("edit-banner")).toHaveCount(0);
+    await expect(a.page.getByTestId("message-input")).toHaveValue(
+      "draft to keep",
+    );
+
+    // Empty and unchanged text cannot be sent.
+    await a.page.getByTestId("message-input").fill("");
+    await aliceBubble.getByTestId("edit-message").click();
+    await expect(a.page.getByTestId("edit-banner")).toBeVisible();
+    await expect(a.page.getByTestId("send-message")).toBeDisabled();
+    await a.page.getByTestId("message-input").fill("");
+    await expect(a.page.getByTestId("send-message")).toBeDisabled();
+    await a.page.getByTestId("message-input").fill("Second version");
+    await expect(a.page.getByTestId("send-message")).toBeEnabled();
+    await a.page.getByTestId("send-message").click();
+
+    await expect(a.page.getByTestId("edit-banner")).toHaveCount(0);
+    await expect(a.page.getByTestId("message-input")).toHaveValue("");
+    await expect(
+      a.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: "Second version" }),
+    ).toBeVisible();
+    await expect(bobText.filter({ hasText: "Second version" })).toBeVisible();
+    await expect(bobText.filter({ hasText: "First version" })).toHaveCount(0);
+    await expect(a.page.getByTestId("edited-mark")).toHaveText("edited");
+    await expect(b.page.getByTestId("edited-mark")).toHaveText("edited");
+
+    const markStyle = await b.page
+      .getByTestId("edited-mark")
+      .evaluate((mark) => {
+        const text = mark.closest(".message")!.querySelector(".message-text")!;
+        return {
+          markSize: Number.parseFloat(getComputedStyle(mark).fontSize),
+          textSize: Number.parseFloat(getComputedStyle(text).fontSize),
+          markColor: getComputedStyle(mark).color,
+          textColor: getComputedStyle(text).color,
+        };
+      });
+    expect(markStyle.markSize).toBeLessThan(markStyle.textSize);
+    expect(markStyle.markColor).not.toBe(markStyle.textColor);
+
+    await a.page.setViewportSize({ width: 360, height: 640 });
+    const editButton = a.page.getByTestId("edit-message");
+    await expect(editButton).toBeVisible();
+    const conversation = (await a.page.locator(".conversation").boundingBox())!;
+    const button = (await editButton.boundingBox())!;
+    expect(button.x).toBeGreaterThanOrEqual(conversation.x - 1);
+    expect(button.x + button.width).toBeLessThanOrEqual(
+      conversation.x + conversation.width + 1,
+    );
+    await editButton.click();
+    const banner = a.page.getByTestId("edit-banner");
+    await expect(banner).toBeVisible();
+    const bannerBox = (await banner.boundingBox())!;
+    expect(bannerBox.x).toBeGreaterThanOrEqual(0);
+    expect(bannerBox.width).toBeLessThanOrEqual(360);
+    expect(
+      await banner.evaluate(
+        (element) => element.scrollWidth - element.clientWidth,
+      ),
+    ).toBeLessThanOrEqual(0);
+    await a.page.getByTestId("cancel-edit").click();
+    await expect(banner).toHaveCount(0);
+    await expect(a.page.getByTestId("message-input")).toHaveValue("");
+  });
 });

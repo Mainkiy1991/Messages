@@ -42,6 +42,18 @@ import {
   PresenceDot,
   PresenceLabel,
 } from "./components/presence-indicators.js";
+import {
+  EditBanner,
+  EditMessageButton,
+  EditedMark,
+} from "./components/message-edit.js";
+import {
+  canSubmitEdit,
+  draftAfterEdit,
+  startMessageEdit,
+  submitMessageEdit,
+  type MessageEditState,
+} from "./lib/message-edit.js";
 import "./style.css";
 
 type Screen =
@@ -99,6 +111,7 @@ function App() {
   const [newContactName, setNewContactName] = useState("");
   const [contactNameDraft, setContactNameDraft] = useState("");
   const [draft, setDraft] = useState("");
+  const [editState, setEditState] = useState<MessageEditState | null>(null);
   const [chatError, setChatError] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileSection, setProfileSection] = useState<
@@ -115,6 +128,7 @@ function App() {
   const pinInputRef = useRef<HTMLInputElement | null>(null);
   const controllerRef = useRef<ChatController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const wasNearBottomRef = useRef(true);
   const previousPeerRef = useRef("");
   const preserveScrollRef = useRef(false);
@@ -547,6 +561,12 @@ function App() {
       setShowDeleteConfirmation(false);
     }
   }, [activePeer]);
+  useEffect(() => {
+    // The edit target belongs to one chat, so leaving the chat ends the mode.
+    if (!editState || editState.peerId === activePeer) return;
+    setDraft(draftAfterEdit(editState));
+    setEditState(null);
+  }, [activePeer, editState]);
   useLayoutEffect(() => {
     const list = messageListRef.current;
     if (!list) return;
@@ -570,7 +590,15 @@ function App() {
             ? t.invalidText
             : code === "send_failed"
               ? t.sendFailed
-              : t.badPeerKey;
+              : code === "edit_limit"
+                ? t.editLimit
+                : code === "not_editable"
+                  ? t.editNotEditable
+                  : code === "edit_pending"
+                    ? t.editPending
+                    : code === "unknown_message"
+                      ? t.editUnknownMessage
+                      : t.badPeerKey;
   useEffect(() => {
     if (!keys || screen !== "home") return;
     let cancelled = false;
@@ -621,6 +649,27 @@ function App() {
 
   async function sendMessage(event?: React.FormEvent) {
     event?.preventDefault();
+    if (editState) {
+      if (!canSubmitEdit(editState, draft)) return;
+      const result = await submitMessageEdit({
+        state: editState,
+        draft,
+        sendEdit: async (peerId, targetId, text) =>
+          (await controllerRef.current?.sendEdit(peerId, targetId, text)) ?? {
+            ok: false,
+            error: "server_unavailable",
+          },
+      });
+      if (!result.ok) {
+        setChatError(errorText(result.error));
+        return;
+      }
+      setEditState(null);
+      setDraft(draftAfterEdit(editState));
+      setChatError("");
+      window.requestAnimationFrame(resizeComposer);
+      return;
+    }
     const text = draft;
     await controllerRef.current?.sendText(text);
     setDraft((current) => (current === text ? "" : current));
@@ -628,9 +677,55 @@ function App() {
     setChatError(error ? errorText(error) : "");
   }
 
+  function resizeComposer() {
+    const input = composerRef.current;
+    if (!input) return;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 130)}px`;
+  }
+
+  function beginEdit(message: ChatMessage) {
+    if (!activePeer) return;
+    const next = startMessageEdit({
+      peerId: activePeer,
+      message,
+      composerDraft: draft,
+      userId,
+    });
+    if (!next) return;
+    setEditState(next);
+    setDraft(message.text);
+    setChatError("");
+    window.requestAnimationFrame(() => {
+      composerRef.current?.focus();
+      resizeComposer();
+    });
+  }
+
+  function cancelEdit() {
+    if (!editState) return;
+    setDraft(draftAfterEdit(editState));
+    setEditState(null);
+    setChatError("");
+    window.requestAnimationFrame(resizeComposer);
+  }
+
   function retryMessage(message: ChatMessage) {
     if (!message.clientMsgId || !activePeer) return;
     controllerRef.current?.retryMessage(activePeer, message.clientMsgId);
+  }
+
+  function statusText(message: ChatMessage): string {
+    if (message.direction !== "out" || isSavedChat) return "";
+    return message.status === "read"
+      ? t.read
+      : message.status === "delivered"
+        ? t.delivered
+        : message.status === "sent"
+          ? t.sent
+          : message.status === "error"
+            ? t.failed
+            : t.sending;
   }
 
   async function confirmDeleteChat() {
@@ -1404,18 +1499,14 @@ function App() {
                             {new Date(message.createdAt).toLocaleTimeString(
                               getLanguageLocale(language),
                               { hour: "2-digit", minute: "2-digit" },
-                            )}{" "}
-                            {message.direction === "out" &&
-                              !isSavedChat &&
-                              (message.status === "read"
-                                ? t.read
-                                : message.status === "delivered"
-                                  ? t.delivered
-                                  : message.status === "sent"
-                                    ? t.sent
-                                    : message.status === "error"
-                                      ? t.failed
-                                      : t.sending)}
+                            )}
+                            {statusText(message) && ` ${statusText(message)}`}
+                            {message.edited && (
+                              <>
+                                {" · "}
+                                <EditedMark label={t.edited} />
+                              </>
+                            )}
                           </small>
                           {message.status === "error" && (
                             <>
@@ -1430,14 +1521,28 @@ function App() {
                               </button>
                             </>
                           )}
+                          <EditMessageButton
+                            message={message}
+                            userId={userId}
+                            label={t.edit}
+                            onEdit={beginEdit}
+                          />
                         </article>
                       ))}
                     </div>
+                    {editState && (
+                      <EditBanner
+                        label={t.editBanner}
+                        cancelLabel={t.cancel}
+                        onCancel={cancelEdit}
+                      />
+                    )}
                     <form
                       className="composer"
                       onSubmit={(event) => void sendMessage(event)}
                     >
                       <textarea
+                        ref={composerRef}
                         value={draft}
                         data-testid="message-input"
                         maxLength={4000}
@@ -1447,6 +1552,11 @@ function App() {
                           event.currentTarget.style.height = `${Math.min(event.currentTarget.scrollHeight, 130)}px`;
                         }}
                         onKeyDown={(event) => {
+                          if (event.key === "Escape" && editState) {
+                            event.preventDefault();
+                            cancelEdit();
+                            return;
+                          }
                           if (event.key === "Enter" && !event.shiftKey) {
                             event.preventDefault();
                             void sendMessage();
@@ -1457,7 +1567,11 @@ function App() {
                       <button
                         data-testid="send-message"
                         className="primary"
-                        disabled={!draft.trim()}
+                        disabled={
+                          editState
+                            ? !canSubmitEdit(editState, draft)
+                            : !draft.trim()
+                        }
                       >
                         {t.send}
                       </button>

@@ -56,6 +56,12 @@ The contact's status is shown next to their name or ID:
 
 Separately, the app header has an indicator of your own connection: **connected**, **connecting…**, or **offline**. It describes your device, not the contact.
 
+## Editing messages
+
+You can change a message you have already sent: press **Edit** under it. The message text appears in the input field, and above the field you will see **Editing message** with a **Cancel** button. Send the new version with **Send** or Enter; leave the mode with Escape or **Cancel**. If you had already started typing another message, your draft is not lost: it comes back to the field when you leave the mode.
+
+The other person sees the new text with an **edited** note next to the time. The note only says that the text was changed; it does not confirm that the edit reached the other person. They may have read or copied the old text already — an edit does not recall it and does not remove it from the conversation.
+
 ## PIN (optional)
 
 The PIN encrypts the local keys on this device. It is never sent to the server: the server does not know it and cannot check it.
