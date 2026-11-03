@@ -4,8 +4,11 @@ import {
   decryptHistoryEntry,
   decryptTextMessage,
   encryptContactBook,
+  encryptEditMessage,
+  encryptHistoryEditEntry,
   encryptHistoryEntry,
   encryptTextMessage,
+  MAX_EDIT_REV,
   newClientMsgId,
   newReplayMessageId,
   type DerivedKeys,
@@ -57,6 +60,7 @@ export type ChatMessage = {
   replayId?: string;
   replayAuthor?: string;
   countedUnread?: boolean;
+  edited?: boolean;
 };
 export type Chat = {
   peerId: string;
@@ -87,6 +91,14 @@ export type ChatError =
   | "server_unavailable"
   | "invalid_text"
   | "send_failed";
+/** Why an edit was rejected; the UI of the edit action is a separate task. */
+export type SendEditError =
+  | ChatError
+  | "unknown_message"
+  | "not_editable"
+  | "edit_pending"
+  | "edit_limit";
+export type SendEditResult = { ok: true } | { ok: false; error: SendEditError };
 
 export type ChatControllerDependencies = {
   fetcher?: FetchLike;
@@ -174,6 +186,8 @@ export class ChatController {
   private wakingTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly sentReadMarkers = new Map<string, string>();
   private readonly peerReadMarkers = new Map<string, string>();
+  /** Applied edit revisions per (chat, author, target message ID). */
+  private readonly appliedEdits = new Map<string, AppliedEdit>();
   private readonly clearedBeforeSeqs = new Map<string, string>();
   private readonly sessionLocalPeers = new Set<string>();
   private serverConversationPeers = new Set<string>();
@@ -316,6 +330,7 @@ export class ChatController {
         let replayId: string | undefined;
         let createdAt = new Date().toISOString();
         let decryptFailed = false;
+        let queuedEdit = false;
         try {
           const decrypted = decryptHistoryEntry({
             historyKey: this.keys.historyKey,
@@ -324,13 +339,31 @@ export class ChatController {
             senderId: this.userId,
             entry: frame.senderCopy,
           });
-          text = decrypted.text ?? "";
-          replayId = decrypted.id;
-          if (decrypted.sentAt !== undefined)
-            createdAt = new Date(decrypted.sentAt).toISOString();
+          if (decrypted.type === "edit") {
+            /* A queued edit waits for its original instead of a placeholder. */
+            queuedEdit = true;
+            if (
+              decrypted.target &&
+              typeof decrypted.rev === "number" &&
+              typeof decrypted.text === "string"
+            )
+              this.registerEdit({
+                peerId: frame.to,
+                author: this.userId,
+                targetId: decrypted.target,
+                rev: decrypted.rev,
+                text: decrypted.text,
+              });
+          } else {
+            text = decrypted.text ?? "";
+            replayId = decrypted.id;
+            if (decrypted.sentAt !== undefined)
+              createdAt = new Date(decrypted.sentAt).toISOString();
+          }
         } catch {
           decryptFailed = true;
         }
+        if (queuedEdit) continue;
         this.upsertMessage(frame.to, {
           id: frame.clientMsgId,
           clientMsgId: frame.clientMsgId,
@@ -757,6 +790,24 @@ export class ChatController {
                     recipientId: this.userId,
                     ciphertext: entry.payload,
                   });
+            if (decrypted.type === "edit") {
+              /* Own edits come back through the history key, peer edits in the
+                 ciphertext; both are stored and never shown as bubbles. */
+              if (
+                decrypted.target &&
+                typeof decrypted.rev === "number" &&
+                typeof decrypted.text === "string"
+              )
+                this.registerEdit({
+                  peerId,
+                  author: entry.direction === "out" ? this.userId : peerId,
+                  targetId: decrypted.target,
+                  rev: decrypted.rev,
+                  seq: entry.seq,
+                  text: decrypted.text,
+                });
+              return null;
+            }
             if (decrypted.type && decrypted.type !== "text") return null;
             return {
               id: entry.id,
@@ -830,7 +881,10 @@ export class ChatController {
                       );
                       return {
                         unreadCount: reconciled.unreadCount,
-                        messages: mergeMessages(reconciled.messages, messages),
+                        messages: this.applyStoredEdits(
+                          peerId,
+                          mergeMessages(reconciled.messages, messages),
+                        ),
                       };
                     })(),
                     hasMore: after ? item.hasMore : page.hasMore,
@@ -1153,7 +1207,11 @@ export class ChatController {
 
   async sendText(text: string): Promise<void> {
     const peerId = this.state.activePeer;
-    if (!peerId || !text.trim() || Array.from(text).length > 4000) {
+    if (
+      !peerId ||
+      !text.trim() ||
+      Array.from(text).length > MAX_MESSAGE_CHARS
+    ) {
       this.setError("invalid_text");
       return;
     }
@@ -1213,6 +1271,154 @@ export class ChatController {
     } catch {
       this.setError("server_unavailable");
     }
+  }
+
+  /**
+   * Replaces the text of your own already sent message. The edit travels as a
+   * normal encrypted frame (queue, statuses and retries are shared with text)
+   * and is applied locally right after it is queued.
+   */
+  async sendEdit(
+    peerId: string,
+    targetId: string,
+    text: string,
+  ): Promise<SendEditResult> {
+    const original = this.state.chats
+      .find((chat) => chat.peerId === peerId)
+      ?.messages.find((message) => message.replayId === targetId);
+    if (!original) return { ok: false, error: "unknown_message" };
+    if (
+      original.decryptFailed ||
+      original.direction !== "out" ||
+      original.replayAuthor !== this.userId
+    )
+      return { ok: false, error: "not_editable" };
+    if (original.status === "sending")
+      return { ok: false, error: "edit_pending" };
+    if (!text.trim() || Array.from(text).length > MAX_MESSAGE_CHARS)
+      return { ok: false, error: "invalid_text" };
+    const rev =
+      (this.appliedEdits.get(editKey(peerId, this.userId, targetId))?.rev ??
+        0) + 1;
+    if (rev > MAX_EDIT_REV) return { ok: false, error: "edit_limit" };
+    let recipientEncryptionPublicKey: Uint8Array;
+    try {
+      recipientEncryptionPublicKey =
+        peerId === this.userId
+          ? this.keys.encryption.publicKey
+          : await this.getVerifiedPeerKey(peerId);
+    } catch (error) {
+      return { ok: false, error: this.peerKeyError(error) };
+    }
+    const sentAt = (this.deps.now ?? Date.now)();
+    const clientMsgId = (this.deps.makeClientMsgId ?? newClientMsgId)();
+    const frame: OutgoingFrame = {
+      type: "send",
+      clientMsgId,
+      to: peerId,
+      ciphertext: encryptEditMessage({
+        senderEncryptionPrivateKey: this.keys.encryption.privateKey,
+        recipientEncryptionPublicKey,
+        senderId: this.userId,
+        recipientId: peerId,
+        target: targetId,
+        rev,
+        text,
+        sentAt,
+      }),
+      senderCopy: encryptHistoryEditEntry({
+        historyKey: this.keys.historyKey,
+        clientMsgId,
+        peerId,
+        senderId: this.userId,
+        target: targetId,
+        rev,
+        text,
+        sentAt,
+      }),
+    };
+    try {
+      await (this.deps.outbox ?? indexedDbOutbox).put(this.userId, frame);
+    } catch {
+      return { ok: false, error: "server_unavailable" };
+    }
+    this.applyEdit({ peerId, author: this.userId, targetId, rev, text });
+    this.update({ error: "" });
+    try {
+      this.connection.send(frame);
+    } catch {
+      this.setError("server_unavailable");
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Remembers an incoming edit so it applies to the original now, or later
+   * when an older history page finally loads that message. Edits never become
+   * chat messages, so they cannot add a bubble or an unread count.
+   */
+  private applyEdit(input: IncomingEdit): void {
+    if (!this.registerEdit(input)) return;
+    const chat = this.state.chats.find((item) => item.peerId === input.peerId);
+    if (
+      !chat?.messages.some(
+        (message) =>
+          message.replayId === input.targetId &&
+          message.replayAuthor === input.author,
+      )
+    )
+      return;
+    const messages = this.applyStoredEdits(input.peerId, chat.messages);
+    if (messages === chat.messages) return;
+    this.update({
+      chats: this.state.chats.map((item) =>
+        item.peerId === input.peerId ? { ...item, messages } : item,
+      ),
+    });
+  }
+
+  /** Highest revision wins; on a tie the edit with the lower server seq wins. */
+  private registerEdit(input: IncomingEdit): boolean {
+    const key = editKey(input.peerId, input.author, input.targetId);
+    const applied = this.appliedEdits.get(key);
+    if (applied) {
+      if (input.rev < applied.rev) return false;
+      if (
+        input.rev === applied.rev &&
+        (!input.seq || !applied.seq || BigInt(input.seq) >= BigInt(applied.seq))
+      )
+        return false;
+    }
+    this.appliedEdits.set(key, {
+      rev: input.rev,
+      ...(input.seq ? { seq: input.seq } : {}),
+      text: input.text,
+    });
+    return true;
+  }
+
+  private applyStoredEdit(peerId: string, message: ChatMessage): ChatMessage {
+    if (!message.replayId || !message.replayAuthor || message.decryptFailed)
+      return message;
+    const edit = this.appliedEdits.get(
+      editKey(peerId, message.replayAuthor, message.replayId),
+    );
+    if (!edit) return message;
+    if (message.edited && message.text === edit.text) return message;
+    return { ...message, text: edit.text, edited: true };
+  }
+
+  private applyStoredEdits(
+    peerId: string,
+    messages: ChatMessage[],
+  ): ChatMessage[] {
+    let changed = false;
+    const result = messages.map((message) => {
+      const next = this.applyStoredEdit(peerId, message);
+      if (next !== message) changed = true;
+      return next;
+    });
+    return changed ? result : messages;
   }
 
   retryMessage(peerId: string, clientMsgId: string): void {
@@ -1331,6 +1537,25 @@ export class ChatController {
           recipientId: this.userId,
           ciphertext: frame.ciphertext,
         });
+        if (decrypted.type === "edit") {
+          /* An edit is never a message: no bubble, no unread, no reordering. */
+          if (
+            decrypted.target &&
+            typeof decrypted.rev === "number" &&
+            typeof decrypted.text === "string"
+          )
+            this.applyEdit({
+              peerId: frame.from,
+              author: frame.from,
+              targetId: decrypted.target,
+              rev: decrypted.rev,
+              text: decrypted.text,
+              ...(typeof frame.seq === "string" && /^\d+$/u.test(frame.seq)
+                ? { seq: frame.seq }
+                : {}),
+            });
+          return;
+        }
         if (decrypted.type && decrypted.type !== "text") return;
         text = decrypted.text ?? "";
         replayId = decrypted.id;
@@ -1340,7 +1565,7 @@ export class ChatController {
         /* Render a safe placeholder; WebSocket still acks this frame. */
         decryptFailed = true;
       }
-      const message: ChatMessage = {
+      const message: ChatMessage = this.applyStoredEdit(frame.from, {
         id: frame.id,
         ...(replayId ? { replayId, replayAuthor: frame.from } : {}),
         text,
@@ -1354,7 +1579,7 @@ export class ChatController {
           : {}),
         ...(decryptFailed ? { decryptFailed: true } : {}),
         arrivalOrder: this.arrivalOrder++,
-      };
+      });
       const existing = this.state.chats.find(
         (chat) => chat.peerId === frame.from,
       );
@@ -1534,9 +1759,16 @@ export class ChatController {
       ? {
           ...chat,
           unreadCount: unreadCount ?? chat.unreadCount,
-          messages: mergeMessages(chat.messages, [message]),
+          messages: this.applyStoredEdits(
+            peerId,
+            mergeMessages(chat.messages, [message]),
+          ),
         }
-      : { peerId, unreadCount: unreadCount ?? 0, messages: [message] };
+      : {
+          peerId,
+          unreadCount: unreadCount ?? 0,
+          messages: this.applyStoredEdits(peerId, [message]),
+        };
     const chats = chat
       ? this.state.chats.map((item) =>
           item.peerId === peerId ? nextChat : item,
@@ -1575,6 +1807,23 @@ export class ChatController {
 }
 
 export const WAKING_TIMEOUT_MS = 90_000;
+export const MAX_MESSAGE_CHARS = 4000;
+
+type AppliedEdit = { rev: number; seq?: string; text: string };
+
+type IncomingEdit = {
+  peerId: string;
+  author: string;
+  targetId: string;
+  rev: number;
+  seq?: string;
+  text: string;
+};
+
+/** An edit belongs to one chat, one author and one original message ID. */
+function editKey(peerId: string, author: string, targetId: string): string {
+  return `${peerId}\n${author}\n${targetId}`;
+}
 
 export function unreadAfterHistoryMerge(
   chat: Chat,

@@ -323,24 +323,39 @@ export function newReplayMessageId(): string {
   return bytesToBase64(randomBytes(16));
 }
 
-export function encryptTextMessage(input: {
+export const MAX_EDIT_REV = 100;
+
+export type EditPayload = { target: string; rev: number; text: string };
+
+export type DecryptedMessage = {
+  text?: string;
+  sentAt?: number;
+  v?: 2;
+  id?: string;
+  type?: string;
+  target?: string;
+  rev?: number;
+};
+
+type MessageBodyBuilder = (
+  id: string,
+  sentAt: number,
+) => Record<string, unknown>;
+
+function encryptMessageEnvelope(input: {
   senderEncryptionPrivateKey: Uint8Array;
   recipientEncryptionPublicKey: Uint8Array;
   senderId: string;
   recipientId: string;
-  text: string;
   sentAt?: number;
   messageId?: string;
+  buildBody: MessageBodyBuilder;
 }): string {
-  checkKey(input.senderEncryptionPrivateKey);
-  checkKey(input.recipientEncryptionPublicKey);
-  checkIds(input.senderId, input.recipientId);
-  checkText(input.text);
   const sentAt = input.sentAt ?? Date.now();
   checkSentAt(sentAt);
   const id = input.messageId ?? newReplayMessageId();
+  checkMessageId(id);
   const idBytes = base64ToBytes(id);
-  if (idBytes.length !== 16) throw new TypeError("Invalid message id");
   const senderEncryptionPublicKey = x25519.getPublicKey(
     input.senderEncryptionPrivateKey,
   );
@@ -365,15 +380,7 @@ export function encryptTextMessage(input: {
   const aad = encoder.encode(
     `messages/v2/message\n${input.senderId}\n${input.recipientId}\n${bytesToHex(senderEncryptionPublicKey)}\n${bytesToHex(input.recipientEncryptionPublicKey)}\n${id}`,
   );
-  const plaintext = encoder.encode(
-    JSON.stringify({
-      v: 2,
-      id,
-      type: "text",
-      text: input.text,
-      sentAt,
-    }),
-  );
+  const plaintext = encoder.encode(JSON.stringify(input.buildBody(id, sentAt)));
   return bytesToBase64(
     concat(
       Uint8Array.of(MESSAGE_VERSION_V2),
@@ -384,13 +391,69 @@ export function encryptTextMessage(input: {
   );
 }
 
+export function encryptTextMessage(input: {
+  senderEncryptionPrivateKey: Uint8Array;
+  recipientEncryptionPublicKey: Uint8Array;
+  senderId: string;
+  recipientId: string;
+  text: string;
+  sentAt?: number;
+  messageId?: string;
+}): string {
+  checkKey(input.senderEncryptionPrivateKey);
+  checkKey(input.recipientEncryptionPublicKey);
+  checkIds(input.senderId, input.recipientId);
+  checkText(input.text);
+  return encryptMessageEnvelope({
+    ...input,
+    buildBody: (id, sentAt) => ({
+      v: 2,
+      id,
+      type: "text",
+      text: input.text,
+      sentAt,
+    }),
+  });
+}
+
+export function encryptEditMessage(input: {
+  senderEncryptionPrivateKey: Uint8Array;
+  recipientEncryptionPublicKey: Uint8Array;
+  senderId: string;
+  recipientId: string;
+  target: string;
+  rev: number;
+  text: string;
+  sentAt?: number;
+  messageId?: string;
+}): string {
+  checkKey(input.senderEncryptionPrivateKey);
+  checkKey(input.recipientEncryptionPublicKey);
+  checkIds(input.senderId, input.recipientId);
+  checkMessageId(input.target);
+  checkEditRev(input.rev);
+  checkText(input.text);
+  return encryptMessageEnvelope({
+    ...input,
+    buildBody: (id, sentAt) => ({
+      v: 2,
+      id,
+      type: "edit",
+      target: input.target,
+      rev: input.rev,
+      text: input.text,
+      sentAt,
+    }),
+  });
+}
+
 export function decryptTextMessage(input: {
   recipientEncryptionPrivateKey: Uint8Array;
   senderEncryptionPublicKey: Uint8Array;
   senderId: string;
   recipientId: string;
   ciphertext: string;
-}): { text?: string; sentAt?: number; v?: 2; id?: string; type?: string } {
+}): DecryptedMessage {
   try {
     checkKey(input.recipientEncryptionPrivateKey);
     checkKey(input.senderEncryptionPublicKey);
@@ -443,6 +506,12 @@ export function decryptTextMessage(input: {
         throw new Error();
       if (typeof value.sentAt !== "number") throw new Error();
       checkSentAt(value.sentAt);
+      if (value.type === "edit") {
+        const edit = parseEditPayload(value);
+        return edit
+          ? { v: 2, id, type: "edit", ...edit, sentAt: value.sentAt }
+          : { v: 2, id, type: value.type, sentAt: value.sentAt };
+      }
       if (value.type !== "text")
         return { v: 2, id, type: value.type, sentAt: value.sentAt };
       if (typeof value.text !== "string") throw new Error();
@@ -453,12 +522,6 @@ export function decryptTextMessage(input: {
         type: "text",
         text: value.text,
         sentAt: value.sentAt,
-      } as {
-        v: 2;
-        id: string;
-        type: string;
-        text: string;
-        sentAt: number;
       };
     }
     const aad = encoder.encode(
@@ -470,6 +533,36 @@ export function decryptTextMessage(input: {
   } catch {
     throw new DecryptError();
   }
+}
+
+function encryptHistoryEnvelope(input: {
+  historyKey: Uint8Array;
+  clientMsgId: string;
+  peerId: string;
+  sentAt: number;
+  senderId: string;
+  messageId?: string;
+  buildBody: MessageBodyBuilder;
+}): string {
+  const key = hkdf(sha256, input.historyKey, HKDF_SALT, HISTORY_INFO, 32);
+  const nonce = randomBytes(NONCE_LENGTH);
+  const id = input.messageId ?? newReplayMessageId();
+  checkMessageId(id);
+  const idBytes = base64ToBytes(id);
+  const aad = encoder.encode(
+    `messages/v2/history-entry\n${input.senderId}\n${input.peerId}\n${id}\n${input.clientMsgId}`,
+  );
+  const plaintext = encoder.encode(
+    JSON.stringify(input.buildBody(id, input.sentAt)),
+  );
+  return bytesToBase64(
+    concat(
+      Uint8Array.of(MESSAGE_VERSION_V2),
+      idBytes,
+      nonce,
+      xchacha20poly1305(key, nonce, aad).encrypt(plaintext),
+    ),
+  );
 }
 
 export function encryptHistoryEntry(input: {
@@ -487,31 +580,49 @@ export function encryptHistoryEntry(input: {
   checkIds(input.senderId, input.peerId);
   checkText(input.text);
   checkSentAt(input.sentAt);
-  const key = hkdf(sha256, input.historyKey, HKDF_SALT, HISTORY_INFO, 32);
-  const nonce = randomBytes(NONCE_LENGTH);
-  const id = input.messageId ?? newReplayMessageId();
-  const idBytes = base64ToBytes(id);
-  if (idBytes.length !== 16) throw new TypeError("Invalid message id");
-  const aad = encoder.encode(
-    `messages/v2/history-entry\n${input.senderId}\n${input.peerId}\n${id}\n${input.clientMsgId}`,
-  );
-  const plaintext = encoder.encode(
-    JSON.stringify({
+  return encryptHistoryEnvelope({
+    ...input,
+    buildBody: (id, sentAt) => ({
       v: 2,
       id,
       type: "text",
       text: input.text,
-      sentAt: input.sentAt,
+      sentAt,
     }),
-  );
-  return bytesToBase64(
-    concat(
-      Uint8Array.of(MESSAGE_VERSION_V2),
-      idBytes,
-      nonce,
-      xchacha20poly1305(key, nonce, aad).encrypt(plaintext),
-    ),
-  );
+  });
+}
+
+export function encryptHistoryEditEntry(input: {
+  historyKey: Uint8Array;
+  clientMsgId: string;
+  peerId: string;
+  target: string;
+  rev: number;
+  text: string;
+  sentAt: number;
+  senderId: string;
+  messageId?: string;
+}): string {
+  checkKey(input.historyKey);
+  checkId(input.clientMsgId, 32, /^[0-9a-f]{32}$/u);
+  checkId(input.peerId, 64, /^[0-9a-f]{64}$/u);
+  checkIds(input.senderId, input.peerId);
+  checkMessageId(input.target);
+  checkEditRev(input.rev);
+  checkText(input.text);
+  checkSentAt(input.sentAt);
+  return encryptHistoryEnvelope({
+    ...input,
+    buildBody: (id, sentAt) => ({
+      v: 2,
+      id,
+      type: "edit",
+      target: input.target,
+      rev: input.rev,
+      text: input.text,
+      sentAt,
+    }),
+  });
 }
 
 export function decryptHistoryEntry(input: {
@@ -520,7 +631,7 @@ export function decryptHistoryEntry(input: {
   peerId: string;
   entry: string;
   senderId: string;
-}): { text?: string; sentAt?: number; v?: 2; id?: string; type?: string } {
+}): DecryptedMessage {
   try {
     checkKey(input.historyKey);
     checkId(input.clientMsgId, 32, /^[0-9a-f]{32}$/u);
@@ -555,6 +666,12 @@ export function decryptHistoryEntry(input: {
         throw new Error();
       if (typeof value.sentAt !== "number") throw new Error();
       checkSentAt(value.sentAt);
+      if (value.type === "edit") {
+        const edit = parseEditPayload(value);
+        return edit
+          ? { v: 2, id, type: "edit", ...edit, sentAt: value.sentAt }
+          : { v: 2, id, type: value.type, sentAt: value.sentAt };
+      }
       if (value.type !== "text")
         return { v: 2, id, type: value.type, sentAt: value.sentAt };
       if (typeof value.text !== "string") throw new Error();
@@ -706,6 +823,37 @@ function checkSentAt(sentAt: number): void {
     !Number.isFinite(new Date(sentAt).getTime())
   )
     throw new TypeError("Invalid timestamp");
+}
+
+function checkMessageId(value: string): void {
+  if (base64ToBytes(value).length !== 16)
+    throw new TypeError("Invalid message id");
+}
+
+function checkEditRev(rev: number): void {
+  if (
+    typeof rev !== "number" ||
+    !Number.isInteger(rev) ||
+    rev < 1 ||
+    rev > MAX_EDIT_REV
+  )
+    throw new TypeError("Invalid edit revision");
+}
+
+/** Malformed edits are skipped exactly like unknown message types. */
+export function parseEditPayload(value: unknown): EditPayload | null {
+  try {
+    if (!value || typeof value !== "object") return null;
+    const edit = value as Record<string, unknown>;
+    if (typeof edit.target !== "string") return null;
+    checkMessageId(edit.target);
+    checkEditRev(edit.rev as number);
+    if (typeof edit.text !== "string") return null;
+    checkText(edit.text);
+    return { target: edit.target, rev: edit.rev as number, text: edit.text };
+  } catch {
+    return null;
+  }
 }
 
 function decodeEnvelope(packed: Uint8Array): {
