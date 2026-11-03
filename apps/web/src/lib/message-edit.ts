@@ -15,12 +15,19 @@ export type MessageEditState = {
 /**
  * Only your own delivered text message can be edited. Foreign, undecrypted,
  * pending and failed messages are hidden from the action instead of failing
- * after a tap, because the controller and the server reject them anyway.
+ * after a tap, because the controller and the server reject them anyway. A
+ * delete request that is waiting for an answer or has been accepted freezes the
+ * text; after a refusal the controller allows edits again.
  */
 export function canEditMessage(
   message: Pick<
     ChatMessage,
-    "direction" | "status" | "replayId" | "decryptFailed" | "replayAuthor"
+    | "direction"
+    | "status"
+    | "replayId"
+    | "decryptFailed"
+    | "replayAuthor"
+    | "deletion"
   >,
   userId?: string,
 ): boolean {
@@ -28,6 +35,8 @@ export function canEditMessage(
   if (message.decryptFailed) return false;
   if (!message.replayId) return false;
   if (message.status === "sending" || message.status === "error") return false;
+  if (message.deletion === "pending" || message.deletion === "accepted")
+    return false;
   if (userId && message.replayAuthor && message.replayAuthor !== userId)
     return false;
   return true;
@@ -50,11 +59,15 @@ export function startMessageEdit(input: {
 }
 
 /**
- * Touch screens have no hover, so the pencil of an own bubble is revealed by
+ * Touch screens have no hover, so the actions of an own bubble are revealed by
  * tapping the bubble. Only one message can be active: tapping the same bubble
- * again hides the pencil, tapping another own bubble moves it there and tapping
- * a message that cannot be edited hides it. A tap that finishes a text
- * selection changes nothing, so selecting text never flashes the action.
+ * again hides the actions, tapping another own bubble moves them there and
+ * tapping a message without actions hides them. A tap that finishes a text
+ * selection changes nothing, so selecting text never flashes the actions.
+ *
+ * `actionable` lets the caller decide on the set of actions: the bubble is
+ * active when at least one of its actions is allowed, so a message that cannot
+ * be edited but can be asked to be deleted still shows its basket.
  */
 export function toggleEditAction(input: {
   current: string | null;
@@ -66,12 +79,16 @@ export function toggleEditAction(input: {
     | "replayId"
     | "decryptFailed"
     | "replayAuthor"
+    | "deletion"
   >;
   userId?: string;
   hasSelection: boolean;
+  actionable?: boolean;
 }): string | null {
   if (input.hasSelection) return input.current;
-  if (!canEditMessage(input.message, input.userId)) return null;
+  const actionable =
+    input.actionable ?? canEditMessage(input.message, input.userId);
+  if (!actionable) return null;
   return input.current === input.message.id ? null : input.message.id;
 }
 
