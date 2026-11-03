@@ -4,6 +4,7 @@ import {
   canEditMessage,
   canSubmitEdit,
   draftAfterEdit,
+  isEditingMessage,
   startMessageEdit,
   submitMessageEdit,
   toggleEditAction,
@@ -156,6 +157,34 @@ describe("message edit action visibility", () => {
     expect(canEditMessage(chatMessage({ decryptFailed: true }), aliceId)).toBe(
       false,
     );
+  });
+});
+
+describe("edit outline", () => {
+  it("keeps the outline off when the mode is off and the message has no id", () => {
+    expect(isEditingMessage(null, chatMessage({ replayId: undefined }))).toBe(
+      false,
+    );
+  });
+
+  it("keeps the outline off for an old message without an id while editing", () => {
+    expect(
+      isEditingMessage(editState(), chatMessage({ replayId: undefined })),
+    ).toBe(false);
+  });
+
+  it("outlines the message that is being edited", () => {
+    expect(isEditingMessage(editState(), chatMessage())).toBe(true);
+  });
+
+  it("keeps the outline off for another message with a different id", () => {
+    expect(
+      isEditingMessage(editState(), chatMessage({ replayId: "b3RoZXItaWQ=" })),
+    ).toBe(false);
+  });
+
+  it("keeps the outline off when the mode is off but the message has an id", () => {
+    expect(isEditingMessage(null, chatMessage())).toBe(false);
   });
 });
 
