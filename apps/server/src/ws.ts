@@ -88,6 +88,21 @@ export const messagesErasedSchema = z
     changeSeq: sequenceValueSchema,
   })
   .strict();
+export const messageUpdatedSchema = z
+  .object({
+    type: z.literal("message_updated"),
+    id: z.string().uuid(),
+    from: userIdSchema,
+    to: userIdSchema,
+    seq: sequenceValueSchema,
+    changeSeq: sequenceValueSchema,
+    payload: z
+      .string()
+      .regex(
+        /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u,
+      ),
+  })
+  .strict();
 
 type Connection = {
   socket: WebSocket;
@@ -108,7 +123,7 @@ function tokenHash(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
 
-function decodeBase64Size(value: string): number {
+export function decodeBase64Size(value: string): number {
   const bytes = Buffer.from(value, "base64");
   return bytes.toString("base64") === value ? bytes.length : -1;
 }
