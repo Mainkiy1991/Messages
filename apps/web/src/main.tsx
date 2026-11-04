@@ -621,17 +621,19 @@ function App() {
                     ? t.editPending
                     : code === "unknown_message"
                       ? t.editUnknownMessage
-                      : code === "message_pending"
-                        ? t.editPending
-                        : code === "not_deletable"
-                          ? t.deleteNotDeletable
-                          : code === "already_requested"
-                            ? t.deleteAlreadyRequested
-                            : code === "no_request"
-                              ? t.deleteNoRequest
-                              : code === "already_answered"
-                                ? t.deleteAlreadyAnswered
-                                : t.badPeerKey;
+                      : code === "message_deleted"
+                        ? t.editMessageDeleted
+                        : code === "message_pending"
+                          ? t.editPending
+                          : code === "not_deletable"
+                            ? t.deleteNotDeletable
+                            : code === "already_requested"
+                              ? t.deleteAlreadyRequested
+                              : code === "no_request"
+                                ? t.deleteNoRequest
+                                : code === "already_answered"
+                                  ? t.deleteAlreadyAnswered
+                                  : t.badPeerKey;
   useEffect(() => {
     if (!keys || screen !== "home") return;
     let cancelled = false;

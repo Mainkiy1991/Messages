@@ -6,15 +6,14 @@ import {
   encryptContactBook,
   encryptDeleteAnswerMessage,
   encryptDeleteRequestMessage,
-  encryptEditMessage,
   encryptHistoryDeleteAnswerEntry,
   encryptHistoryDeleteRequestEntry,
-  encryptHistoryEditEntry,
   encryptHistoryEntry,
   encryptTextMessage,
   MAX_EDIT_REV,
   newClientMsgId,
   newReplayMessageId,
+  type DecryptedMessage,
   type DerivedKeys,
 } from "@messages/crypto";
 import { MAX_CONVERSATIONS } from "@messages/shared";
@@ -23,6 +22,8 @@ import {
   getConversations,
   getHistory,
   getHistoryAfter,
+  getHistoryChangedAfter,
+  updateMessage,
   deleteConversation,
   putContacts,
   type ContactBookResponse,
@@ -68,6 +69,10 @@ export type ChatMessage = {
   countedUnread?: boolean;
   edited?: boolean;
   deletion?: DeletionStatus;
+  /** Edit revision of the row; absent or zero means the original text. */
+  rev?: number;
+  /** Decrypted send time, which stays the same after an edit. */
+  sentAt?: number;
 };
 export type Chat = {
   peerId: string;
@@ -104,7 +109,8 @@ export type SendEditError =
   | "unknown_message"
   | "not_editable"
   | "edit_pending"
-  | "edit_limit";
+  | "edit_limit"
+  | "message_deleted";
 export type SendEditResult = { ok: true } | { ok: false; error: SendEditError };
 /** Why a delete request or answer was rejected; the UI is a separate task. */
 export type SendDeleteError =
@@ -157,6 +163,23 @@ export type ChatControllerDependencies = {
     hasMore: boolean;
     peerReadUpToSeq?: string | null;
   }>;
+  /** Rows changed after a change number, for catching up after a reconnect. */
+  getHistoryChangedAfter?: (
+    peerId: string,
+    token: string,
+    changedAfter: string,
+  ) => Promise<{
+    messages: HistoryMessage[];
+    hasMore: boolean;
+    peerReadUpToSeq?: string | null;
+  }>;
+  /** Replaces the content of your own row; the answer is an empty 204. */
+  updateMessage?: (
+    id: string,
+    ciphertext: string,
+    senderCopy: string,
+    token: string,
+  ) => Promise<void>;
   getContacts?: (token: string) => Promise<ContactBookResponse>;
   getHistoryAfter?: (
     peerId: string,
@@ -204,8 +227,12 @@ export class ChatController {
   private wakingTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly sentReadMarkers = new Map<string, string>();
   private readonly peerReadMarkers = new Map<string, string>();
-  /** Applied edit revisions per (chat, author, target message ID). */
-  private readonly appliedEdits = new Map<string, AppliedEdit>();
+  /** Row IDs whose edit request is still on its way to the server. */
+  private readonly pendingEdits = new Set<string>();
+  /** Highest change number of a chat whose rows are already applied here. */
+  private readonly knownChangeSeqs = new Map<string, string>();
+  /** Last change number the conversation list reported per chat. */
+  private readonly serverChangeSeqs = new Map<string, string>();
   /** Delete requests and answers per (chat, original author, target ID). */
   private readonly deleteStates = new Map<string, DeleteState>();
   private readonly clearedBeforeSeqs = new Map<string, string>();
@@ -214,6 +241,7 @@ export class ChatController {
   private readTimer: ReturnType<typeof setTimeout> | null = null;
   private historyRequests = new Map<string, Promise<boolean>>();
   private historyCatchupRequests = new Map<string, Promise<void>>();
+  private changeCatchupRequests = new Map<string, Promise<void>>();
   private presencePeerSignature = "";
   private hasConnected = false;
   private readonly deferOutgoingUntilConversations: boolean;
@@ -348,10 +376,14 @@ export class ChatController {
       for (const frame of queued) {
         let text = "";
         let replayId: string | undefined;
+        let rev: number | undefined;
+        let sentAt: number | undefined;
         let createdAt = new Date().toISOString();
         let decryptFailed = false;
-        /* Edits, delete requests and answers wait instead of a placeholder. */
+        /* Delete requests and answers wait instead of a placeholder. */
         let queuedState = false;
+        /* Rows of the old edit mechanism leave the queue instead of sending. */
+        let dropFrame = false;
         try {
           const decrypted = decryptHistoryEntry({
             historyKey: this.keys.historyKey,
@@ -361,20 +393,7 @@ export class ChatController {
             entry: frame.senderCopy,
           });
           if (decrypted.type === "edit") {
-            /* A queued edit waits for its original instead of a placeholder. */
-            queuedState = true;
-            if (
-              decrypted.target &&
-              typeof decrypted.rev === "number" &&
-              typeof decrypted.text === "string"
-            )
-              this.registerEdit({
-                peerId: frame.to,
-                author: this.userId,
-                targetId: decrypted.target,
-                rev: decrypted.rev,
-                text: decrypted.text,
-              });
+            dropFrame = true;
           } else if (decrypted.type === "delete_request") {
             queuedState = true;
             if (decrypted.target)
@@ -396,11 +415,24 @@ export class ChatController {
           } else {
             text = decrypted.text ?? "";
             replayId = decrypted.id;
+            rev = decrypted.rev ?? 0;
+            sentAt = decrypted.sentAt;
             if (decrypted.sentAt !== undefined)
               createdAt = new Date(decrypted.sentAt).toISOString();
           }
         } catch {
           decryptFailed = true;
+        }
+        if (dropFrame) {
+          try {
+            await (this.deps.outbox ?? indexedDbOutbox).remove(
+              this.userId,
+              frame.clientMsgId,
+            );
+          } catch {
+            console.warn("Could not remove a queued edit row");
+          }
+          continue;
         }
         if (queuedState) continue;
         this.upsertMessage(frame.to, {
@@ -412,6 +444,8 @@ export class ChatController {
           direction: "out",
           status: "sending",
           frame,
+          ...(rev ? { rev, edited: true } : {}),
+          ...(sentAt !== undefined ? { sentAt } : {}),
           ...(decryptFailed ? { decryptFailed: true } : {}),
           arrivalOrder: this.arrivalOrder++,
         });
@@ -458,6 +492,8 @@ export class ChatController {
           cleared.clearedBeforeSeq,
         );
       }
+      for (const item of result.conversations)
+        this.serverChangeSeqs.set(item.peerId, item.lastChangeSeq ?? "0");
       const chats = result.conversations.map((item) => ({
         peerId: item.peerId,
         messages: [],
@@ -665,6 +701,91 @@ export class ChatController {
     return request;
   }
 
+  /** Change numbers are decimal strings; a missing value means zero. */
+  private knownChangeSeq(peerId: string): string {
+    return this.knownChangeSeqs.get(peerId) ?? "0";
+  }
+
+  private raiseKnownChangeSeq(peerId: string, value?: string | null): void {
+    if (typeof value !== "string" || !/^\d+$/u.test(value)) return;
+    if (BigInt(value) > BigInt(this.knownChangeSeq(peerId)))
+      this.knownChangeSeqs.set(peerId, value);
+  }
+
+  private hasPendingChanges(peerId: string): boolean {
+    const server = this.serverChangeSeqs.get(peerId) ?? "0";
+    return BigInt(server) > BigInt(this.knownChangeSeq(peerId));
+  }
+
+  /**
+   * Edits and erasures of a loaded chat are picked up after a reconnect: the
+   * conversation list only reports the newest change number, so the rows above
+   * the known one are read through `changedAfter`. The first request keeps a
+   * reserve of one hundred numbers because a number is handed out before its
+   * transaction commits, so an older row may appear behind the cursor.
+   */
+  private loadChangedHistory(peerId: string): Promise<void> {
+    const pending = this.changeCatchupRequests.get(peerId);
+    if (pending) return pending;
+    const request = this.fetchChangedHistory(peerId).finally(() => {
+      this.changeCatchupRequests.delete(peerId);
+    });
+    this.changeCatchupRequests.set(peerId, request);
+    return request;
+  }
+
+  private async fetchChangedHistory(peerId: string): Promise<void> {
+    if (!this.hasPendingChanges(peerId)) return;
+    const known = BigInt(this.knownChangeSeq(peerId));
+    let cursor =
+      known > CHANGE_CATCHUP_RESERVE
+        ? (known - CHANGE_CATCHUP_RESERVE).toString()
+        : "0";
+    while (!this.stopped) {
+      let page: {
+        messages: HistoryMessage[];
+        hasMore: boolean;
+      };
+      try {
+        const session = await this.connection.ensureSession();
+        const get =
+          this.deps.getHistoryChangedAfter ??
+          ((id: string, token: string, after: string) =>
+            getHistoryChangedAfter(id, token, after, this.deps.fetcher));
+        page = await this.withFreshSession(session.token, (token) =>
+          get(peerId, token, cursor),
+        );
+        this.markServerResponded();
+      } catch {
+        /* The known number stays, so the next connection repeats the request. */
+        return;
+      }
+      let next = cursor;
+      for (const entry of page.messages) {
+        const changeSeq = entry.changeSeq;
+        if (typeof changeSeq !== "string" || !/^\d+$/u.test(changeSeq))
+          continue;
+        if (BigInt(changeSeq) > BigInt(next)) next = changeSeq;
+        /* Erased rows and locally cleared rows have nothing to apply. */
+        if (entry.deleted || !/^\d+$/u.test(entry.seq)) continue;
+        const threshold = this.clearedBeforeSeqs.get(peerId);
+        if (threshold && BigInt(entry.seq) <= BigInt(threshold)) continue;
+        await this.acceptUpdatedRow({
+          peerId,
+          direction: entry.direction,
+          rowId: entry.id,
+          clientMsgId: entry.clientMsgId,
+          payload: entry.payload,
+        });
+      }
+      this.raiseKnownChangeSeq(peerId, next);
+      if (!page.hasMore || next === cursor) break;
+      cursor = next;
+    }
+    if (this.stopped) return;
+    this.raiseKnownChangeSeq(peerId, this.serverChangeSeqs.get(peerId));
+  }
+
   private async refreshHistoryHeads(): Promise<void> {
     try {
       const session = await this.connection.ensureSession();
@@ -694,6 +815,11 @@ export class ChatController {
           conversation.lastSeq,
         ]),
       );
+      for (const conversation of result.conversations)
+        this.serverChangeSeqs.set(
+          conversation.peerId,
+          conversation.lastChangeSeq ?? "0",
+        );
       this.update({
         chats: mergedChats.map((chat) => {
           if (!chat.historyLoaded) return chat;
@@ -706,6 +832,9 @@ export class ChatController {
         }),
       });
       this.connection.setSendingPaused(false);
+      for (const chat of this.state.chats)
+        if (chat.historyLoaded && this.hasPendingChanges(chat.peerId))
+          void this.loadChangedHistory(chat.peerId);
       void this.loadRecentPreviews(summaries.map((chat) => chat.peerId));
       const activePeer = this.state.activePeer;
       const activeChat = this.state.chats.find(
@@ -805,9 +934,12 @@ export class ChatController {
         });
       }
       const threshold = this.clearedBeforeSeqs.get(peerId);
-      const visibleMessages = threshold
-        ? page.messages.filter((entry) => BigInt(entry.seq) > BigInt(threshold))
-        : page.messages;
+      /* Erased rows are skipped here; the placeholder is a later task. */
+      const visibleMessages = page.messages.filter(
+        (entry) =>
+          !entry.deleted &&
+          (!threshold || BigInt(entry.seq) > BigInt(threshold)),
+      );
       const messages = await Promise.all(
         visibleMessages.map(async (entry) => {
           try {
@@ -829,24 +961,6 @@ export class ChatController {
                     recipientId: this.userId,
                     ciphertext: entry.payload,
                   });
-            if (decrypted.type === "edit") {
-              /* Own edits come back through the history key, peer edits in the
-                 ciphertext; both are stored and never shown as bubbles. */
-              if (
-                decrypted.target &&
-                typeof decrypted.rev === "number" &&
-                typeof decrypted.text === "string"
-              )
-                this.registerEdit({
-                  peerId,
-                  author: entry.direction === "out" ? this.userId : peerId,
-                  targetId: decrypted.target,
-                  rev: decrypted.rev,
-                  seq: entry.seq,
-                  text: decrypted.text,
-                });
-              return null;
-            }
             if (decrypted.type === "delete_request") {
               /* Requests and answers are rows of the history, not messages. */
               if (decrypted.target)
@@ -889,6 +1003,7 @@ export class ChatController {
                   ? new Date(decrypted.sentAt).toISOString()
                   : entry.createdAt,
               direction: entry.direction,
+              ...plainEditFields(decrypted),
               ...(entry.direction === "out"
                 ? {
                     status:
@@ -976,6 +1091,9 @@ export class ChatController {
           }),
       );
       if (this.state.activePeer === peerId) this.scheduleRead(peerId);
+      /* The first page of a chat accepts the change number of the list. */
+      if (!after && !oldest)
+        this.raiseKnownChangeSeq(peerId, this.serverChangeSeqs.get(peerId));
       return true;
     } catch {
       this.update({
@@ -1325,6 +1443,8 @@ export class ChatController {
         direction: "out",
         status: "sending",
         frame,
+        rev: 0,
+        sentAt,
         arrivalOrder: this.arrivalOrder++,
       };
       await (this.deps.outbox ?? indexedDbOutbox).put(this.userId, frame);
@@ -1337,9 +1457,10 @@ export class ChatController {
   }
 
   /**
-   * Replaces the text of your own already sent message. The edit travels as a
-   * normal encrypted frame (queue, statuses and retries are shared with text)
-   * and is applied locally right after it is queued.
+   * Replaces the text of your own sent message in place: PUT /messages/:id with
+   * the same envelope as the original row (same message ID, same sentAt, a new
+   * revision). There is no queue and no retry: without a connection the edit
+   * fails and the text stays in the composer.
    */
   async sendEdit(
     peerId: string,
@@ -1356,16 +1477,16 @@ export class ChatController {
       original.replayAuthor !== this.userId
     )
       return { ok: false, error: "not_editable" };
-    if (original.status === "sending")
+    if (original.status === "sending" || this.pendingEdits.has(original.id))
       return { ok: false, error: "edit_pending" };
+    if (!original.clientMsgId || !original.seq || original.status === "error")
+      return { ok: false, error: "not_editable" };
     /* A hidden or requested message is not editable until the answer declines. */
     if (original.deletion === "pending" || original.deletion === "accepted")
       return { ok: false, error: "not_editable" };
     if (!text.trim() || Array.from(text).length > MAX_MESSAGE_CHARS)
       return { ok: false, error: "invalid_text" };
-    const rev =
-      (this.appliedEdits.get(editKey(peerId, this.userId, targetId))?.rev ??
-        0) + 1;
+    const rev = (original.rev ?? 0) + 1;
     if (rev > MAX_EDIT_REV) return { ok: false, error: "edit_limit" };
     let recipientEncryptionPublicKey: Uint8Array;
     try {
@@ -1376,45 +1497,51 @@ export class ChatController {
     } catch (error) {
       return { ok: false, error: this.peerKeyError(error) };
     }
-    const sentAt = (this.deps.now ?? Date.now)();
-    const clientMsgId = (this.deps.makeClientMsgId ?? newClientMsgId)();
-    const frame: OutgoingFrame = {
-      type: "send",
-      clientMsgId,
-      to: peerId,
-      ciphertext: encryptEditMessage({
+    /* The row keeps the sent time of the original, so its place is stable. */
+    const sentAt = original.sentAt ?? Date.parse(original.createdAt);
+    let ciphertext: string;
+    let senderCopy: string;
+    try {
+      ciphertext = encryptTextMessage({
         senderEncryptionPrivateKey: this.keys.encryption.privateKey,
         recipientEncryptionPublicKey,
         senderId: this.userId,
         recipientId: peerId,
-        target: targetId,
-        rev,
         text,
         sentAt,
-      }),
-      senderCopy: encryptHistoryEditEntry({
+        messageId: targetId,
+        rev,
+      });
+      senderCopy = encryptHistoryEntry({
         historyKey: this.keys.historyKey,
-        clientMsgId,
+        clientMsgId: original.clientMsgId,
         peerId,
         senderId: this.userId,
-        target: targetId,
-        rev,
+        messageId: targetId,
         text,
         sentAt,
-      }),
-    };
-    try {
-      await (this.deps.outbox ?? indexedDbOutbox).put(this.userId, frame);
+        rev,
+      });
     } catch {
-      return { ok: false, error: "server_unavailable" };
+      return { ok: false, error: "send_failed" };
     }
-    this.applyEdit({ peerId, author: this.userId, targetId, rev, text });
+    this.pendingEdits.add(original.id);
+    try {
+      const session = await this.connection.ensureSession();
+      const put =
+        this.deps.updateMessage ??
+        ((id: string, cipher: string, copy: string, token: string) =>
+          updateMessage(id, cipher, copy, token, this.deps.fetcher));
+      await this.withFreshSession(session.token, (token) =>
+        put(original.id, ciphertext, senderCopy, token),
+      );
+    } catch (error) {
+      return { ok: false, error: editRequestError(error) };
+    } finally {
+      this.pendingEdits.delete(original.id);
+    }
+    this.applyInPlaceText(peerId, original.id, "out", text, rev);
     this.update({ error: "" });
-    try {
-      this.connection.send(frame);
-    } catch {
-      this.setError("server_unavailable");
-    }
     return { ok: true };
   }
 
@@ -1564,48 +1691,112 @@ export class ChatController {
   }
 
   /**
-   * Remembers an incoming edit so it applies to the original now, or later
-   * when an older history page finally loads that message. Edits never become
-   * chat messages, so they cannot add a bubble or an unread count.
+   * The new content of a row is encrypted exactly like its history copy: the
+   * author's devices open the sender copy with the history key, the recipient
+   * opens the ciphertext with the key of the peer.
    */
-  private applyEdit(input: IncomingEdit): void {
-    if (!this.registerEdit(input)) return;
-    const chat = this.state.chats.find((item) => item.peerId === input.peerId);
-    if (
-      !chat?.messages.some(
-        (message) =>
-          message.replayId === input.targetId &&
-          message.replayAuthor === input.author,
-      )
-    )
-      return;
-    const messages = this.applyStoredEdits(input.peerId, chat.messages);
-    if (messages === chat.messages) return;
-    this.update({
-      chats: this.state.chats.map((item) =>
-        item.peerId === input.peerId ? { ...item, messages } : item,
-      ),
+  private async decryptUpdatedRow(input: {
+    peerId: string;
+    direction: "in" | "out";
+    clientMsgId: string;
+    payload: string;
+  }): Promise<DecryptedMessage> {
+    if (input.direction === "out")
+      return decryptHistoryEntry({
+        historyKey: this.keys.historyKey,
+        clientMsgId: input.clientMsgId,
+        peerId: input.peerId,
+        senderId: this.userId,
+        entry: input.payload,
+      });
+    const senderEncryptionPublicKey =
+      input.peerId === this.userId
+        ? this.keys.encryption.publicKey
+        : await this.getVerifiedPeerKey(input.peerId);
+    return decryptTextMessage({
+      recipientEncryptionPrivateKey: this.keys.encryption.privateKey,
+      senderEncryptionPublicKey,
+      senderId: input.peerId,
+      recipientId: this.userId,
+      ciphertext: input.payload,
     });
   }
 
-  /** Highest revision wins; on a tie the edit with the lower server seq wins. */
-  private registerEdit(input: IncomingEdit): boolean {
-    const key = editKey(input.peerId, input.author, input.targetId);
-    const applied = this.appliedEdits.get(key);
-    if (applied) {
-      if (input.rev < applied.rev) return false;
-      if (
-        input.rev === applied.rev &&
-        (!input.seq || !applied.seq || BigInt(input.seq) >= BigInt(applied.seq))
-      )
-        return false;
+  /**
+   * Applies a changed row when it really belongs to the message that is already
+   * in memory: the same row ID and direction, a text payload whose inner ID is
+   * the known one and a revision that is not older. Returns true when the row
+   * was found and the payload was authentic, so the caller may trust the change
+   * number of the frame or of the page.
+   */
+  private async acceptUpdatedRow(input: {
+    peerId: string;
+    direction: "in" | "out";
+    rowId: string;
+    clientMsgId?: string;
+    payload: string;
+  }): Promise<boolean> {
+    const chat = this.state.chats.find((item) => item.peerId === input.peerId);
+    const message = chat?.messages.find(
+      (item) => item.id === input.rowId && item.direction === input.direction,
+    );
+    if (!message) return false;
+    /* The sender copy needs the client message ID of the row itself. */
+    const clientMsgId = input.clientMsgId || message.clientMsgId;
+    if (input.direction === "out" && !clientMsgId) return false;
+    let decrypted: DecryptedMessage;
+    try {
+      decrypted = await this.decryptUpdatedRow({
+        peerId: input.peerId,
+        direction: input.direction,
+        clientMsgId: clientMsgId ?? "",
+        payload: input.payload,
+      });
+    } catch {
+      return false;
     }
-    this.appliedEdits.set(key, {
-      rev: input.rev,
-      ...(input.seq ? { seq: input.seq } : {}),
-      text: input.text,
-    });
+    if (decrypted.type !== "text") return false;
+    if (!message.replayId || decrypted.id !== message.replayId) return false;
+    const rev = decrypted.rev ?? 0;
+    const current = message.rev ?? 0;
+    if (rev < current) return false;
+    if (rev > current)
+      this.applyInPlaceText(
+        input.peerId,
+        message.id,
+        input.direction,
+        decrypted.text ?? "",
+        rev,
+      );
     return true;
+  }
+
+  /**
+   * Replaces the text of one row in place. Its time, server sequence, status and
+   * position stay, so the chat is neither reordered nor counted as unread. The
+   * stored delete states are re-applied because they own the hidden text.
+   */
+  private applyInPlaceText(
+    peerId: string,
+    rowId: string,
+    direction: "in" | "out",
+    text: string,
+    rev: number,
+  ): void {
+    const chat = this.state.chats.find((item) => item.peerId === peerId);
+    if (!chat) return;
+    const index = chat.messages.findIndex(
+      (message) => message.id === rowId && message.direction === direction,
+    );
+    if (index < 0) return;
+    const messages = chat.messages.slice();
+    messages[index] = { ...chat.messages[index]!, text, rev, edited: true };
+    const next = this.applyStoredEdits(peerId, messages);
+    this.update({
+      chats: this.state.chats.map((item) =>
+        item.peerId === peerId ? { ...item, messages: next } : item,
+      ),
+    });
   }
 
   /**
@@ -1669,7 +1860,7 @@ export class ChatController {
     return true;
   }
 
-  /** Re-applies edits and delete states to a chat that already holds the row. */
+  /** Re-applies delete states to a chat that already holds the row. */
   private refreshStoredState(peerId: string, targetId: string): void {
     const chat = this.state.chats.find((item) => item.peerId === peerId);
     if (!chat?.messages.some((message) => message.replayId === targetId))
@@ -1688,9 +1879,6 @@ export class ChatController {
       return message;
     const key = editKey(peerId, message.replayAuthor, message.replayId);
     let result = message;
-    const edit = this.appliedEdits.get(key);
-    if (edit && !(result.edited && result.text === edit.text))
-      result = { ...result, text: edit.text, edited: true };
     /* A request without an effective answer leaves the original untouched. */
     const deletion = deletionStatus(this.deleteStates.get(key));
     if (result.deletion !== deletion) {
@@ -1806,12 +1994,48 @@ export class ChatController {
       return;
     }
     if (
+      frame.type === "message_updated" &&
+      typeof frame.id === "string" &&
+      typeof frame.from === "string" &&
+      typeof frame.to === "string" &&
+      typeof frame.seq === "string" &&
+      typeof frame.changeSeq === "string" &&
+      typeof frame.payload === "string"
+    ) {
+      /* The payload is either the ciphertext for the peer or the sender copy. */
+      const fromAuthor = frame.from === this.userId;
+      const peerId = fromAuthor
+        ? frame.to
+        : frame.to === this.userId
+          ? frame.from
+          : "";
+      if (!peerId) return;
+      const direction = fromAuthor ? "out" : "in";
+      const clearedBeforeSeq = this.clearedBeforeSeqs.get(peerId);
+      if (
+        /^\d+$/u.test(frame.seq) &&
+        clearedBeforeSeq &&
+        BigInt(frame.seq) <= BigInt(clearedBeforeSeq)
+      )
+        return;
+      const accepted = await this.acceptUpdatedRow({
+        peerId,
+        direction,
+        rowId: frame.id,
+        payload: frame.payload,
+      });
+      if (accepted) this.raiseKnownChangeSeq(peerId, frame.changeSeq);
+      return;
+    }
+    if (
       frame.type === "message" &&
       typeof frame.id === "string" &&
       typeof frame.from === "string" &&
       typeof frame.ciphertext === "string" &&
       typeof frame.createdAt === "string"
     ) {
+      /* An erased row has an empty payload; its placeholder is a later task. */
+      if (frame.deleted === true) return;
       const clearedBeforeSeq = this.clearedBeforeSeqs.get(frame.from);
       if (
         typeof frame.seq === "string" &&
@@ -1823,6 +2047,7 @@ export class ChatController {
       let text = "";
       let replayId: string | undefined;
       let sentAt: number | undefined;
+      let rev: number | undefined;
       let decryptFailed = false;
       /* A note to yourself is encrypted with your own public key. */
       const isSavedMessage = frame.from === this.userId;
@@ -1837,25 +2062,6 @@ export class ChatController {
           recipientId: this.userId,
           ciphertext: frame.ciphertext,
         });
-        if (decrypted.type === "edit") {
-          /* An edit is never a message: no bubble, no unread, no reordering. */
-          if (
-            decrypted.target &&
-            typeof decrypted.rev === "number" &&
-            typeof decrypted.text === "string"
-          )
-            this.applyEdit({
-              peerId: frame.from,
-              author: frame.from,
-              targetId: decrypted.target,
-              rev: decrypted.rev,
-              text: decrypted.text,
-              ...(typeof frame.seq === "string" && /^\d+$/u.test(frame.seq)
-                ? { seq: frame.seq }
-                : {}),
-            });
-          return;
-        }
         if (decrypted.type === "delete_request") {
           /* A request is never a message either. */
           if (decrypted.target)
@@ -1887,6 +2093,7 @@ export class ChatController {
         text = decrypted.text ?? "";
         replayId = decrypted.id;
         sentAt = decrypted.sentAt;
+        rev = decrypted.rev;
       } catch {
         if (isV2Envelope(frame.ciphertext)) return;
         /* Render a safe placeholder; WebSocket still acks this frame. */
@@ -1904,6 +2111,7 @@ export class ChatController {
         ...(typeof frame.seq === "string" && /^\d+$/u.test(frame.seq)
           ? { seq: frame.seq }
           : {}),
+        ...plainEditFields({ rev, sentAt }),
         ...(decryptFailed ? { decryptFailed: true } : {}),
         arrivalOrder: this.arrivalOrder++,
       });
@@ -2135,17 +2343,8 @@ export class ChatController {
 
 export const WAKING_TIMEOUT_MS = 90_000;
 export const MAX_MESSAGE_CHARS = 4000;
-
-type AppliedEdit = { rev: number; seq?: string; text: string };
-
-type IncomingEdit = {
-  peerId: string;
-  author: string;
-  targetId: string;
-  rev: number;
-  seq?: string;
-  text: string;
-};
+/** Reserve of change numbers read again on the first catch-up request. */
+const CHANGE_CATCHUP_RESERVE = 100n;
 
 /** One request and at most one answer per (chat, original author, target). */
 type DeleteState = {
@@ -2169,7 +2368,7 @@ type IncomingDeleteAnswer = {
   seq?: string;
 };
 
-/** An edit belongs to one chat, one author and one original message ID. */
+/** A delete state belongs to one chat, one author and one original message ID. */
 function editKey(peerId: string, author: string, targetId: string): string {
   return `${peerId}\n${author}\n${targetId}`;
 }
@@ -2220,6 +2419,34 @@ export function unreadAfterHistoryMerge(
   };
 }
 
+/** Revision fields a decrypted text row adds to its chat message. */
+function plainEditFields(decrypted: Pick<DecryptedMessage, "rev" | "sentAt">): {
+  rev: number;
+  sentAt?: number;
+  edited?: boolean;
+} {
+  const rev = decrypted.rev ?? 0;
+  return {
+    rev,
+    ...(rev > 0 ? { edited: true } : {}),
+    ...(decrypted.sentAt !== undefined ? { sentAt: decrypted.sentAt } : {}),
+  };
+}
+
+/** Why PUT /messages/:id failed: a deleted row, a foreign row, no connection. */
+function editRequestError(error: unknown): SendEditError {
+  if (error instanceof ApiError) {
+    if (error.status === 409) return "message_deleted";
+    if (error.status === 404) return "unknown_message";
+    if (error.status === 0 || error.code === "network_timeout")
+      return "server_unavailable";
+    if (error.status >= 500) return "server_unavailable";
+    return "send_failed";
+  }
+  if (error instanceof TypeError) return "server_unavailable";
+  return "send_failed";
+}
+
 function isV2Envelope(value: string): boolean {
   try {
     return base64ToBytes(value)[0] === 2;
@@ -2257,10 +2484,15 @@ export function mergeMessages(
     if (index < 0) result.push(message);
     else {
       const previous = result[index]!;
+      /* A newer revision always wins, so reloading a page cannot roll an edit back. */
+      const previousRev = previous.rev ?? 0;
+      const incomingRev = message.rev ?? 0;
       const keepPrevious =
-        !!previous.seq &&
-        !!message.seq &&
-        BigInt(previous.seq) <= BigInt(message.seq);
+        previousRev !== incomingRev
+          ? previousRev > incomingRev
+          : !!previous.seq &&
+            !!message.seq &&
+            BigInt(previous.seq) <= BigInt(message.seq);
       const first = keepPrevious ? message : previous;
       const chosen = keepPrevious ? previous : message;
       result[index] = {

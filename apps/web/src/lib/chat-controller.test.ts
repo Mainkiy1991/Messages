@@ -26,7 +26,7 @@ import {
   type ChatControllerDependencies,
   type ChatMessage,
 } from "./chat-controller.js";
-import type { IncomingFrame } from "./websocket.js";
+import type { IncomingFrame, OutgoingFrame } from "./websocket.js";
 import type { ServerSession } from "../session.js";
 
 const alice = deriveKeys(
@@ -113,6 +113,8 @@ function makeController(
     getContacts?: ChatControllerDependencies["getContacts"];
     getHistory?: ChatControllerDependencies["getHistory"];
     getHistoryAfter?: ChatControllerDependencies["getHistoryAfter"];
+    getHistoryChangedAfter?: ChatControllerDependencies["getHistoryChangedAfter"];
+    updateMessage?: ChatControllerDependencies["updateMessage"];
     outbox?: ChatControllerDependencies["outbox"];
     isVisible?: () => boolean;
   } = {},
@@ -153,6 +155,8 @@ function makeController(
       getContacts: options.getContacts,
       getHistory: options.getHistory,
       getHistoryAfter: options.getHistoryAfter,
+      getHistoryChangedAfter: options.getHistoryChangedAfter,
+      updateMessage: options.updateMessage,
       outbox: options.outbox,
       isVisible: options.isVisible,
     },
@@ -2176,10 +2180,14 @@ describe("ChatController", () => {
   });
 });
 
-describe("ChatController message edits", () => {
+describe("ChatController edits in place", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
   const sentAt = 1_700_000_000_000;
   const rowTime = (offset = 0) => new Date(sentAt + offset).toISOString();
-  const peerText = (target: string, text: string) =>
+  const peerText = (target: string, text: string, rev?: number) =>
     encryptTextMessage({
       senderEncryptionPrivateKey: bob.encryption.privateKey,
       recipientEncryptionPublicKey: alice.encryption.publicKey,
@@ -2188,125 +2196,72 @@ describe("ChatController message edits", () => {
       text,
       sentAt,
       messageId: target,
+      ...(rev === undefined ? {} : { rev }),
     });
-  const peerEdit = (target: string, rev: number, text: string) =>
-    encryptEditMessage({
-      senderEncryptionPrivateKey: bob.encryption.privateKey,
-      recipientEncryptionPublicKey: alice.encryption.publicKey,
-      senderId: bobId,
-      recipientId: aliceId,
-      target,
-      rev,
-      text,
-      sentAt: sentAt + 1000,
-    });
-  const selfText = (target: string, text: string) =>
-    encryptTextMessage({
-      senderEncryptionPrivateKey: alice.encryption.privateKey,
-      recipientEncryptionPublicKey: alice.encryption.publicKey,
+  /* The sender copy of an edit keeps the message ID and the original sent time. */
+  const ownCopy = (input: {
+    clientMsgId: string;
+    peerId?: string;
+    target: string;
+    text: string;
+    rev: number;
+  }) =>
+    encryptHistoryEntry({
+      historyKey: alice.historyKey,
+      clientMsgId: input.clientMsgId,
+      peerId: input.peerId ?? bobId,
       senderId: aliceId,
-      recipientId: aliceId,
-      text,
+      messageId: input.target,
+      text: input.text,
       sentAt,
-      messageId: target,
-    });
-  const selfEdit = (target: string, rev: number, text: string) =>
-    encryptEditMessage({
-      senderEncryptionPrivateKey: alice.encryption.privateKey,
-      recipientEncryptionPublicKey: alice.encryption.publicKey,
-      senderId: aliceId,
-      recipientId: aliceId,
-      target,
-      rev,
-      text,
-      sentAt: sentAt + 1000,
+      rev: input.rev,
     });
   const chatOf = (f: { controller: ChatController }, peerId: string) =>
     f.controller.getSnapshot().chats.find((chat) => chat.peerId === peerId);
   const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
-
-  it("applies an incoming edit to the original without adding a bubble", async () => {
-    const target = newReplayMessageId();
-    const f = makeController({ initialSession: session("token-a") });
+  const connected = async (
+    options: Parameters<typeof makeController>[0] = {},
+  ) => {
+    const f = makeController({
+      initialSession: session("token-a"),
+      ...options,
+    });
     f.controller.start();
     await waitFor(() => f.sockets.length === 1);
     await authenticate(f.sockets[0]!);
-    await f.controller.openChat(bobId);
+    return f;
+  };
+  const deliver = (
+    f: { sockets: TestSocket[] },
+    row: { id: string; seq: string; ciphertext: string; from?: string },
+  ) =>
     f.sockets[0]!.frame({
       type: "message",
-      id: "row-1",
-      from: bobId,
-      seq: "1",
-      ciphertext: peerText(target, "original"),
-      createdAt: rowTime(),
+      id: row.id,
+      from: row.from ?? bobId,
+      seq: row.seq,
+      ciphertext: row.ciphertext,
+      createdAt: rowTime(Number(row.seq) * 500),
     });
-    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
-    const edit = {
-      type: "message",
-      id: "row-2",
-      from: bobId,
-      seq: "2",
-      ciphertext: peerEdit(target, 1, "edited text"),
-      createdAt: rowTime(1000),
-    };
-    f.sockets[0]!.frame(edit);
-    await waitFor(() => chatOf(f, bobId)?.messages[0]?.text === "edited text");
-    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
-    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
-      text: "edited text",
-      edited: true,
-      seq: "1",
-    });
-    /* A repeated edit frame must not create a second bubble either. */
-    f.sockets[0]!.frame({ ...edit, id: "row-3", seq: "3" });
-    await settle();
-    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
-    f.controller.stop();
-  });
-
-  it("does not count an edit as unread or as a new message", async () => {
-    const target = newReplayMessageId();
-    const f = makeController({ initialSession: session("token-a") });
-    f.controller.start();
-    await waitFor(() => f.sockets.length === 1);
-    await authenticate(f.sockets[0]!);
-    await f.controller.openChat(charlieId);
-    f.sockets[0]!.frame({
-      type: "message",
-      id: "row-1",
-      from: bobId,
-      seq: "1",
-      ciphertext: peerText(target, "original"),
-      createdAt: rowTime(),
-    });
-    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
-    expect(chatOf(f, bobId)!.unreadCount).toBe(1);
-    const order = f.controller.getSnapshot().chats.map((chat) => chat.peerId);
-    f.sockets[0]!.frame({
-      type: "message",
-      id: "row-2",
-      from: bobId,
-      seq: "2",
-      ciphertext: peerEdit(target, 1, "edited text"),
-      createdAt: rowTime(1000),
-    });
-    await waitFor(() => chatOf(f, bobId)?.messages[0]?.text === "edited text");
-    expect(chatOf(f, bobId)!.unreadCount).toBe(1);
-    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
-    expect(f.controller.getSnapshot().chats.map((chat) => chat.peerId)).toEqual(
-      order,
-    );
-    f.controller.stop();
-  });
-
-  it("ignores an edit whose author does not own the original", async () => {
-    const f = makeController({ initialSession: session("token-a") });
-    f.controller.start();
-    await waitFor(() => f.sockets.length === 1);
-    await authenticate(f.sockets[0]!);
-    await f.controller.openChat(bobId);
-    await f.controller.sendText("mine");
-    const pending = chatOf(f, bobId)!.messages[0]!;
+  const update = (
+    f: { sockets: TestSocket[] },
+    row: {
+      id: string;
+      from: string;
+      to: string;
+      seq: string;
+      changeSeq: string;
+      payload: string;
+    },
+  ) => f.sockets[0]!.frame({ type: "message_updated", ...row });
+  /* Sends your own text and lets the server confirm its row. */
+  const sendFromAlice = async (
+    f: { controller: ChatController; sockets: TestSocket[] },
+    peerId: string,
+    text: string,
+  ) => {
+    await f.controller.sendText(text);
+    const pending = chatOf(f, peerId)!.messages.at(-1)!;
     f.sockets[0]!.frame({
       type: "sent",
       clientMsgId: pending.clientMsgId!,
@@ -2314,120 +2269,305 @@ describe("ChatController message edits", () => {
       seq: "1",
       createdAt: rowTime(),
     });
-    await waitFor(() => chatOf(f, bobId)!.messages[0]!.status === "sent");
-    f.sockets[0]!.frame({
-      type: "message",
-      id: "row-2",
-      from: bobId,
-      seq: "2",
-      ciphertext: peerEdit(pending.replayId!, 1, "hijacked"),
-      createdAt: rowTime(1000),
+    await waitFor(
+      () =>
+        chatOf(f, peerId)!.messages.find(
+          (message) => message.clientMsgId === pending.clientMsgId,
+        )?.status === "sent",
+    );
+    return chatOf(f, peerId)!.messages.find(
+      (message) => message.clientMsgId === pending.clientMsgId,
+    )!;
+  };
+  /* Drops the socket and signs in on the next one, as after a lost connection. */
+  const reconnect = async (f: { sockets: TestSocket[] }) => {
+    f.sockets.at(-1)!.close(1006);
+    await vi.advanceTimersByTimeAsync(1500);
+    await vi.advanceTimersByTimeAsync(0);
+    const socket = f.sockets.at(-1)!;
+    socket.open();
+    socket.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+  };
+
+  it("replaces the text of your own message with a PUT of the same row", async () => {
+    const puts: Array<{
+      id: string;
+      ciphertext: string;
+      senderCopy: string;
+      token: string;
+    }> = [];
+    const f = await connected({
+      updateMessage: async (id, ciphertext, senderCopy, token) => {
+        puts.push({ id, ciphertext, senderCopy, token });
+      },
     });
-    await settle();
+    await f.controller.openChat(bobId);
+    const mine = await sendFromAlice(f, bobId, "hello");
+    const createdAt = mine.createdAt;
+    expect(
+      await f.controller.sendEdit(bobId, mine.replayId!, "hello v2"),
+    ).toEqual({ ok: true });
+    expect(puts).toHaveLength(1);
+    expect(puts[0]!.id).toBe("row-1");
+    expect(puts[0]!.token).toBe("token-a");
+    /* The peer opens the ciphertext, the author's devices the sender copy. */
+    expect(
+      decryptTextMessage({
+        recipientEncryptionPrivateKey: bob.encryption.privateKey,
+        senderEncryptionPublicKey: alice.encryption.publicKey,
+        senderId: aliceId,
+        recipientId: bobId,
+        ciphertext: puts[0]!.ciphertext,
+      }),
+    ).toMatchObject({
+      type: "text",
+      id: mine.replayId,
+      rev: 1,
+      text: "hello v2",
+      sentAt: mine.sentAt,
+    });
+    expect(
+      decryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId: mine.clientMsgId!,
+        senderId: aliceId,
+        peerId: bobId,
+        entry: puts[0]!.senderCopy,
+      }),
+    ).toMatchObject({
+      type: "text",
+      id: mine.replayId,
+      rev: 1,
+      text: "hello v2",
+      sentAt: mine.sentAt,
+    });
+    const chat = chatOf(f, bobId)!;
+    expect(chat.messages).toHaveLength(1);
+    expect(chat.messages[0]).toMatchObject({
+      id: "row-1",
+      text: "hello v2",
+      rev: 1,
+      edited: true,
+      status: "sent",
+      seq: "1",
+      createdAt,
+    });
+    /* Nothing travels through the queue or the socket for an edit. */
+    expect(
+      f.sockets[0]!.decoded().filter((frame) => frame.type === "send"),
+    ).toHaveLength(1);
+    f.controller.stop();
+  });
+
+  it("grows the revision and refuses edits above one hundred", async () => {
+    const f = await connected({ updateMessage: async () => undefined });
+    await f.controller.openChat(bobId);
+    const mine = await sendFromAlice(f, bobId, "v0");
+    expect(await f.controller.sendEdit(bobId, mine.replayId!, "v1")).toEqual({
+      ok: true,
+    });
+    expect(chatOf(f, bobId)!.messages[0]!.rev).toBe(1);
+    expect(await f.controller.sendEdit(bobId, mine.replayId!, "v2")).toEqual({
+      ok: true,
+    });
+    expect(await f.controller.sendEdit(bobId, mine.replayId!, "v3")).toEqual({
+      ok: true,
+    });
+    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
+      text: "v3",
+      rev: 3,
+      edited: true,
+    });
+    /* Another device of the author reports revision 99 through its copy. */
+    update(f, {
+      id: "row-1",
+      from: aliceId,
+      to: bobId,
+      seq: "1",
+      changeSeq: "4",
+      payload: ownCopy({
+        clientMsgId: mine.clientMsgId!,
+        target: mine.replayId!,
+        text: "v99",
+        rev: 99,
+      }),
+    });
+    await waitFor(() => chatOf(f, bobId)?.messages[0]?.rev === 99);
+    expect(await f.controller.sendEdit(bobId, mine.replayId!, "v100")).toEqual({
+      ok: true,
+    });
+    expect(chatOf(f, bobId)!.messages[0]!.rev).toBe(100);
+    expect(await f.controller.sendEdit(bobId, mine.replayId!, "v101")).toEqual({
+      ok: false,
+      error: "edit_limit",
+    });
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("v100");
+    f.controller.stop();
+  });
+
+  it("reports a deleted, an unknown and an unreachable message without changing it", async () => {
+    const failures: unknown[] = [];
+    const f = await connected({
+      updateMessage: async () => {
+        const failure = failures.shift();
+        if (failure) throw failure;
+      },
+    });
+    await f.controller.openChat(bobId);
+    const mine = await sendFromAlice(f, bobId, "hello");
+    failures.push(new ApiError(409, "message_deleted"));
+    expect(await f.controller.sendEdit(bobId, mine.replayId!, "next")).toEqual({
+      ok: false,
+      error: "message_deleted",
+    });
+    failures.push(new ApiError(404, "not_found"));
+    expect(await f.controller.sendEdit(bobId, mine.replayId!, "next")).toEqual({
+      ok: false,
+      error: "unknown_message",
+    });
+    failures.push(new TypeError("Network unavailable"));
+    expect(await f.controller.sendEdit(bobId, mine.replayId!, "next")).toEqual({
+      ok: false,
+      error: "server_unavailable",
+    });
+    failures.push(new ApiError(500, "internal_error"));
+    expect(await f.controller.sendEdit(bobId, mine.replayId!, "next")).toEqual({
+      ok: false,
+      error: "server_unavailable",
+    });
+    failures.push(new ApiError(400, "invalid_request"));
+    expect(await f.controller.sendEdit(bobId, mine.replayId!, "next")).toEqual({
+      ok: false,
+      error: "send_failed",
+    });
     expect(chatOf(f, bobId)!.messages).toHaveLength(1);
-    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("mine");
+    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
+      text: "hello",
+      rev: 0,
+      createdAt: mine.createdAt,
+    });
     expect(chatOf(f, bobId)!.messages[0]!.edited).toBeUndefined();
     f.controller.stop();
   });
 
-  it("ignores stale and equal revisions and accepts a lower seq on a tie", async () => {
-    const target = newReplayMessageId();
-    const f = makeController({ initialSession: session("token-a") });
-    f.controller.start();
-    await waitFor(() => f.sockets.length === 1);
-    await authenticate(f.sockets[0]!);
-    await f.controller.openChat(bobId);
-    f.sockets[0]!.frame({
-      type: "message",
-      id: "row-1",
-      from: bobId,
-      seq: "1",
-      ciphertext: peerText(target, "original"),
-      createdAt: rowTime(),
+  it("refuses a second edit while the first request is in flight", async () => {
+    let started = false;
+    let release: (() => void) | undefined;
+    const f = await connected({
+      updateMessage: () => {
+        started = true;
+        return new Promise<void>((resolve) => {
+          release = resolve;
+        });
+      },
     });
-    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
-    const pushEdit = (rev: number, seq: string, text: string) =>
-      f.sockets[0]!.frame({
-        type: "message",
-        id: `row-${seq}`,
-        from: bobId,
-        seq,
-        ciphertext: peerEdit(target, rev, text),
-        createdAt: rowTime(1000 + Number(seq)),
-      });
-    pushEdit(2, "5", "revision two");
-    await waitFor(() => chatOf(f, bobId)?.messages[0]?.text === "revision two");
-    pushEdit(1, "6", "stale revision");
-    await settle();
-    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("revision two");
-    pushEdit(2, "7", "later equal revision");
-    await settle();
-    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("revision two");
-    pushEdit(2, "4", "earlier equal revision");
-    await waitFor(
-      () => chatOf(f, bobId)?.messages[0]?.text === "earlier equal revision",
-    );
-    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
+    await f.controller.openChat(bobId);
+    const mine = await sendFromAlice(f, bobId, "hello");
+    const first = f.controller.sendEdit(bobId, mine.replayId!, "one");
+    await waitFor(() => started);
+    expect(await f.controller.sendEdit(bobId, mine.replayId!, "two")).toEqual({
+      ok: false,
+      error: "edit_pending",
+    });
+    release!();
+    expect(await first).toEqual({ ok: true });
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("one");
+    expect(chatOf(f, bobId)!.messages[0]!.rev).toBe(1);
     f.controller.stop();
   });
 
-  it("keeps an edit without an original invisible until the original loads", async () => {
+  it("applies a peer update without a bubble, unread or reorder", async () => {
     const target = newReplayMessageId();
-    const f = makeController({ initialSession: session("token-a") });
-    f.controller.start();
-    await waitFor(() => f.sockets.length === 1);
-    await authenticate(f.sockets[0]!);
-    await f.controller.openChat(bobId);
-    f.sockets[0]!.frame({
-      type: "message",
-      id: "row-5",
-      from: bobId,
-      seq: "5",
-      ciphertext: peerEdit(target, 1, "edited text"),
-      createdAt: rowTime(1000),
-    });
-    await settle();
-    expect(chatOf(f, bobId)!.messages).toEqual([]);
-    f.sockets[0]!.frame({
-      type: "message",
+    const f = await connected();
+    await f.controller.openChat(charlieId);
+    deliver(f, {
       id: "row-1",
-      from: bobId,
       seq: "1",
       ciphertext: peerText(target, "original"),
-      createdAt: rowTime(),
     });
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
+    expect(chatOf(f, bobId)!.unreadCount).toBe(1);
+    const order = f.controller.getSnapshot().chats.map((chat) => chat.peerId);
+    const createdAt = chatOf(f, bobId)!.messages[0]!.createdAt;
+    const edited = {
+      id: "row-1",
+      from: bobId,
+      to: aliceId,
+      seq: "1",
+      changeSeq: "9",
+      payload: peerText(target, "edited text", 1),
+    };
+    update(f, edited);
     await waitFor(() => chatOf(f, bobId)?.messages[0]?.text === "edited text");
     expect(chatOf(f, bobId)!.messages).toHaveLength(1);
     expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
+      id: "row-1",
+      seq: "1",
       text: "edited text",
+      rev: 1,
       edited: true,
+      createdAt,
+    });
+    expect(chatOf(f, bobId)!.unreadCount).toBe(1);
+    expect(f.controller.getSnapshot().chats.map((chat) => chat.peerId)).toEqual(
+      order,
+    );
+    /* The same frame again is harmless. */
+    update(f, { ...edited, changeSeq: "10" });
+    await settle();
+    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("edited text");
+    f.controller.stop();
+  });
+
+  it("applies your own update from the sender copy", async () => {
+    const f = await connected({ updateMessage: async () => undefined });
+    await f.controller.openChat(bobId);
+    const mine = await sendFromAlice(f, bobId, "mine");
+    update(f, {
+      id: "row-1",
+      from: aliceId,
+      to: bobId,
+      seq: "1",
+      changeSeq: "5",
+      payload: ownCopy({
+        clientMsgId: mine.clientMsgId!,
+        target: mine.replayId!,
+        text: "my edit",
+        rev: 2,
+      }),
+    });
+    await waitFor(() => chatOf(f, bobId)?.messages[0]?.text === "my edit");
+    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
+    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
+      text: "my edit",
+      rev: 2,
+      edited: true,
+      direction: "out",
+      status: "sent",
+      createdAt: mine.createdAt,
     });
     f.controller.stop();
   });
 
-  it("edits your own saved messages", async () => {
-    const target = newReplayMessageId();
-    const f = makeController({ initialSession: session("token-a") });
-    f.controller.start();
-    await waitFor(() => f.sockets.length === 1);
-    await authenticate(f.sockets[0]!);
+  it("applies an update in saved messages", async () => {
+    const f = await connected({ updateMessage: async () => undefined });
     await f.controller.openChat(aliceId);
-    f.sockets[0]!.frame({
-      type: "message",
+    const note = await sendFromAlice(f, aliceId, "note");
+    update(f, {
       id: "row-1",
       from: aliceId,
+      to: aliceId,
       seq: "1",
-      ciphertext: selfText(target, "note"),
-      createdAt: rowTime(),
-    });
-    await waitFor(() => chatOf(f, aliceId)?.messages[0]?.text === "note");
-    f.sockets[0]!.frame({
-      type: "message",
-      id: "row-2",
-      from: aliceId,
-      seq: "2",
-      ciphertext: selfEdit(target, 1, "note edited"),
-      createdAt: rowTime(1000),
+      changeSeq: "6",
+      payload: ownCopy({
+        clientMsgId: note.clientMsgId!,
+        peerId: aliceId,
+        target: note.replayId!,
+        text: "note edited",
+        rev: 1,
+      }),
     });
     await waitFor(
       () => chatOf(f, aliceId)?.messages[0]?.text === "note edited",
@@ -2436,24 +2576,297 @@ describe("ChatController message edits", () => {
     expect(chatOf(f, aliceId)!.unreadCount).toBe(0);
     expect(chatOf(f, aliceId)!.messages[0]).toMatchObject({
       text: "note edited",
+      rev: 1,
       edited: true,
       direction: "out",
     });
     f.controller.stop();
   });
 
-  it("applies your own edit from the history copy", async () => {
+  it("ignores updates for unknown rows and foreign chats", async () => {
     const target = newReplayMessageId();
-    const clientMsgId = "05".repeat(16);
-    const editClientMsgId = "06".repeat(16);
+    const f = await connected();
+    await f.controller.openChat(bobId);
+    deliver(f, {
+      id: "row-1",
+      seq: "1",
+      ciphertext: peerText(target, "original"),
+    });
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
+    /* No such row in the chat. */
+    update(f, {
+      id: "row-404",
+      from: bobId,
+      to: aliceId,
+      seq: "5",
+      changeSeq: "5",
+      payload: peerText(target, "hijacked", 1),
+    });
+    await settle();
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
+    /* Neither side of the frame is this user. */
+    update(f, {
+      id: "row-1",
+      from: charlieId,
+      to: bobId,
+      seq: "1",
+      changeSeq: "6",
+      payload: peerText(target, "foreign", 1),
+    });
+    await settle();
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
+    /* Every field of the frame must be a string. */
+    f.sockets[0]!.frame({
+      type: "message_updated",
+      id: "row-1",
+      from: bobId,
+      to: aliceId,
+      seq: 1,
+      changeSeq: "7",
+      payload: peerText(target, "typed", 1),
+    });
+    await settle();
+    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
+    expect(chatOf(f, bobId)!.messages[0]!.rev).toBe(0);
+    f.controller.stop();
+  });
+
+  it("ignores an update whose inner id, revision or type does not match", async () => {
+    const target = newReplayMessageId();
+    const f = await connected();
+    await f.controller.openChat(bobId);
+    deliver(f, {
+      id: "row-1",
+      seq: "1",
+      ciphertext: peerText(target, "original"),
+    });
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
+    const send = (payload: string) =>
+      update(f, {
+        id: "row-1",
+        from: bobId,
+        to: aliceId,
+        seq: "1",
+        changeSeq: "8",
+        payload,
+      });
+    /* Another message inside the ciphertext. */
+    send(peerText(newReplayMessageId(), "wrong id", 1));
+    await settle();
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
+    /* Not a text payload: a delete request cannot replace a text. */
+    send(
+      encryptDeleteRequestMessage({
+        senderEncryptionPrivateKey: bob.encryption.privateKey,
+        recipientEncryptionPublicKey: alice.encryption.publicKey,
+        senderId: bobId,
+        recipientId: aliceId,
+        target,
+        sentAt: sentAt + 500,
+      }),
+    );
+    await settle();
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
+    /* Broken base64 must not even produce a placeholder. */
+    send("AAAA");
+    await settle();
+    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
+    expect(chatOf(f, bobId)!.messages[0]!.decryptFailed).toBeUndefined();
+    /* The first real revision wins; older and equal ones are ignored. */
+    send(peerText(target, "revision one", 1));
+    await waitFor(() => chatOf(f, bobId)?.messages[0]?.text === "revision one");
+    send(peerText(target, "stale revision", 1));
+    await settle();
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("revision one");
+    send(peerText(target, "no revision"));
+    await settle();
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("revision one");
+    expect(chatOf(f, bobId)!.messages[0]!.rev).toBe(1);
+    f.controller.stop();
+  });
+
+  it("marks a live frame and a history row with a revision as edited", async () => {
+    const liveTarget = newReplayMessageId();
+    const historyTarget = newReplayMessageId();
+    const clientMsgId = "12".repeat(16);
     const f = makeController({
       initialSession: session("token-a"),
-      getConversations: async () => ({
-        conversations: [
-          { peerId: bobId, lastSeq: "2", lastCreatedAt: rowTime(2000) },
+      getHistory: async () => ({
+        hasMore: false,
+        peerReadUpToSeq: null,
+        messages: [
+          {
+            id: "row-9",
+            seq: "9",
+            direction: "out" as const,
+            clientMsgId,
+            payload: encryptHistoryEntry({
+              historyKey: alice.historyKey,
+              clientMsgId,
+              peerId: bobId,
+              senderId: aliceId,
+              messageId: historyTarget,
+              text: "edited in history",
+              sentAt,
+              rev: 3,
+            }),
+            createdAt: rowTime(),
+            deliveredAt: null,
+          },
         ],
       }),
-      getContacts: async () => ({ version: "0", blob: null }),
+    });
+    f.controller.start();
+    await waitFor(() => f.sockets.length === 1);
+    await authenticate(f.sockets[0]!);
+    await f.controller.openChat(bobId);
+    await waitFor(
+      () => chatOf(f, bobId)?.messages[0]?.text === "edited in history",
+    );
+    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
+      rev: 3,
+      edited: true,
+      sentAt,
+    });
+    deliver(f, {
+      id: "row-10",
+      seq: "10",
+      ciphertext: peerText(liveTarget, "edited live", 2),
+    });
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 2);
+    expect(chatOf(f, bobId)!.messages[1]).toMatchObject({
+      text: "edited live",
+      rev: 2,
+      edited: true,
+    });
+    f.controller.stop();
+  });
+
+  it("skips erased rows of history and of the mailbox without a decrypt error", async () => {
+    const f = makeController({
+      initialSession: session("token-a"),
+      getHistory: async () => ({
+        hasMore: false,
+        messages: [
+          {
+            id: "row-1",
+            seq: "1",
+            direction: "out" as const,
+            clientMsgId: "13".repeat(16),
+            payload: "",
+            createdAt: rowTime(),
+            deliveredAt: null,
+            changeSeq: "8",
+            deleted: true,
+          },
+        ],
+      }),
+    });
+    f.controller.start();
+    await waitFor(() => f.sockets.length === 1);
+    await authenticate(f.sockets[0]!);
+    await f.controller.openChat(bobId);
+    await waitFor(() => chatOf(f, bobId)?.historyLoaded === true);
+    await settle();
+    expect(chatOf(f, bobId)!.messages).toEqual([]);
+    /* The mailbox confirms an erased row but does not show it. */
+    f.sockets[0]!.frame({
+      type: "message",
+      id: "row-2",
+      from: bobId,
+      seq: "2",
+      ciphertext: "",
+      createdAt: rowTime(500),
+      deleted: true,
+    });
+    await settle();
+    expect(chatOf(f, bobId)!.messages).toEqual([]);
+    f.controller.stop();
+  });
+
+  it("keeps a newer revision when a page with an older one is merged", () => {
+    const edited: ChatMessage = {
+      id: "row-1",
+      seq: "1",
+      text: "edited",
+      createdAt: rowTime(),
+      direction: "out",
+      rev: 2,
+      edited: true,
+      sentAt,
+      replayId: "target",
+      replayAuthor: aliceId,
+      arrivalOrder: 1,
+    };
+    const page: ChatMessage = {
+      id: "row-1",
+      seq: "1",
+      text: "original",
+      createdAt: rowTime(),
+      direction: "out",
+      rev: 0,
+      sentAt,
+      replayId: "target",
+      replayAuthor: aliceId,
+      arrivalOrder: 2,
+    };
+    expect(mergeMessages([edited], [page])[0]).toMatchObject({
+      text: "edited",
+      rev: 2,
+      edited: true,
+    });
+    expect(mergeMessages([page], [edited])[0]).toMatchObject({
+      text: "edited",
+      rev: 2,
+      edited: true,
+    });
+  });
+
+  it("skips rows of the old edit mechanism in history, frames and the queue", async () => {
+    const target = newReplayMessageId();
+    const clientMsgId = "14".repeat(16);
+    const editClientMsgId = "15".repeat(16);
+    const removed: string[] = [];
+    const queued: OutgoingFrame[] = [
+      {
+        type: "send",
+        clientMsgId: editClientMsgId,
+        to: bobId,
+        ciphertext: encryptEditMessage({
+          senderEncryptionPrivateKey: alice.encryption.privateKey,
+          recipientEncryptionPublicKey: bob.encryption.publicKey,
+          senderId: aliceId,
+          recipientId: bobId,
+          target,
+          rev: 1,
+          text: "queued old edit",
+          sentAt,
+        }),
+        senderCopy: encryptHistoryEditEntry({
+          historyKey: alice.historyKey,
+          clientMsgId: editClientMsgId,
+          peerId: bobId,
+          senderId: aliceId,
+          target,
+          rev: 1,
+          text: "queued old edit",
+          sentAt,
+        }),
+      },
+    ];
+    const f = makeController({
+      initialSession: session("token-a"),
+      outbox: {
+        list: async () => queued,
+        put: async () => undefined,
+        remove: async (_userId, id) => {
+          removed.push(id);
+          const index = queued.findIndex((frame) => frame.clientMsgId === id);
+          if (index >= 0) queued.splice(index, 1);
+        },
+        clear: async () => undefined,
+      },
       getHistory: async () => ({
         hasMore: false,
         peerReadUpToSeq: null,
@@ -2468,9 +2881,9 @@ describe("ChatController message edits", () => {
               clientMsgId,
               peerId: bobId,
               senderId: aliceId,
+              messageId: target,
               text: "original",
               sentAt,
-              messageId: target,
             }),
             createdAt: rowTime(),
             deliveredAt: null,
@@ -2487,7 +2900,7 @@ describe("ChatController message edits", () => {
               senderId: aliceId,
               target,
               rev: 1,
-              text: "edited text",
+              text: "old edit row",
               sentAt: sentAt + 1000,
             }),
             createdAt: rowTime(1000),
@@ -2500,145 +2913,272 @@ describe("ChatController message edits", () => {
     await waitFor(() => f.sockets.length === 1);
     await authenticate(f.sockets[0]!);
     await f.controller.openChat(bobId);
-    await waitFor(() => chatOf(f, bobId)?.messages[0]?.text === "edited text");
+    await waitFor(() => chatOf(f, bobId)?.historyLoaded === true);
+    await settle();
+    expect(removed).toContain(editClientMsgId);
     expect(chatOf(f, bobId)!.messages).toHaveLength(1);
-    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
-      text: "edited text",
-      edited: true,
-      direction: "out",
-    });
-    f.controller.stop();
-  });
-
-  it("sends an edit through the same queue and applies it locally", async () => {
-    const f = makeController({ initialSession: session("token-a") });
-    f.controller.start();
-    await waitFor(() => f.sockets.length === 1);
-    await authenticate(f.sockets[0]!);
-    await f.controller.openChat(bobId);
-    await f.controller.sendText("hello");
-    const sent = chatOf(f, bobId)!.messages[0]!;
-    f.sockets[0]!.frame({
-      type: "sent",
-      clientMsgId: sent.clientMsgId!,
-      id: "row-1",
-      seq: "1",
-      createdAt: rowTime(),
-    });
-    await waitFor(() => chatOf(f, bobId)!.messages[0]!.status === "sent");
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
     expect(
-      await f.controller.sendEdit(bobId, sent.replayId!, "hello v2"),
-    ).toEqual({ ok: true });
-    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
-    expect(chatOf(f, bobId)!.messages[0]).toMatchObject({
-      text: "hello v2",
-      edited: true,
-      status: "sent",
-      seq: "1",
-    });
-    const frames = f.sockets[0]!.decoded().filter(
-      (frame) => frame.type === "send",
-    );
-    expect(frames).toHaveLength(2);
-    expect(
-      decryptTextMessage({
-        recipientEncryptionPrivateKey: bob.encryption.privateKey,
-        senderEncryptionPublicKey: alice.encryption.publicKey,
-        senderId: aliceId,
-        recipientId: bobId,
-        ciphertext: String(frames[1]!.ciphertext),
-      }),
-    ).toMatchObject({
-      type: "edit",
-      target: sent.replayId,
-      rev: 1,
-      text: "hello v2",
-    });
-    expect(
-      decryptHistoryEntry({
-        historyKey: alice.historyKey,
-        clientMsgId: String(frames[1]!.clientMsgId),
-        senderId: aliceId,
-        peerId: bobId,
-        entry: String(frames[1]!.senderCopy),
-      }),
-    ).toMatchObject({ type: "edit", target: sent.replayId, rev: 1 });
-    expect(
-      await f.controller.sendEdit(bobId, sent.replayId!, "hello v3"),
-    ).toEqual({ ok: true });
-    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("hello v3");
-    const last = f.sockets[0]!.decoded()
-      .filter((frame) => frame.type === "send")
-      .at(-1)!;
-    expect(
-      decryptTextMessage({
-        recipientEncryptionPrivateKey: bob.encryption.privateKey,
-        senderEncryptionPublicKey: alice.encryption.publicKey,
-        senderId: aliceId,
-        recipientId: bobId,
-        ciphertext: String(last.ciphertext),
-      }),
-    ).toMatchObject({ type: "edit", rev: 2, text: "hello v3" });
-    f.controller.stop();
-  });
-
-  it("rejects edits of unknown, foreign, pending and invalid messages", async () => {
-    const f = makeController({ initialSession: session("token-a") });
-    f.controller.start();
-    await waitFor(() => f.sockets.length === 1);
-    await authenticate(f.sockets[0]!);
-    await f.controller.openChat(bobId);
-    expect(
-      await f.controller.sendEdit(bobId, newReplayMessageId(), "text"),
-    ).toEqual({ ok: false, error: "unknown_message" });
-    const incomingTarget = newReplayMessageId();
+      f.sockets[0]!.decoded().some(
+        (frame) => frame.clientMsgId === editClientMsgId,
+      ),
+    ).toBe(false);
+    /* A live frame of the old mechanism is skipped as an unknown type. */
     f.sockets[0]!.frame({
       type: "message",
-      id: "row-1",
+      id: "row-3",
       from: bobId,
-      seq: "1",
-      ciphertext: peerText(incomingTarget, "from bob"),
-      createdAt: rowTime(),
+      seq: "3",
+      ciphertext: encryptEditMessage({
+        senderEncryptionPrivateKey: bob.encryption.privateKey,
+        recipientEncryptionPublicKey: alice.encryption.publicKey,
+        senderId: bobId,
+        recipientId: aliceId,
+        target,
+        rev: 1,
+        text: "old frame edit",
+        sentAt: sentAt + 2000,
+      }),
+      createdAt: rowTime(2000),
     });
-    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
-    expect(await f.controller.sendEdit(bobId, incomingTarget, "text")).toEqual({
-      ok: false,
-      error: "not_editable",
-    });
-    await f.controller.sendText("hello");
-    const pending = chatOf(f, bobId)!.messages.at(-1)!;
-    expect(
-      await f.controller.sendEdit(bobId, pending.replayId!, "text"),
-    ).toEqual({ ok: false, error: "edit_pending" });
-    f.sockets[0]!.frame({
-      type: "sent",
-      clientMsgId: pending.clientMsgId!,
-      id: "row-2",
-      seq: "2",
-      createdAt: rowTime(1000),
-    });
-    await waitFor(() => chatOf(f, bobId)!.messages.at(-1)!.status === "sent");
-    expect(
-      await f.controller.sendEdit(bobId, pending.replayId!, "   "),
-    ).toEqual({ ok: false, error: "invalid_text" });
-    expect(
-      await f.controller.sendEdit(bobId, pending.replayId!, "x".repeat(4001)),
-    ).toEqual({ ok: false, error: "invalid_text" });
-    expect(
-      f.sockets[0]!.decoded().filter((frame) => frame.type === "send"),
-    ).toHaveLength(1);
+    await settle();
+    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
     f.controller.stop();
   });
 
-  it("stops editing after revision one hundred", async () => {
+  it("reads changed rows above the known number minus a reserve of one hundred", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", {});
+    const requests: string[] = [];
     const target = newReplayMessageId();
-    const clientMsgId = "07".repeat(16);
-    const editClientMsgId = "08".repeat(16);
+    const clientMsgId = "16".repeat(16);
+    let lastChangeSeq = "300";
+    const page = (payload: string, changeSeq: string | null) => ({
+      hasMore: false,
+      peerReadUpToSeq: null,
+      messages: [
+        {
+          id: "row-1",
+          seq: "1",
+          direction: "out" as const,
+          clientMsgId,
+          payload,
+          createdAt: rowTime(),
+          deliveredAt: null,
+          changeSeq,
+        },
+      ],
+    });
     const f = makeController({
       initialSession: session("token-a"),
       getConversations: async () => ({
         conversations: [
-          { peerId: bobId, lastSeq: "2", lastCreatedAt: rowTime(2000) },
+          {
+            peerId: bobId,
+            lastSeq: "1",
+            lastCreatedAt: future(),
+            lastChangeSeq,
+          },
+        ],
+      }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () =>
+        page(
+          encryptHistoryEntry({
+            historyKey: alice.historyKey,
+            clientMsgId,
+            peerId: bobId,
+            senderId: aliceId,
+            messageId: target,
+            text: "original",
+            sentAt,
+          }),
+          null,
+        ),
+      getHistoryChangedAfter: async (_peerId, _token, after) => {
+        requests.push(after);
+        return page(
+          encryptHistoryEntry({
+            historyKey: alice.historyKey,
+            clientMsgId,
+            peerId: bobId,
+            senderId: aliceId,
+            messageId: target,
+            text: "edited later",
+            sentAt,
+            rev: 1,
+          }),
+          "350",
+        );
+      },
+    });
+    f.controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.open();
+    f.sockets[0]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    await f.controller.openChat(bobId);
+    await f.controller.loadHistory(bobId);
+    expect(chatOf(f, bobId)?.messages[0]?.text).toBe("original");
+    /* The reconnect reports a newer change number, so the row is read again. */
+    lastChangeSeq = "350";
+    await reconnect(f);
+    await vi.waitFor(() => expect(requests).toEqual(["200"]));
+    expect(chatOf(f, bobId)?.messages[0]?.text).toBe("edited later");
+    expect(chatOf(f, bobId)?.messages[0]?.rev).toBe(1);
+    /* Nothing is left to read: the next connection asks for nothing. */
+    await reconnect(f);
+    expect(requests).toEqual(["200"]);
+    f.controller.stop();
+  });
+
+  it("pages changed rows by hasMore and advances the known number", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", {});
+    const requests: string[] = [];
+    const target = newReplayMessageId();
+    const clientMsgId = "17".repeat(16);
+    let lastChangeSeq = "250";
+    const row = (payload: string, changeSeq: string) => ({
+      id: "row-1",
+      seq: "1",
+      direction: "out" as const,
+      clientMsgId,
+      payload,
+      createdAt: rowTime(),
+      deliveredAt: null,
+      changeSeq,
+    });
+    const copy = (text: string, rev: number) =>
+      encryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId,
+        peerId: bobId,
+        senderId: aliceId,
+        messageId: target,
+        text,
+        sentAt,
+        rev,
+      });
+    const f = makeController({
+      initialSession: session("token-a"),
+      getConversations: async () => ({
+        conversations: [
+          {
+            peerId: bobId,
+            lastSeq: "1",
+            lastCreatedAt: future(),
+            lastChangeSeq,
+          },
+        ],
+      }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () => ({
+        hasMore: false,
+        peerReadUpToSeq: null,
+        messages: [
+          row(
+            encryptHistoryEntry({
+              historyKey: alice.historyKey,
+              clientMsgId,
+              peerId: bobId,
+              senderId: aliceId,
+              messageId: target,
+              text: "original",
+              sentAt,
+            }),
+            "0",
+          ),
+        ],
+      }),
+      getHistoryChangedAfter: async (_peerId, _token, after) => {
+        requests.push(after);
+        return after === "150"
+          ? {
+              hasMore: true,
+              peerReadUpToSeq: null,
+              messages: [row(copy("first edit", 1), "160")],
+            }
+          : {
+              hasMore: false,
+              peerReadUpToSeq: null,
+              messages: [row(copy("second edit", 2), "300")],
+            };
+      },
+    });
+    f.controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.open();
+    f.sockets[0]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    await f.controller.openChat(bobId);
+    await f.controller.loadHistory(bobId);
+    lastChangeSeq = "300";
+    await reconnect(f);
+    await vi.waitFor(() => expect(requests).toEqual(["150", "160"]));
+    expect(chatOf(f, bobId)?.messages[0]?.text).toBe("second edit");
+    expect(chatOf(f, bobId)?.messages[0]?.rev).toBe(2);
+    /* The known number was raised to the server value, so nothing is left. */
+    await reconnect(f);
+    expect(requests).toEqual(["150", "160"]);
+    f.controller.stop();
+  });
+
+  it("does not poll chats whose history is not loaded", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", {});
+    const requests: string[] = [];
+    const f = makeController({
+      initialSession: session("token-a"),
+      getConversations: async () => ({
+        conversations: [
+          {
+            peerId: bobId,
+            lastSeq: "1",
+            lastCreatedAt: future(),
+            lastChangeSeq: "50",
+          },
+        ],
+      }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      getHistory: async () => {
+        throw new Error("offline");
+      },
+      getHistoryChangedAfter: async (_peerId, _token, after) => {
+        requests.push(after);
+        return { hasMore: false, peerReadUpToSeq: null, messages: [] };
+      },
+    });
+    f.controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.open();
+    f.sockets[0]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(chatOf(f, bobId)?.historyLoaded).toBeUndefined();
+    await reconnect(f);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(requests).toEqual([]);
+    f.controller.stop();
+  });
+
+  it("keeps the known change number when the catch-up request fails", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("window", {});
+    const requests: string[] = [];
+    const target = newReplayMessageId();
+    const clientMsgId = "18".repeat(16);
+    let lastChangeSeq = "300";
+    const f = makeController({
+      initialSession: session("token-a"),
+      getConversations: async () => ({
+        conversations: [
+          {
+            peerId: bobId,
+            lastSeq: "1",
+            lastCreatedAt: future(),
+            lastChangeSeq,
+          },
         ],
       }),
       getContacts: async () => ({ version: "0", blob: null }),
@@ -2656,45 +3196,37 @@ describe("ChatController message edits", () => {
               clientMsgId,
               peerId: bobId,
               senderId: aliceId,
+              messageId: target,
               text: "original",
               sentAt,
-              messageId: target,
             }),
             createdAt: rowTime(),
             deliveredAt: null,
           },
-          {
-            id: "row-2",
-            seq: "2",
-            direction: "out" as const,
-            clientMsgId: editClientMsgId,
-            payload: encryptHistoryEditEntry({
-              historyKey: alice.historyKey,
-              clientMsgId: editClientMsgId,
-              peerId: bobId,
-              senderId: aliceId,
-              target,
-              rev: 100,
-              text: "last revision",
-              sentAt: sentAt + 1000,
-            }),
-            createdAt: rowTime(1000),
-            deliveredAt: null,
-          },
         ],
       }),
+      getHistoryChangedAfter: async (_peerId, _token, after) => {
+        requests.push(after);
+        throw new TypeError("Network unavailable");
+      },
     });
     f.controller.start();
-    await waitFor(() => f.sockets.length === 1);
-    await authenticate(f.sockets[0]!);
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.open();
+    f.sockets[0]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
     await f.controller.openChat(bobId);
-    await waitFor(
-      () => chatOf(f, bobId)?.messages[0]?.text === "last revision",
-    );
-    expect(await f.controller.sendEdit(bobId, target, "next")).toEqual({
-      ok: false,
-      error: "edit_limit",
-    });
+    await f.controller.loadHistory(bobId);
+    /* The list reports a newer change number, so a catch-up is due. */
+    lastChangeSeq = "350";
+    await reconnect(f);
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0]).toBe("200");
+    /* The failure keeps the known number, so the cursor stays the same. */
+    await reconnect(f);
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests).toEqual(["200", "200"]);
+    expect(chatOf(f, bobId)?.messages[0]?.text).toBe("original");
     f.controller.stop();
   });
 });
@@ -2713,15 +3245,15 @@ describe("ChatController delete requests", () => {
       messageId: target,
     });
   const peerEdit = (target: string, rev: number, text: string) =>
-    encryptEditMessage({
+    encryptTextMessage({
       senderEncryptionPrivateKey: bob.encryption.privateKey,
       recipientEncryptionPublicKey: alice.encryption.publicKey,
       senderId: bobId,
       recipientId: aliceId,
-      target,
-      rev,
       text,
       sentAt: sentAt + 1500,
+      messageId: target,
+      rev,
     });
   const peerRequest = (target: string) =>
     encryptDeleteRequestMessage({
@@ -3337,7 +3869,7 @@ describe("ChatController delete requests", () => {
   });
 
   it("blocks edits while a request is pending and allows them after a decline", async () => {
-    const f = await connected();
+    const f = await connected({ updateMessage: async () => undefined });
     await f.controller.openChat(bobId);
     await f.controller.sendText("hello");
     const mine = chatOf(f, bobId)!.messages[0]!;
@@ -3390,10 +3922,15 @@ describe("ChatController delete requests", () => {
     expect(await f.controller.sendDeleteAnswer(bobId, target, true)).toEqual({
       ok: true,
     });
-    deliver(f, {
-      id: "row-3",
-      seq: "3",
-      ciphertext: peerEdit(target, 1, "late"),
+    /* A late edit of a hidden row keeps the text hidden. */
+    f.sockets[0]!.frame({
+      type: "message_updated",
+      id: "row-1",
+      from: bobId,
+      to: aliceId,
+      seq: "1",
+      changeSeq: "12",
+      payload: peerEdit(target, 1, "late"),
     });
     await settle();
     expect(chatOf(f, bobId)!.messages).toHaveLength(1);
