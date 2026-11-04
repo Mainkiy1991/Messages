@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { Socket } from "node:net";
 import pg from "pg";
 import WebSocket from "ws";
@@ -51,6 +51,7 @@ suite("server authentication (PostgreSQL)", () => {
     await pool!.query(
       "DROP TABLE IF EXISTS conversation_clears, presence, read_markers, contact_books, messages, sessions, users, schema_migrations CASCADE",
     );
+    await pool!.query("DROP SEQUENCE IF EXISTS messages_change_seq");
     await pool!.query(
       await readFile(
         join(import.meta.dirname, "..", "migrations", "001_initial.sql"),
@@ -104,6 +105,17 @@ suite("server authentication (PostgreSQL)", () => {
           "..",
           "migrations",
           "007_conversation_clears.sql",
+        ),
+        "utf8",
+      ),
+    );
+    await pool!.query(
+      await readFile(
+        join(
+          import.meta.dirname,
+          "..",
+          "migrations",
+          "008_message_changes.sql",
         ),
         "utf8",
       ),
@@ -2589,5 +2601,878 @@ suite("server authentication (PostgreSQL)", () => {
       { peerId: alice.userId, online: false, lastSeenAt: null },
     ]);
     socket.close();
+  });
+  it("applies migration 008 with deletion columns, change sequence, and index", async () => {
+    const schema = `message_changes_${randomBytes(5).toString("hex")}`;
+    const client = await pool!.connect();
+    try {
+      await client.query(`CREATE SCHEMA ${schema}`);
+      await client.query(`SET search_path TO ${schema}`);
+      for (const name of [
+        "001_initial.sql",
+        "002_messages.sql",
+        "003_message_sequence.sql",
+        "004_history_contacts.sql",
+        "005_read_markers.sql",
+        "006_presence.sql",
+        "007_conversation_clears.sql",
+      ]) {
+        await client.query(
+          await readFile(
+            join(import.meta.dirname, "..", "migrations", name),
+            "utf8",
+          ),
+        );
+      }
+      const author = "ef".repeat(32);
+      await client.query(
+        `INSERT INTO users(id,encryption_public_key,key_binding_signature) VALUES($1,$1,$1)`,
+        [author],
+      );
+      await client.query(
+        `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+         VALUES($1,$1,$2,'YQ==','Yg==')`,
+        [author, randomId()],
+      );
+      await client.query(
+        await readFile(
+          join(
+            import.meta.dirname,
+            "..",
+            "migrations",
+            "008_message_changes.sql",
+          ),
+          "utf8",
+        ),
+      );
+      const columns = await client.query<{
+        column_name: string;
+        is_nullable: string;
+        data_type: string;
+      }>(
+        `SELECT column_name, is_nullable, data_type FROM information_schema.columns
+         WHERE table_schema=$1 AND table_name='messages'
+           AND column_name IN ('deleted_at','change_seq') ORDER BY column_name`,
+        [schema],
+      );
+      expect(columns.rows).toEqual([
+        { column_name: "change_seq", is_nullable: "YES", data_type: "bigint" },
+        {
+          column_name: "deleted_at",
+          is_nullable: "YES",
+          data_type: "timestamp with time zone",
+        },
+      ]);
+      expect(
+        (
+          await client.query<{ count: number }>(
+            `SELECT count(*)::int AS count FROM information_schema.sequences
+             WHERE sequence_schema=$1 AND sequence_name='messages_change_seq'`,
+            [schema],
+          )
+        ).rows[0]?.count,
+      ).toBe(1);
+      expect(
+        (
+          await client.query<{ count: number }>(
+            `SELECT count(*)::int AS count FROM pg_indexes
+             WHERE schemaname=$1 AND indexname='messages_change_seq_idx'`,
+            [schema],
+          )
+        ).rows[0]?.count,
+      ).toBe(1);
+      expect(
+        (
+          await client.query<{ total: number; changed: number }>(
+            `SELECT count(*)::int AS total, count(change_seq)::int AS changed FROM messages`,
+          )
+        ).rows[0],
+      ).toEqual({ total: 1, changed: 0 });
+      expect(
+        (
+          await client.query<{ value: string }>(
+            `SELECT nextval('messages_change_seq')::text AS value`,
+          )
+        ).rows[0]?.value,
+      ).toBe("1");
+    } finally {
+      await client.query("SET search_path TO public");
+      await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      client.release();
+    }
+  });
+
+  it("erases the author's own message content and keeps the row identity", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{
+      id: string;
+      seq: string;
+      created_at: Date;
+    }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'Y2lwaGVy','Y29weQ==')
+       RETURNING id, seq::text AS seq, created_at`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const before = inserted.rows[0]!;
+    const response = await app.inject({
+      method: "DELETE",
+      url: `/messages/${before.id}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(response.statusCode).toBe(204);
+    expect(response.body).toBe("");
+    const row = (
+      await pool!.query<{
+        ciphertext: string;
+        sender_copy: string;
+        deleted_at: Date | null;
+        change_seq: string | null;
+        seq: string;
+        created_at: Date;
+      }>(
+        `SELECT ciphertext, sender_copy, deleted_at, change_seq::text AS change_seq,
+                seq::text AS seq, created_at
+         FROM messages WHERE id=$1`,
+        [before.id],
+      )
+    ).rows[0]!;
+    expect(row.ciphertext).toBe("");
+    expect(row.sender_copy).toBe("");
+    expect(row.deleted_at).not.toBeNull();
+    expect(BigInt(row.change_seq!)).toBeGreaterThan(0n);
+    expect(row.seq).toBe(before.seq);
+    expect(row.created_at.toISOString()).toBe(before.created_at.toISOString());
+  });
+
+  it("keeps a repeated deletion idempotent without a new change number", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'YQ==','Yg==') RETURNING id`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const id = inserted.rows[0]!.id;
+    const url = `/messages/${id}`;
+    const headers = { authorization: `Bearer ${alice.token}` };
+    expect(
+      (await app.inject({ method: "DELETE", url, headers })).statusCode,
+    ).toBe(204);
+    const readState = async () =>
+      (
+        await pool!.query<{ change_seq: string; deleted_at: Date }>(
+          "SELECT change_seq::text AS change_seq, deleted_at FROM messages WHERE id=$1",
+          [id],
+        )
+      ).rows[0]!;
+    const first = await readState();
+    expect(
+      (await app.inject({ method: "DELETE", url, headers })).statusCode,
+    ).toBe(204);
+    const second = await readState();
+    expect(second.change_seq).toBe(first.change_seq);
+    expect(second.deleted_at.toISOString()).toBe(
+      first.deleted_at.toISOString(),
+    );
+  });
+
+  it("broadcasts message_deleted to the recipient and the author's other devices", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string; seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'YQ==','Yg==') RETURNING id, seq::text AS seq`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const message = inserted.rows[0]!;
+    const url = await listen();
+    const first = (await connectAuth(alice.token, url)).socket;
+    const second = (await connectAuth(alice.token, url)).socket;
+    const peer = (await connectAuth(bob.token, url)).socket;
+    const firstDeleted = nextFrame(
+      first,
+      (frame) => frame.type === "message_deleted",
+    );
+    const secondDeleted = nextFrame(
+      second,
+      (frame) => frame.type === "message_deleted",
+    );
+    const peerDeleted = nextFrame(
+      peer,
+      (frame) => frame.type === "message_deleted",
+    );
+    const response = await app.inject({
+      method: "DELETE",
+      url: `/messages/${message.id}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(response.statusCode).toBe(204);
+    const frames = await Promise.all([
+      firstDeleted,
+      secondDeleted,
+      peerDeleted,
+    ]);
+    for (const frame of frames) {
+      expect(frame).toMatchObject({
+        type: "message_deleted",
+        id: message.id,
+        from: alice.userId,
+        to: bob.userId,
+        seq: message.seq,
+      });
+      expect(BigInt(String(frame.changeSeq))).toBeGreaterThan(0n);
+    }
+    first.close();
+    second.close();
+    peer.close();
+  });
+
+  it("sends a single message_deleted frame when the author is the recipient", async () => {
+    const alice = await createAccount();
+    const inserted = await pool!.query<{ id: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$1,$2,'YQ==','Yg==') RETURNING id`,
+      [alice.userId, randomId()],
+    );
+    const note = inserted.rows[0]!;
+    const url = await listen();
+    const socket = (await connectAuth(alice.token, url)).socket;
+    const deleted = nextFrame(
+      socket,
+      (frame) => frame.type === "message_deleted",
+    );
+    const response = await app.inject({
+      method: "DELETE",
+      url: `/messages/${note.id}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(response.statusCode).toBe(204);
+    expect(await deleted).toMatchObject({
+      type: "message_deleted",
+      id: note.id,
+      from: alice.userId,
+      to: alice.userId,
+    });
+    const markerMsgId = randomId();
+    const sent = nextFrame(
+      socket,
+      (frame) => frame.type === "sent" && frame.clientMsgId === markerMsgId,
+    );
+    sendFrame(socket, payload(alice.userId, markerMsgId));
+    await sent;
+    expect(
+      (frameBuffers.get(socket) ?? []).filter(
+        (frame) => frame.type === "message_deleted" && frame.id === note.id,
+      ),
+    ).toHaveLength(0);
+    socket.close();
+  });
+
+  it("returns 404 for another user's or an unknown message and leaves it intact", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'Y2lwaGVy','Y29weQ==') RETURNING id`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const id = inserted.rows[0]!.id;
+    const headers = { authorization: `Bearer ${bob.token}` };
+    const foreign = await app.inject({
+      method: "DELETE",
+      url: `/messages/${id}`,
+      headers,
+    });
+    expect(foreign.statusCode).toBe(404);
+    expect(foreign.json()).toEqual({ error: "not_found" });
+    const unknown = await app.inject({
+      method: "DELETE",
+      url: `/messages/${randomUUID()}`,
+      headers,
+    });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json()).toEqual({ error: "not_found" });
+    expect(
+      (
+        await pool!.query(
+          `SELECT ciphertext, sender_copy, deleted_at, change_seq FROM messages WHERE id=$1`,
+          [id],
+        )
+      ).rows[0],
+    ).toEqual({
+      ciphertext: "Y2lwaGVy",
+      sender_copy: "Y29weQ==",
+      deleted_at: null,
+      change_seq: null,
+    });
+  });
+
+  it("rejects malformed message ids and unauthenticated deletions", async () => {
+    const alice = await createAccount();
+    const malformed = await app.inject({
+      method: "DELETE",
+      url: "/messages/not-a-uuid",
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json()).toEqual({ error: "invalid_request" });
+    const unauthorized = await app.inject({
+      method: "DELETE",
+      url: `/messages/${randomUUID()}`,
+    });
+    expect(unauthorized.statusCode).toBe(401);
+    expect(unauthorized.json()).toEqual({ error: "unauthorized" });
+  });
+
+  it("serves erased history with an empty payload, a deleted flag, and a change number", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'Y2lwaGVy','Y29weQ=='),($2,$1,$4,'aW4=','aW4tY29weQ==')
+       RETURNING id`,
+      [alice.userId, bob.userId, randomId(), randomId()],
+    );
+    const erasedId = inserted.rows[0]!.id;
+    const response = await app.inject({
+      method: "DELETE",
+      url: `/messages/${erasedId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(response.statusCode).toBe(204);
+    const change = (
+      await pool!.query<{ change_seq: string }>(
+        "SELECT change_seq::text AS change_seq FROM messages WHERE id=$1",
+        [erasedId],
+      )
+    ).rows[0]!.change_seq;
+    const authorHistory = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    const peerHistory = await app.inject({
+      method: "GET",
+      url: `/history/${alice.userId}`,
+      headers: { authorization: `Bearer ${bob.token}` },
+    });
+    const authorMessages = authorHistory.json().messages as Array<{
+      id: string;
+      payload: string;
+      changeSeq: string | null;
+      deleted: boolean;
+    }>;
+    const peerMessages = peerHistory.json().messages as Array<{
+      id: string;
+      payload: string;
+      changeSeq: string | null;
+      deleted: boolean;
+    }>;
+    expect(authorMessages).toHaveLength(2);
+    expect(peerMessages).toHaveLength(2);
+    expect(authorMessages.find((message) => message.id === erasedId)).toEqual({
+      id: erasedId,
+      seq: expect.any(String),
+      direction: "out",
+      clientMsgId: expect.any(String),
+      payload: "",
+      createdAt: expect.any(String),
+      deliveredAt: null,
+      changeSeq: change,
+      deleted: true,
+    });
+    expect(
+      peerMessages.find((message) => message.id === erasedId),
+    ).toMatchObject({ payload: "", changeSeq: change, deleted: true });
+    const intact = authorMessages.find((message) => message.id !== erasedId)!;
+    expect(intact).toMatchObject({ changeSeq: null, deleted: false });
+    expect(intact.payload).not.toBe("");
+  });
+
+  it("pages changed rows by ascending change number through changedAfter", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'YQ==','Yg=='),($1,$2,$4,'Yw==','ZA=='),($1,$2,$5,'ZQ==','Zg==')
+       RETURNING id`,
+      [alice.userId, bob.userId, randomId(), randomId(), randomId()],
+    );
+    const headers = { authorization: `Bearer ${alice.token}` };
+    for (const row of inserted.rows.slice(0, 2)) {
+      const deleted = await app.inject({
+        method: "DELETE",
+        url: `/messages/${row.id}`,
+        headers,
+      });
+      expect(deleted.statusCode).toBe(204);
+    }
+    const changes = await pool!.query<{ id: string; change_seq: string }>(
+      `SELECT id, change_seq::text AS change_seq FROM messages
+       WHERE id=ANY($1::uuid[]) AND change_seq IS NOT NULL ORDER BY change_seq`,
+      [inserted.rows.map((row) => row.id)],
+    );
+    expect(changes.rows).toHaveLength(2);
+    const firstPage = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}?changedAfter=0&limit=1`,
+      headers,
+    });
+    expect(firstPage.json().hasMore).toBe(true);
+    expect(firstPage.json().messages).toHaveLength(1);
+    expect(firstPage.json().messages[0].changeSeq).toBe(
+      changes.rows[0]!.change_seq,
+    );
+    const rest = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}?changedAfter=${changes.rows[0]!.change_seq}`,
+      headers,
+    });
+    expect(
+      rest.json().messages.map((message: { id: string }) => message.id),
+    ).toEqual([changes.rows[1]!.id]);
+    const all = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}?changedAfter=0`,
+      headers,
+    });
+    expect(
+      all
+        .json()
+        .messages.map((message: { changeSeq: string }) => message.changeSeq),
+    ).toEqual(changes.rows.map((row) => row.change_seq));
+    expect(all.json().hasMore).toBe(false);
+  });
+
+  it("validates changedAfter and respects the local clear threshold", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'YQ==','Yg==') RETURNING id`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const headers = { authorization: `Bearer ${alice.token}` };
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/messages/${inserted.rows[0]!.id}`,
+      headers,
+    });
+    expect(deleted.statusCode).toBe(204);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/history/${bob.userId}?changedAfter=1&before=5`,
+          headers,
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/history/${bob.userId}?changedAfter=1&after=0`,
+          headers,
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/history/${bob.userId}?changedAfter=abc`,
+          headers,
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/history/${bob.userId}?changedAfter=9223372036854775808`,
+          headers,
+        })
+      ).statusCode,
+    ).toBe(400);
+    const beforeClear = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}?changedAfter=0`,
+      headers,
+    });
+    expect(beforeClear.json().messages).toHaveLength(1);
+    const clear = await app.inject({
+      method: "DELETE",
+      url: `/conversations/${bob.userId}`,
+      headers,
+    });
+    expect(clear.statusCode).toBe(200);
+    const afterClear = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}?changedAfter=0`,
+      headers,
+    });
+    expect(afterClear.json().messages).toEqual([]);
+  });
+
+  it("erases only the author's messages in a chat and clears it locally", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{
+      id: string;
+      seq: string;
+      sender_id: string;
+    }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'YQ==','YjE='),($2,$1,$4,'Yg==','YjI='),
+             ($1,$2,$5,'Yw==','YjM='),($2,$1,$6,'ZA==','YjQ=')
+       RETURNING id, seq::text AS seq, sender_id`,
+      [
+        alice.userId,
+        bob.userId,
+        randomId(),
+        randomId(),
+        randomId(),
+        randomId(),
+      ],
+    );
+    const headers = { authorization: `Bearer ${alice.token}` };
+    const response = await app.inject({
+      method: "POST",
+      url: `/conversations/${bob.userId}/erase`,
+      headers,
+      payload: {},
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      erased: 2,
+      clearedBeforeSeq: inserted.rows[3]!.seq,
+    });
+    const rows = await pool!.query<{
+      sender_id: string;
+      ciphertext: string;
+      sender_copy: string;
+      deleted_at: Date | null;
+      change_seq: string | null;
+    }>(
+      `SELECT sender_id, ciphertext, sender_copy, deleted_at, change_seq::text AS change_seq
+       FROM messages WHERE id=ANY($1::uuid[])`,
+      [inserted.rows.map((row) => row.id)],
+    );
+    expect(rows.rows).toHaveLength(4);
+    for (const row of rows.rows) {
+      if (row.sender_id === alice.userId) {
+        expect(row.ciphertext).toBe("");
+        expect(row.sender_copy).toBe("");
+        expect(row.deleted_at).not.toBeNull();
+        expect(BigInt(row.change_seq!)).toBeGreaterThan(0n);
+      } else {
+        expect(row.ciphertext).not.toBe("");
+        expect(row.sender_copy).not.toBe("");
+        expect(row.deleted_at).toBeNull();
+        expect(row.change_seq).toBeNull();
+      }
+    }
+    const authorHistory = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}`,
+      headers,
+    });
+    expect(authorHistory.json().messages).toEqual([]);
+    const peerHistory = await app.inject({
+      method: "GET",
+      url: `/history/${alice.userId}`,
+      headers: { authorization: `Bearer ${bob.token}` },
+    });
+    expect(peerHistory.json().messages).toHaveLength(4);
+    const repeated = await app.inject({
+      method: "POST",
+      url: `/conversations/${bob.userId}/erase`,
+      headers,
+      payload: {},
+    });
+    expect(repeated.json()).toEqual({
+      erased: 0,
+      clearedBeforeSeq: inserted.rows[3]!.seq,
+    });
+  });
+
+  it("broadcasts messages_erased to the peer and conversation_cleared to the author's devices", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'YQ==','Yg=='),($1,$2,$4,'Yw==','ZA==')
+       RETURNING seq::text AS seq`,
+      [alice.userId, bob.userId, randomId(), randomId()],
+    );
+    const url = await listen();
+    const first = (await connectAuth(alice.token, url)).socket;
+    const second = (await connectAuth(alice.token, url)).socket;
+    const peer = (await connectAuth(bob.token, url)).socket;
+    const firstCleared = nextFrame(
+      first,
+      (frame) => frame.type === "conversation_cleared",
+    );
+    const secondCleared = nextFrame(
+      second,
+      (frame) => frame.type === "conversation_cleared",
+    );
+    const erased = nextFrame(peer, (frame) => frame.type === "messages_erased");
+    const response = await app.inject({
+      method: "POST",
+      url: `/conversations/${bob.userId}/erase`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: {},
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().erased).toBe(2);
+    const [firstFrame, secondFrame, erasedFrame] = await Promise.all([
+      firstCleared,
+      secondCleared,
+      erased,
+    ]);
+    expect(firstFrame).toEqual({
+      type: "conversation_cleared",
+      peerId: bob.userId,
+      clearedBeforeSeq: response.json().clearedBeforeSeq,
+    });
+    expect(secondFrame).toEqual(firstFrame);
+    expect(erasedFrame).toMatchObject({
+      type: "messages_erased",
+      from: alice.userId,
+      to: bob.userId,
+      upToSeq: inserted.rows[1]!.seq,
+    });
+    const change = (
+      await pool!.query<{ change_seq: string }>(
+        `SELECT max(change_seq)::text AS change_seq FROM messages
+         WHERE sender_id=$1 AND recipient_id=$2`,
+        [alice.userId, bob.userId],
+      )
+    ).rows[0]!;
+    expect(erasedFrame.changeSeq).toBe(change.change_seq);
+    first.close();
+    second.close();
+    peer.close();
+  });
+
+  it("does not send messages_erased for a chat with yourself", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    await pool!.query(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$1,$2,'YQ==','Yg==')`,
+      [alice.userId, randomId()],
+    );
+    const url = await listen();
+    const author = (await connectAuth(alice.token, url)).socket;
+    const peer = (await connectAuth(bob.token, url)).socket;
+    const cleared = nextFrame(
+      author,
+      (frame) => frame.type === "conversation_cleared",
+    );
+    const response = await app.inject({
+      method: "POST",
+      url: `/conversations/${alice.userId}/erase`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: {},
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().erased).toBe(1);
+    expect(await cleared).toEqual({
+      type: "conversation_cleared",
+      peerId: alice.userId,
+      clearedBeforeSeq: response.json().clearedBeforeSeq,
+    });
+    const canary = nextFrame(
+      peer,
+      (frame) => frame.type === "message" && frame.from === alice.userId,
+    );
+    sendFrame(author, payload(bob.userId));
+    await canary;
+    expect(
+      (frameBuffers.get(peer) ?? []).some(
+        (frame) => frame.type === "messages_erased",
+      ),
+    ).toBe(false);
+    author.close();
+    peer.close();
+  });
+
+  it("rejects an erase request with a non-empty body or a malformed peer id", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const headers = { authorization: `Bearer ${alice.token}` };
+    const withBody = await app.inject({
+      method: "POST",
+      url: `/conversations/${bob.userId}/erase`,
+      headers,
+      payload: { extra: true },
+    });
+    expect(withBody.statusCode).toBe(400);
+    expect(withBody.json()).toEqual({ error: "invalid_request" });
+    const listBody = await app.inject({
+      method: "POST",
+      url: `/conversations/${bob.userId}/erase`,
+      headers,
+      payload: [],
+    });
+    expect(listBody.statusCode).toBe(400);
+    const malformed = await app.inject({
+      method: "POST",
+      url: "/conversations/mallory/erase",
+      headers,
+      payload: {},
+    });
+    expect(malformed.statusCode).toBe(400);
+    const unauthorized = await app.inject({
+      method: "POST",
+      url: `/conversations/${bob.userId}/erase`,
+      payload: {},
+    });
+    expect(unauthorized.statusCode).toBe(401);
+  });
+
+  it("delivers an erased undelivered message to the mailbox with deleted true", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const url = await listen();
+    const sender = (await connectAuth(alice.token, url)).socket;
+    const clientMsgId = randomId();
+    const sent = nextFrame(
+      sender,
+      (frame) => frame.type === "sent" && frame.clientMsgId === clientMsgId,
+    );
+    sendFrame(sender, payload(bob.userId, clientMsgId));
+    const sentFrame = await sent;
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/messages/${String(sentFrame.id)}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(deleted.statusCode).toBe(204);
+    const recipient = (await connectAuth(bob.token, url)).socket;
+    const mailbox = await nextFrame(
+      recipient,
+      (frame) => frame.type === "message" && frame.id === sentFrame.id,
+    );
+    expect(mailbox).toMatchObject({
+      type: "message",
+      id: sentFrame.id,
+      from: alice.userId,
+      ciphertext: "",
+      deleted: true,
+    });
+    sender.close();
+    recipient.close();
+  });
+
+  it("does not resurrect an erased message on a repeated clientMsgId", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const url = await listen();
+    const socket = (await connectAuth(alice.token, url)).socket;
+    const clientMsgId = randomId();
+    const firstSent = nextFrame(
+      socket,
+      (frame) => frame.type === "sent" && frame.clientMsgId === clientMsgId,
+    );
+    sendFrame(socket, payload(bob.userId, clientMsgId));
+    const original = await firstSent;
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/messages/${String(original.id)}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(deleted.statusCode).toBe(204);
+    const repeatedSent = nextFrame(
+      socket,
+      (frame) => frame.type === "sent" && frame.clientMsgId === clientMsgId,
+    );
+    sendFrame(socket, payload(bob.userId, clientMsgId));
+    expect((await repeatedSent).id).toBe(original.id);
+    const row = (
+      await pool!.query<{
+        total: number;
+        ciphertext: string | null;
+        sender_copy: string | null;
+        deleted_at: Date | null;
+      }>(
+        `SELECT count(*)::int AS total, max(ciphertext) AS ciphertext,
+                max(sender_copy) AS sender_copy, max(deleted_at) AS deleted_at
+         FROM messages WHERE sender_id=$1 AND client_msg_id=$2`,
+        [alice.userId, clientMsgId],
+      )
+    ).rows[0]!;
+    expect(row.total).toBe(1);
+    expect(row.ciphertext).toBe("");
+    expect(row.sender_copy).toBe("");
+    expect(row.deleted_at).not.toBeNull();
+    socket.close();
+  });
+
+  it("exposes lastChangeSeq per chat in the conversation list", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'YQ==','Yg==') RETURNING id`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const headers = { authorization: `Bearer ${alice.token}` };
+    const initial = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers,
+    });
+    expect(initial.json().conversations).toMatchObject([
+      { peerId: bob.userId, lastChangeSeq: "0" },
+    ]);
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/messages/${inserted.rows[0]!.id}`,
+      headers,
+    });
+    expect(deleted.statusCode).toBe(204);
+    const change = (
+      await pool!.query<{ change_seq: string }>(
+        "SELECT change_seq::text AS change_seq FROM messages WHERE id=$1",
+        [inserted.rows[0]!.id],
+      )
+    ).rows[0]!;
+    const after = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers,
+    });
+    expect(after.json().conversations).toMatchObject([
+      { peerId: bob.userId, lastChangeSeq: change.change_seq },
+    ]);
+  });
+
+  it("marks history, conversation, and error responses as no-store", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const history = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(history.headers["cache-control"]).toBe("no-store");
+    const conversations = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(conversations.headers["cache-control"]).toBe("no-store");
+    const unauthorized = await app.inject({
+      method: "GET",
+      url: "/conversations",
+    });
+    expect(unauthorized.statusCode).toBe(401);
+    expect(unauthorized.headers["cache-control"]).toBe("no-store");
   });
 });

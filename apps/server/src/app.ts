@@ -6,7 +6,7 @@ import Fastify, {
 } from "fastify";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import {
   hexToBytes,
   userIdFromPublicKey,
@@ -18,6 +18,8 @@ import { loadConfig } from "./config.js";
 import {
   closeWebSocketsForToken,
   conversationClearedSchema,
+  messageDeletedSchema,
+  messagesErasedSchema,
   registerWebSocket,
 } from "./ws.js";
 import { MAX_CONVERSATIONS } from "@messages/shared";
@@ -55,6 +57,13 @@ const historyQuerySchema = z
           /^\d{1,19}$/u.test(value) && BigInt(value) <= 9223372036854775807n,
       )
       .optional(),
+    changedAfter: z
+      .string()
+      .refine(
+        (value) =>
+          /^\d{1,19}$/u.test(value) && BigInt(value) <= 9223372036854775807n,
+      )
+      .optional(),
     limit: z
       .string()
       .regex(/^\d+$/u)
@@ -79,6 +88,35 @@ const contactsSchema = z
   })
   .strict();
 const challenges = new Map<string, { challenge: string; expiresAt: number }>();
+const emptyBodySchema = z.object({}).strict();
+const uuidPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const eraseMessageSql = `UPDATE messages
+  SET ciphertext='', sender_copy='', deleted_at=now(), change_seq=nextval('messages_change_seq')`;
+const clearConversationSql = `WITH maximum AS (
+   SELECT max(seq::bigint) AS seq FROM messages
+   WHERE (sender_id=$1 AND recipient_id=$2) OR (sender_id=$2 AND recipient_id=$1)
+ ), cleared AS (
+   INSERT INTO conversation_clears(user_id, peer_id, cleared_before_seq)
+   SELECT $1, $2, seq FROM maximum WHERE seq IS NOT NULL
+   ON CONFLICT(user_id, peer_id) DO UPDATE
+     SET cleared_before_seq=GREATEST(conversation_clears.cleared_before_seq, EXCLUDED.cleared_before_seq),
+         updated_at=now()
+   RETURNING cleared_before_seq::text AS "clearedBeforeSeq"
+ )
+ SELECT COALESCE((SELECT "clearedBeforeSeq" FROM cleared), '0') AS "clearedBeforeSeq"`;
+
+async function clearConversation(
+  database: Pool | PoolClient,
+  userId: string,
+  peerId: string,
+): Promise<string> {
+  const result = await database.query<{ clearedBeforeSeq: string }>(
+    clearConversationSql,
+    [userId, peerId],
+  );
+  return result.rows[0]!.clearedBeforeSeq;
+}
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -148,6 +186,10 @@ export async function buildApp(options: {
     if (origin && !config.ALLOWED_ORIGINS.includes(origin)) {
       return reply.code(403).send({ error: "origin_forbidden" });
     }
+  });
+  app.addHook("onSend", async (_request, reply, payload) => {
+    reply.header("cache-control", "no-store");
+    return payload;
   });
   await app.register(cors, {
     origin: (requestOrigin, callback) => {
@@ -332,10 +374,12 @@ export async function buildApp(options: {
   });
   app.get("/conversations", { preHandler: authenticate }, async (request) => {
     const result = await pool.query(
-      `SELECT peer_id AS "peerId", last_seq::text AS "lastSeq", last_created_at AS "lastCreatedAt"
+      `SELECT peer_id AS "peerId", last_seq::text AS "lastSeq", last_created_at AS "lastCreatedAt",
+              COALESCE(last_change_seq, 0)::text AS "lastChangeSeq"
        FROM (
          SELECT CASE WHEN m.sender_id=$1 THEN m.recipient_id ELSE m.sender_id END AS peer_id,
-                max(m.seq::bigint) AS last_seq, (array_agg(m.created_at ORDER BY m.seq::bigint DESC))[1] AS last_created_at
+                max(m.seq::bigint) AS last_seq, (array_agg(m.created_at ORDER BY m.seq::bigint DESC))[1] AS last_created_at,
+                max(m.change_seq) AS last_change_seq
          FROM messages m
          LEFT JOIN conversation_clears c
            ON c.user_id=$1 AND c.peer_id=CASE WHEN m.sender_id=$1 THEN m.recipient_id ELSE m.sender_id END
@@ -364,22 +408,11 @@ export async function buildApp(options: {
     async (request, reply) => {
       if (!/^[0-9a-f]{64}$/u.test(request.params.peerId))
         return reply.code(400).send({ error: "invalid_request" });
-      const result = await pool.query<{ clearedBeforeSeq: string }>(
-        `WITH maximum AS (
-           SELECT max(seq::bigint) AS seq FROM messages
-           WHERE (sender_id=$1 AND recipient_id=$2) OR (sender_id=$2 AND recipient_id=$1)
-         ), cleared AS (
-           INSERT INTO conversation_clears(user_id, peer_id, cleared_before_seq)
-           SELECT $1, $2, seq FROM maximum WHERE seq IS NOT NULL
-           ON CONFLICT(user_id, peer_id) DO UPDATE
-             SET cleared_before_seq=GREATEST(conversation_clears.cleared_before_seq, EXCLUDED.cleared_before_seq),
-                 updated_at=now()
-           RETURNING cleared_before_seq::text AS "clearedBeforeSeq"
-         )
-         SELECT COALESCE((SELECT "clearedBeforeSeq" FROM cleared), '0') AS "clearedBeforeSeq"`,
-        [request.userId, request.params.peerId],
+      const clearedBeforeSeq = await clearConversation(
+        pool,
+        request.userId!,
+        request.params.peerId,
       );
-      const clearedBeforeSeq = result.rows[0]!.clearedBeforeSeq;
       const frame = conversationClearedSchema.parse({
         type: "conversation_cleared",
         peerId: request.params.peerId,
@@ -389,9 +422,124 @@ export async function buildApp(options: {
       return { clearedBeforeSeq };
     },
   );
+  app.post<{
+    Params: { peerId: string };
+  }>(
+    "/conversations/:peerId/erase",
+    {
+      preHandler: authenticate,
+      config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      if (!/^[0-9a-f]{64}$/u.test(request.params.peerId))
+        return reply.code(400).send({ error: "invalid_request" });
+      if (!emptyBodySchema.safeParse(request.body ?? {}).success)
+        return reply.code(400).send({ error: "invalid_request" });
+      const userId = request.userId!;
+      const peerId = request.params.peerId;
+      let erasedRows: Array<{ seq: string; changeSeq: string }> = [];
+      let clearedBeforeSeq = "0";
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const erased = await client.query<{ seq: string; changeSeq: string }>(
+          `${eraseMessageSql}
+           WHERE sender_id=$1 AND recipient_id=$2 AND deleted_at IS NULL
+           RETURNING seq::text AS seq, change_seq::text AS "changeSeq"`,
+          [userId, peerId],
+        );
+        erasedRows = erased.rows;
+        clearedBeforeSeq = await clearConversation(client, userId, peerId);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+      messageHub.sendToUser(
+        userId,
+        conversationClearedSchema.parse({
+          type: "conversation_cleared",
+          peerId,
+          clearedBeforeSeq,
+        }),
+      );
+      if (peerId !== userId && erasedRows.length > 0) {
+        let upToSeq = 0n;
+        let changeSeq = 0n;
+        for (const row of erasedRows) {
+          if (BigInt(row.seq) > upToSeq) upToSeq = BigInt(row.seq);
+          if (BigInt(row.changeSeq) > changeSeq)
+            changeSeq = BigInt(row.changeSeq);
+        }
+        messageHub.sendToUser(
+          peerId,
+          messagesErasedSchema.parse({
+            type: "messages_erased",
+            from: userId,
+            to: peerId,
+            upToSeq: upToSeq.toString(),
+            changeSeq: changeSeq.toString(),
+          }),
+        );
+      }
+      return { erased: erasedRows.length, clearedBeforeSeq };
+    },
+  );
+  app.delete<{
+    Params: { id: string };
+  }>(
+    "/messages/:id",
+    {
+      preHandler: authenticate,
+      config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      if (!uuidPattern.test(request.params.id))
+        return reply.code(400).send({ error: "invalid_request" });
+      const updated = await pool.query<{
+        id: string;
+        seq: string;
+        recipient_id: string;
+        changeSeq: string;
+      }>(
+        `${eraseMessageSql}
+         WHERE id=$1 AND sender_id=$2 AND deleted_at IS NULL
+         RETURNING id, seq::text AS seq, recipient_id, change_seq::text AS "changeSeq"`,
+        [request.params.id, request.userId],
+      );
+      if (!updated.rowCount) {
+        const own = await pool.query(
+          "SELECT 1 FROM messages WHERE id=$1 AND sender_id=$2",
+          [request.params.id, request.userId],
+        );
+        if (!own.rowCount) return reply.code(404).send({ error: "not_found" });
+        return reply.code(204).send();
+      }
+      const row = updated.rows[0]!;
+      const frame = messageDeletedSchema.parse({
+        type: "message_deleted",
+        id: row.id,
+        from: request.userId,
+        to: row.recipient_id,
+        seq: row.seq,
+        changeSeq: row.changeSeq,
+      });
+      messageHub.sendToUser(row.recipient_id, frame);
+      if (row.recipient_id !== request.userId)
+        messageHub.sendToUser(request.userId!, frame);
+      return reply.code(204).send();
+    },
+  );
   app.get<{
     Params: { peerId: string };
-    Querystring: { before?: string; after?: string; limit?: string };
+    Querystring: {
+      before?: string;
+      after?: string;
+      changedAfter?: string;
+      limit?: string;
+    };
   }>(
     "/history/:peerId",
     { preHandler: authenticate },
@@ -401,14 +549,15 @@ export async function buildApp(options: {
       const parsed = historyQuerySchema.safeParse(request.query);
       if (!parsed.success)
         return reply.code(400).send({ error: "invalid_request" });
-      const { before, after, limit } = parsed.data;
-      if (before && after)
+      const { before, after, changedAfter, limit } = parsed.data;
+      if ((before && after) || (changedAfter && (before || after)))
         return reply.code(400).send({ error: "invalid_request" });
       const forward = !!after;
       const rows = await pool.query(
         `SELECT id, seq::text AS seq, sender_id, client_msg_id AS "clientMsgId",
                 CASE WHEN sender_id=$1 THEN sender_copy ELSE ciphertext END AS payload,
-                created_at AS "createdAt", delivered_at AS "deliveredAt"
+                created_at AS "createdAt", delivered_at AS "deliveredAt",
+                change_seq::text AS "changeSeq", deleted_at IS NOT NULL AS deleted
          FROM messages WHERE ((sender_id=$1 AND recipient_id=$2) OR (sender_id=$2 AND recipient_id=$1))
            AND seq::bigint > COALESCE(
              (SELECT cleared_before_seq FROM conversation_clears WHERE user_id=$1 AND peer_id=$2),
@@ -416,18 +565,20 @@ export async function buildApp(options: {
            )
            AND ($3::bigint IS NULL OR seq::bigint < $3::bigint)
            AND ($4::bigint IS NULL OR seq::bigint > $4::bigint)
-         ORDER BY seq::bigint ${forward ? "ASC" : "DESC"} LIMIT $5`,
+           AND ($6::bigint IS NULL OR (change_seq IS NOT NULL AND change_seq > $6::bigint))
+         ORDER BY ${changedAfter ? "change_seq::bigint ASC" : `seq::bigint ${forward ? "ASC" : "DESC"}`} LIMIT $5`,
         [
           request.userId,
           request.params.peerId,
           before ?? null,
           after ?? null,
           limit + 1,
+          changedAfter ?? null,
         ],
       );
       const hasMore = rows.rows.length > limit;
       const selectedRows = rows.rows.slice(0, limit);
-      if (!forward) selectedRows.reverse();
+      if (!forward && !changedAfter) selectedRows.reverse();
       const messages = selectedRows.map((row) => ({
         id: row.id,
         seq: row.seq,
@@ -436,6 +587,8 @@ export async function buildApp(options: {
         payload: row.payload,
         createdAt: row.createdAt,
         deliveredAt: row.deliveredAt,
+        changeSeq: row.changeSeq,
+        deleted: row.deleted,
       }));
       const marker = await pool.query<{ readUpToSeq: string }>(
         `SELECT read_up_to_seq::text AS "readUpToSeq" FROM read_markers

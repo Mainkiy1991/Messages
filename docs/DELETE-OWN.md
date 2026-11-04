@@ -23,8 +23,8 @@
 - POST /conversations/:peerId/erase стирает все свои строки в этой переписке и делает очистку у себя (как существующий DELETE /conversations/:peerId). Лимит 30 в минуту. Ответ: сколько строк стёрто и clearedBeforeSeq.
 - GET /history/:peerId: у каждой строки появляются changeSeq и deleted, у стёртой payload пустой. Новый параметр changedAfter (нельзя вместе с before и after) отдаёт строки чата, у которых change_seq больше заданного.
 - GET /conversations: у каждого чата появляется lastChangeSeq.
-- WebSocket: собеседнику и другим устройствам автора уходит message_deleted {id, from, seq, changeSeq}. При стирании чата уходит одна рамка messages_erased {from, upToSeq, changeSeq}. Не доставленная ранее стёртая строка попадает в почтовый ящик собеседника с признаком deleted и пустым шифртекстом.
-- Cache-Control: no-store на /history и /conversations, чтобы браузер не держал копии ответов.
+- WebSocket: собеседнику и другим устройствам автора уходит message_deleted {id, from, to, seq, changeSeq}. При стирании чата уходит одна рамка messages_erased {from, upToSeq, changeSeq}. Не доставленная ранее стёртая строка попадает в почтовый ящик собеседника с признаком deleted и пустым шифртекстом.
+- Cache-Control: no-store на все HTTP-ответы API, чтобы браузер не держал копии ответов.
 - Шифртекст не пишется в логи и сообщения об ошибках.
 
 ## Правка на месте (этап №27b, сложная, автослияние нет)
