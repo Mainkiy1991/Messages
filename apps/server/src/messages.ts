@@ -11,6 +11,7 @@ export type MessageRow = {
   sender_copy: string;
   created_at: Date;
   delivered_at: Date | null;
+  deleted_at: Date | null;
 };
 
 export type MessageHub = {
@@ -33,7 +34,7 @@ export function createMessageHub(pool: Pool, batchSize = 200): MessageHub {
     if (pending.has(socket)) return;
     const result = await pool.query<MessageRow>(
       `SELECT id, seq::text AS seq, sender_id, recipient_id, client_msg_id, ciphertext,
-              sender_copy, created_at, delivered_at
+              sender_copy, created_at, delivered_at, deleted_at
        FROM messages
        WHERE recipient_id=$1 AND delivered_at IS NULL
          AND seq::bigint > COALESCE(
@@ -55,6 +56,7 @@ export function createMessageHub(pool: Pool, batchSize = 200): MessageHub {
         from: row.sender_id,
         ciphertext: row.ciphertext,
         createdAt: row.created_at.toISOString(),
+        ...(row.deleted_at ? { deleted: true } : {}),
       });
     }
   }

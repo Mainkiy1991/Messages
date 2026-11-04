@@ -57,14 +57,35 @@ const presenceSubscribeSchema = z
       .max(MAX_CONVERSATIONS),
   })
   .strict();
+const sequenceValueSchema = z
+  .string()
+  .regex(/^\d{1,19}$/u)
+  .refine((value) => BigInt(value) <= 9223372036854775807n);
+const userIdSchema = z.string().regex(/^[0-9a-f]{64}$/u);
 export const conversationClearedSchema = z
   .object({
     type: z.literal("conversation_cleared"),
-    peerId: z.string().regex(/^[0-9a-f]{64}$/u),
-    clearedBeforeSeq: z
-      .string()
-      .regex(/^\d{1,19}$/u)
-      .refine((value) => BigInt(value) <= 9223372036854775807n),
+    peerId: userIdSchema,
+    clearedBeforeSeq: sequenceValueSchema,
+  })
+  .strict();
+export const messageDeletedSchema = z
+  .object({
+    type: z.literal("message_deleted"),
+    id: z.string().uuid(),
+    from: userIdSchema,
+    to: userIdSchema,
+    seq: sequenceValueSchema,
+    changeSeq: sequenceValueSchema,
+  })
+  .strict();
+export const messagesErasedSchema = z
+  .object({
+    type: z.literal("messages_erased"),
+    from: userIdSchema,
+    to: userIdSchema,
+    upToSeq: sequenceValueSchema,
+    changeSeq: sequenceValueSchema,
   })
   .strict();
 
