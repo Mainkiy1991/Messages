@@ -18,7 +18,9 @@ import { loadConfig } from "./config.js";
 import {
   closeWebSocketsForToken,
   conversationClearedSchema,
+  decodeBase64Size,
   messageDeletedSchema,
+  messageUpdatedSchema,
   messagesErasedSchema,
   registerWebSocket,
 } from "./ws.js";
@@ -89,10 +91,18 @@ const contactsSchema = z
   .strict();
 const challenges = new Map<string, { challenge: string; expiresAt: number }>();
 const emptyBodySchema = z.object({}).strict();
+const base64Schema = z
+  .string()
+  .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u);
+const updateMessageBodySchema = z
+  .object({ ciphertext: base64Schema, senderCopy: base64Schema })
+  .strict();
 const uuidPattern =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const eraseMessageSql = `UPDATE messages
   SET ciphertext='', sender_copy='', deleted_at=now(), change_seq=nextval('messages_change_seq')`;
+const updateMessageSql = `UPDATE messages
+  SET ciphertext=$3, sender_copy=$4, change_seq=nextval('messages_change_seq')`;
 const clearConversationSql = `WITH maximum AS (
    SELECT max(seq::bigint) AS seq FROM messages
    WHERE (sender_id=$1 AND recipient_id=$2) OR (sender_id=$2 AND recipient_id=$1)
@@ -529,6 +539,70 @@ export async function buildApp(options: {
       messageHub.sendToUser(row.recipient_id, frame);
       if (row.recipient_id !== request.userId)
         messageHub.sendToUser(request.userId!, frame);
+      return reply.code(204).send();
+    },
+  );
+  app.put<{
+    Params: { id: string };
+  }>(
+    "/messages/:id",
+    {
+      preHandler: authenticate,
+      bodyLimit: 128 * 1024,
+      config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      if (!uuidPattern.test(request.params.id))
+        return reply.code(400).send({ error: "invalid_request" });
+      const parsed = updateMessageBodySchema.safeParse(request.body);
+      if (!parsed.success)
+        return reply.code(400).send({ error: "invalid_request" });
+      const { ciphertext, senderCopy } = parsed.data;
+      if (
+        decodeBase64Size(ciphertext) <= 0 ||
+        decodeBase64Size(ciphertext) > 64 * 1024 ||
+        decodeBase64Size(senderCopy) <= 0 ||
+        decodeBase64Size(senderCopy) > 64 * 1024
+      )
+        return reply.code(400).send({ error: "invalid_request" });
+      const updated = await pool.query<{
+        id: string;
+        seq: string;
+        recipient_id: string;
+        changeSeq: string;
+      }>(
+        `${updateMessageSql}
+         WHERE id=$1 AND sender_id=$2 AND deleted_at IS NULL
+         RETURNING id, seq::text AS seq, recipient_id, change_seq::text AS "changeSeq"`,
+        [request.params.id, request.userId, ciphertext, senderCopy],
+      );
+      if (!updated.rowCount) {
+        const own = await pool.query(
+          "SELECT 1 FROM messages WHERE id=$1 AND sender_id=$2",
+          [request.params.id, request.userId],
+        );
+        if (!own.rowCount) return reply.code(404).send({ error: "not_found" });
+        return reply.code(409).send({ error: "message_deleted" });
+      }
+      const row = updated.rows[0]!;
+      const base = {
+        type: "message_updated" as const,
+        id: row.id,
+        from: request.userId!,
+        to: row.recipient_id,
+        seq: row.seq,
+        changeSeq: row.changeSeq,
+      };
+      if (row.recipient_id !== request.userId) {
+        messageHub.sendToUser(
+          row.recipient_id,
+          messageUpdatedSchema.parse({ ...base, payload: ciphertext }),
+        );
+      }
+      messageHub.sendToUser(
+        request.userId!,
+        messageUpdatedSchema.parse({ ...base, payload: senderCopy }),
+      );
       return reply.code(204).send();
     },
   );

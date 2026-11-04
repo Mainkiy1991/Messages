@@ -22,6 +22,7 @@ import {
   parseDeleteAnswerPayload,
   parseDeleteRequestPayload,
   parseEditPayload,
+  MAX_EDIT_REV,
 } from "./index.js";
 
 const alice = deriveKeys(
@@ -831,5 +832,173 @@ describe("message delete requests", () => {
         accept: true,
       }),
     ).toThrow(TypeError);
+  });
+});
+
+describe("in-place message edits", () => {
+  const messageId = newReplayMessageId();
+  const clientMsgId = newClientMsgId();
+
+  function text(rev?: number) {
+    return rev === undefined ? "Оригинал" : `Правка ${rev}`;
+  }
+
+  function encrypt(rev?: number, id = messageId) {
+    const input = {
+      senderEncryptionPrivateKey: alice.encryption.privateKey,
+      recipientEncryptionPublicKey: bob.encryption.publicKey,
+      senderId: aliceId,
+      recipientId: bobId,
+      text: text(rev),
+      sentAt,
+      messageId: id,
+    };
+    return rev === undefined
+      ? encryptTextMessage(input)
+      : encryptTextMessage({ ...input, rev });
+  }
+
+  function encryptCopy(rev?: number, id = messageId) {
+    const input = {
+      historyKey: alice.historyKey,
+      clientMsgId,
+      senderId: aliceId,
+      peerId: bobId,
+      text: text(rev),
+      sentAt,
+      messageId: id,
+    };
+    return rev === undefined
+      ? encryptHistoryEntry(input)
+      : encryptHistoryEntry({ ...input, rev });
+  }
+
+  function decrypt(ciphertext: string) {
+    return decryptTextMessage({
+      recipientEncryptionPrivateKey: bob.encryption.privateKey,
+      senderEncryptionPublicKey: alice.encryption.publicKey,
+      senderId: aliceId,
+      recipientId: bobId,
+      ciphertext,
+    });
+  }
+
+  function decryptCopy(entry: string) {
+    return decryptHistoryEntry({
+      historyKey: alice.historyKey,
+      clientMsgId,
+      senderId: aliceId,
+      peerId: bobId,
+      entry,
+    });
+  }
+
+  function nonceOf(packed: string) {
+    return bytesToBase64(base64ToBytes(packed).subarray(17, 41));
+  }
+
+  it("round-trips a text message with an edit revision to the recipient", () => {
+    expect(decrypt(encrypt(4))).toEqual({
+      v: 2,
+      id: messageId,
+      type: "text",
+      text: "Правка 4",
+      sentAt,
+      rev: 4,
+    });
+  });
+
+  it("round-trips a history entry with an edit revision for the author", () => {
+    expect(decryptCopy(encryptCopy(2))).toEqual({
+      v: 2,
+      id: messageId,
+      type: "text",
+      text: "Правка 2",
+      sentAt,
+      rev: 2,
+    });
+  });
+
+  it("keeps the payload and result unchanged without a revision", () => {
+    const decrypted = decrypt(encrypt());
+    expect(decrypted).toEqual({
+      v: 2,
+      id: messageId,
+      type: "text",
+      text: "Оригинал",
+      sentAt,
+    });
+    expect("rev" in decrypted).toBe(false);
+    const copy = decryptCopy(encryptCopy());
+    expect(copy).toEqual({
+      v: 2,
+      id: messageId,
+      type: "text",
+      text: "Оригинал",
+      sentAt,
+    });
+    expect("rev" in copy).toBe(false);
+  });
+
+  it("accepts the boundary revisions 1 and 100", () => {
+    for (const rev of [1, MAX_EDIT_REV]) {
+      expect(decrypt(encrypt(rev))).toMatchObject({ rev, id: messageId });
+      expect(decryptCopy(encryptCopy(rev))).toMatchObject({
+        rev,
+        id: messageId,
+      });
+    }
+  });
+
+  it("rejects invalid revisions in text messages before sending", () => {
+    for (const rev of [0, 101, 1.5, -1, "1" as unknown as number]) {
+      expect(() => encrypt(rev)).toThrow(TypeError);
+    }
+  });
+
+  it("rejects invalid revisions in history entries before sending", () => {
+    for (const rev of [0, 101, 1.5, -1, "1" as unknown as number]) {
+      expect(() => encryptCopy(rev)).toThrow(TypeError);
+    }
+  });
+
+  it("encrypts an original and an edit of one message id with fresh nonces", () => {
+    const original = encrypt();
+    const edit = encrypt(5);
+    expect(nonceOf(original)).not.toBe(nonceOf(edit));
+    expect(original).not.toBe(edit);
+    expect(decrypt(original)).toMatchObject({
+      id: messageId,
+      type: "text",
+      text: "Оригинал",
+    });
+    expect(decrypt(edit)).toMatchObject({
+      id: messageId,
+      type: "text",
+      text: "Правка 5",
+      rev: 5,
+    });
+    const copyOriginal = encryptCopy();
+    const copyEdit = encryptCopy(5);
+    expect(nonceOf(copyOriginal)).not.toBe(nonceOf(copyEdit));
+    expect(copyOriginal).not.toBe(copyEdit);
+    expect(decryptCopy(copyOriginal)).toMatchObject({ id: messageId });
+    expect(decryptCopy(copyEdit)).toMatchObject({ id: messageId, rev: 5 });
+  });
+
+  it("rejects a text edit whose envelope id was replaced", () => {
+    const ciphertext = encrypt(3);
+    expect(decrypt(ciphertext)).toMatchObject({ id: messageId, rev: 3 });
+    const packed = base64ToBytes(ciphertext);
+    packed[1] ^= 1;
+    expect(() => decrypt(bytesToBase64(packed))).toThrow(DecryptError);
+  });
+
+  it("rejects a history edit whose envelope id was replaced", () => {
+    const entry = encryptCopy(3);
+    expect(decryptCopy(entry)).toMatchObject({ id: messageId, rev: 3 });
+    const packed = base64ToBytes(entry);
+    packed[1] ^= 1;
+    expect(() => decryptCopy(bytesToBase64(packed))).toThrow(DecryptError);
   });
 });

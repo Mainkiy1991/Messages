@@ -404,10 +404,12 @@ export function encryptTextMessage(input: {
   text: string;
   sentAt?: number;
   messageId?: string;
+  rev?: number;
 }): string {
   checkKey(input.senderEncryptionPrivateKey);
   checkKey(input.recipientEncryptionPublicKey);
   checkIds(input.senderId, input.recipientId);
+  if (input.rev !== undefined) checkEditRev(input.rev);
   checkText(input.text);
   return encryptMessageEnvelope({
     ...input,
@@ -417,6 +419,7 @@ export function encryptTextMessage(input: {
       type: "text",
       text: input.text,
       sentAt,
+      ...(input.rev === undefined ? {} : { rev: input.rev }),
     }),
   });
 }
@@ -598,6 +601,18 @@ export function decryptTextMessage(input: {
         return { v: 2, id, type: value.type, sentAt: value.sentAt };
       if (typeof value.text !== "string") throw new Error();
       checkText(value.text);
+      if (value.rev !== undefined) {
+        const rev = value.rev as number;
+        checkEditRev(rev);
+        return {
+          v: 2,
+          id,
+          type: "text",
+          text: value.text,
+          sentAt: value.sentAt,
+          rev,
+        };
+      }
       return {
         v: 2,
         id,
@@ -655,11 +670,13 @@ export function encryptHistoryEntry(input: {
   sentAt: number;
   senderId: string;
   messageId?: string;
+  rev?: number;
 }): string {
   checkKey(input.historyKey);
   checkId(input.clientMsgId, 32, /^[0-9a-f]{32}$/u);
   checkId(input.peerId, 64, /^[0-9a-f]{64}$/u);
   checkIds(input.senderId, input.peerId);
+  if (input.rev !== undefined) checkEditRev(input.rev);
   checkText(input.text);
   checkSentAt(input.sentAt);
   return encryptHistoryEnvelope({
@@ -670,6 +687,7 @@ export function encryptHistoryEntry(input: {
       type: "text",
       text: input.text,
       sentAt,
+      ...(input.rev === undefined ? {} : { rev: input.rev }),
     }),
   });
 }
@@ -839,6 +857,18 @@ export function decryptHistoryEntry(input: {
         return { v: 2, id, type: value.type, sentAt: value.sentAt };
       if (typeof value.text !== "string") throw new Error();
       checkText(value.text);
+      if (value.rev !== undefined) {
+        const rev = value.rev as number;
+        checkEditRev(rev);
+        return {
+          v: 2,
+          id,
+          type: "text",
+          text: value.text,
+          sentAt: value.sentAt,
+          rev,
+        };
+      }
       return {
         v: 2,
         id,

@@ -3475,4 +3475,493 @@ suite("server authentication (PostgreSQL)", () => {
     expect(unauthorized.statusCode).toBe(401);
     expect(unauthorized.headers["cache-control"]).toBe("no-store");
   });
+
+  it("replaces the author's own message in place and keeps its sequence and time", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{
+      id: string;
+      seq: string;
+      created_at: Date;
+      delivered_at: Date | null;
+    }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy,delivered_at)
+       VALUES($1,$2,$3,'Y2lwaGVy','Y29weQ==',now())
+       RETURNING id, seq::text AS seq, created_at, delivered_at`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const before = inserted.rows[0]!;
+    const headers = { authorization: `Bearer ${alice.token}` };
+    const edit = (ciphertext: string, senderCopy: string) =>
+      app.inject({
+        method: "PUT",
+        url: `/messages/${before.id}`,
+        headers,
+        payload: {
+          ciphertext: Buffer.from(ciphertext).toString("base64"),
+          senderCopy: Buffer.from(senderCopy).toString("base64"),
+        },
+      });
+    const state = async () =>
+      (
+        await pool!.query<{
+          ciphertext: string;
+          sender_copy: string;
+          deleted_at: Date | null;
+          change_seq: string | null;
+          seq: string;
+          created_at: Date;
+          delivered_at: Date | null;
+        }>(
+          `SELECT ciphertext, sender_copy, deleted_at, change_seq::text AS change_seq,
+                  seq::text AS seq, created_at, delivered_at FROM messages WHERE id=$1`,
+          [before.id],
+        )
+      ).rows[0]!;
+    const first = await edit("cipher-v2", "copy-v2");
+    expect(first.statusCode).toBe(204);
+    expect(first.body).toBe("");
+    const firstState = await state();
+    expect(firstState.ciphertext).toBe(
+      Buffer.from("cipher-v2").toString("base64"),
+    );
+    expect(firstState.sender_copy).toBe(
+      Buffer.from("copy-v2").toString("base64"),
+    );
+    expect(firstState.deleted_at).toBeNull();
+    expect(BigInt(firstState.change_seq!)).toBeGreaterThan(0n);
+    expect(firstState.seq).toBe(before.seq);
+    expect(firstState.created_at.toISOString()).toBe(
+      before.created_at.toISOString(),
+    );
+    expect(firstState.delivered_at!.toISOString()).toBe(
+      before.delivered_at!.toISOString(),
+    );
+    const second = await edit("cipher-v3", "copy-v3");
+    expect(second.statusCode).toBe(204);
+    const secondState = await state();
+    expect(BigInt(secondState.change_seq!)).toBeGreaterThan(
+      BigInt(firstState.change_seq!),
+    );
+    expect(secondState.ciphertext).toBe(
+      Buffer.from("cipher-v3").toString("base64"),
+    );
+    expect(secondState.seq).toBe(before.seq);
+    expect(secondState.created_at.toISOString()).toBe(
+      before.created_at.toISOString(),
+    );
+  });
+
+  it("sends message_updated with the ciphertext payload to an online recipient", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string; seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'Y2lwaGVy','Y29weQ==') RETURNING id, seq::text AS seq`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const message = inserted.rows[0]!;
+    const ciphertext = Buffer.from("cipher-v2").toString("base64");
+    const url = await listen();
+    const recipient = (await connectAuth(bob.token, url)).socket;
+    const updated = nextFrame(
+      recipient,
+      (frame) => frame.type === "message_updated",
+    );
+    const response = await app.inject({
+      method: "PUT",
+      url: `/messages/${message.id}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: {
+        ciphertext,
+        senderCopy: Buffer.from("copy-v2").toString("base64"),
+      },
+    });
+    expect(response.statusCode).toBe(204);
+    const change = (
+      await pool!.query<{ change_seq: string }>(
+        "SELECT change_seq::text AS change_seq FROM messages WHERE id=$1",
+        [message.id],
+      )
+    ).rows[0]!.change_seq;
+    expect(await updated).toEqual({
+      type: "message_updated",
+      id: message.id,
+      from: alice.userId,
+      to: bob.userId,
+      seq: message.seq,
+      changeSeq: change,
+      payload: ciphertext,
+    });
+    recipient.close();
+  });
+
+  it("sends the author's sender copy to the author's other devices", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string; seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'Y2lwaGVy','Y29weQ==') RETURNING id, seq::text AS seq`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const message = inserted.rows[0]!;
+    const senderCopy = Buffer.from("copy-v2").toString("base64");
+    const url = await listen();
+    const editing = (await connectAuth(alice.token, url)).socket;
+    const other = (await connectAuth(alice.token, url)).socket;
+    const otherUpdated = nextFrame(
+      other,
+      (frame) => frame.type === "message_updated",
+    );
+    const editingUpdated = nextFrame(
+      editing,
+      (frame) => frame.type === "message_updated",
+    );
+    const response = await app.inject({
+      method: "PUT",
+      url: `/messages/${message.id}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: {
+        ciphertext: Buffer.from("cipher-v2").toString("base64"),
+        senderCopy,
+      },
+    });
+    expect(response.statusCode).toBe(204);
+    expect(await otherUpdated).toMatchObject({
+      type: "message_updated",
+      id: message.id,
+      from: alice.userId,
+      to: bob.userId,
+      seq: message.seq,
+      payload: senderCopy,
+    });
+    expect(await editingUpdated).toMatchObject({
+      id: message.id,
+      payload: senderCopy,
+    });
+    editing.close();
+    other.close();
+  });
+
+  it("sends a single message_updated frame with the sender copy in Favorites", async () => {
+    const alice = await createAccount();
+    const inserted = await pool!.query<{ id: string; seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$1,$2,'YQ==','Yg==') RETURNING id, seq::text AS seq`,
+      [alice.userId, randomId()],
+    );
+    const note = inserted.rows[0]!;
+    const senderCopy = Buffer.from("copy-v2").toString("base64");
+    const url = await listen();
+    const socket = (await connectAuth(alice.token, url)).socket;
+    const updated = nextFrame(
+      socket,
+      (frame) => frame.type === "message_updated",
+    );
+    const response = await app.inject({
+      method: "PUT",
+      url: `/messages/${note.id}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: {
+        ciphertext: Buffer.from("cipher-v2").toString("base64"),
+        senderCopy,
+      },
+    });
+    expect(response.statusCode).toBe(204);
+    expect(await updated).toMatchObject({
+      type: "message_updated",
+      id: note.id,
+      from: alice.userId,
+      to: alice.userId,
+      seq: note.seq,
+      payload: senderCopy,
+    });
+    const markerMsgId = randomId();
+    const sent = nextFrame(
+      socket,
+      (frame) => frame.type === "sent" && frame.clientMsgId === markerMsgId,
+    );
+    sendFrame(socket, payload(alice.userId, markerMsgId));
+    await sent;
+    expect(
+      (frameBuffers.get(socket) ?? []).filter(
+        (frame) => frame.type === "message_updated" && frame.id === note.id,
+      ),
+    ).toHaveLength(0);
+    socket.close();
+  });
+
+  it("returns 404 for another user's message update and leaves it intact", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'Y2lwaGVy','Y29weQ==') RETURNING id`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const id = inserted.rows[0]!.id;
+    const headers = { authorization: `Bearer ${bob.token}` };
+    const body = {
+      ciphertext: Buffer.from("cipher-v2").toString("base64"),
+      senderCopy: Buffer.from("copy-v2").toString("base64"),
+    };
+    const foreign = await app.inject({
+      method: "PUT",
+      url: `/messages/${id}`,
+      headers,
+      payload: body,
+    });
+    expect(foreign.statusCode).toBe(404);
+    expect(foreign.json()).toEqual({ error: "not_found" });
+    const unknown = await app.inject({
+      method: "PUT",
+      url: `/messages/${randomUUID()}`,
+      headers,
+      payload: body,
+    });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json()).toEqual({ error: "not_found" });
+    expect(
+      (
+        await pool!.query(
+          `SELECT ciphertext, sender_copy, deleted_at, change_seq FROM messages WHERE id=$1`,
+          [id],
+        )
+      ).rows[0],
+    ).toEqual({
+      ciphertext: "Y2lwaGVy",
+      sender_copy: "Y29weQ==",
+      deleted_at: null,
+      change_seq: null,
+    });
+  });
+
+  it("returns 409 for an erased message update and keeps it empty", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'Y2lwaGVy','Y29weQ==') RETURNING id`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const id = inserted.rows[0]!.id;
+    const headers = { authorization: `Bearer ${alice.token}` };
+    expect(
+      (await app.inject({ method: "DELETE", url: `/messages/${id}`, headers }))
+        .statusCode,
+    ).toBe(204);
+    const erased = (
+      await pool!.query<{ change_seq: string; deleted_at: Date }>(
+        "SELECT change_seq::text AS change_seq, deleted_at FROM messages WHERE id=$1",
+        [id],
+      )
+    ).rows[0]!;
+    const response = await app.inject({
+      method: "PUT",
+      url: `/messages/${id}`,
+      headers,
+      payload: {
+        ciphertext: Buffer.from("cipher-v2").toString("base64"),
+        senderCopy: Buffer.from("copy-v2").toString("base64"),
+      },
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({ error: "message_deleted" });
+    expect(
+      (
+        await pool!.query(
+          `SELECT ciphertext, sender_copy, deleted_at, change_seq::text AS change_seq
+           FROM messages WHERE id=$1`,
+          [id],
+        )
+      ).rows[0],
+    ).toEqual({
+      ciphertext: "",
+      sender_copy: "",
+      deleted_at: erased.deleted_at,
+      change_seq: erased.change_seq,
+    });
+  });
+
+  it("rejects message updates with a non-UUID id or extra body fields", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'Y2lwaGVy','Y29weQ==') RETURNING id`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const id = inserted.rows[0]!.id;
+    const headers = { authorization: `Bearer ${alice.token}` };
+    const ciphertext = Buffer.from("cipher-v2").toString("base64");
+    const senderCopy = Buffer.from("copy-v2").toString("base64");
+    const malformed = await app.inject({
+      method: "PUT",
+      url: "/messages/not-a-uuid",
+      headers,
+      payload: { ciphertext, senderCopy },
+    });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json()).toEqual({ error: "invalid_request" });
+    for (const body of [
+      { ciphertext, senderCopy, to: bob.userId },
+      { ciphertext, senderCopy, rev: 1 },
+      { senderCopy },
+      {},
+    ]) {
+      const response = await app.inject({
+        method: "PUT",
+        url: `/messages/${id}`,
+        headers,
+        payload: body,
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({ error: "invalid_request" });
+    }
+    expect(
+      (
+        await pool!.query(
+          `SELECT ciphertext, sender_copy, deleted_at, change_seq FROM messages WHERE id=$1`,
+          [id],
+        )
+      ).rows[0],
+    ).toEqual({
+      ciphertext: "Y2lwaGVy",
+      sender_copy: "Y29weQ==",
+      deleted_at: null,
+      change_seq: null,
+    });
+  });
+
+  it("rejects message updates with bad base64 or oversized payloads", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'Y2lwaGVy','Y29weQ==') RETURNING id`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const id = inserted.rows[0]!.id;
+    const headers = { authorization: `Bearer ${alice.token}` };
+    const ciphertext = Buffer.from("cipher-v2").toString("base64");
+    const senderCopy = Buffer.from("copy-v2").toString("base64");
+    const oversized = Buffer.alloc(64 * 1024 + 1).toString("base64");
+    for (const body of [
+      { ciphertext, senderCopy: "%%%=" },
+      { ciphertext: "not base64!", senderCopy },
+      { ciphertext, senderCopy: "" },
+      { ciphertext: "", senderCopy },
+      { ciphertext, senderCopy: oversized },
+      { ciphertext: oversized, senderCopy },
+    ]) {
+      const response = await app.inject({
+        method: "PUT",
+        url: `/messages/${id}`,
+        headers,
+        payload: body,
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({ error: "invalid_request" });
+    }
+    expect(
+      (
+        await pool!.query(
+          `SELECT ciphertext, sender_copy, deleted_at, change_seq FROM messages WHERE id=$1`,
+          [id],
+        )
+      ).rows[0],
+    ).toEqual({
+      ciphertext: "Y2lwaGVy",
+      sender_copy: "Y29weQ==",
+      deleted_at: null,
+      change_seq: null,
+    });
+  });
+
+  it("rejects unauthenticated message updates", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'Y2lwaGVy','Y29weQ==') RETURNING id`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const response = await app.inject({
+      method: "PUT",
+      url: `/messages/${inserted.rows[0]!.id}`,
+      payload: {
+        ciphertext: Buffer.from("cipher-v2").toString("base64"),
+        senderCopy: Buffer.from("copy-v2").toString("base64"),
+      },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toEqual({ error: "unauthorized" });
+  });
+
+  it("serves the edited version and its change number, and finds it through changedAfter", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ id: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'Y2lwaGVy','Y29weQ==') RETURNING id`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const id = inserted.rows[0]!.id;
+    const ciphertext = Buffer.from("cipher-v2").toString("base64");
+    const senderCopy = Buffer.from("copy-v2").toString("base64");
+    const edited = await app.inject({
+      method: "PUT",
+      url: `/messages/${id}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: { ciphertext, senderCopy },
+    });
+    expect(edited.statusCode).toBe(204);
+    const change = (
+      await pool!.query<{ change_seq: string }>(
+        "SELECT change_seq::text AS change_seq FROM messages WHERE id=$1",
+        [id],
+      )
+    ).rows[0]!.change_seq;
+    const authorHistory = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    const peerHistory = await app.inject({
+      method: "GET",
+      url: `/history/${alice.userId}`,
+      headers: { authorization: `Bearer ${bob.token}` },
+    });
+    expect(
+      (authorHistory.json().messages as Array<{ id: string }>).find(
+        (message) => message.id === id,
+      ),
+    ).toMatchObject({ payload: senderCopy, changeSeq: change, deleted: false });
+    expect(
+      (peerHistory.json().messages as Array<{ id: string }>).find(
+        (message) => message.id === id,
+      ),
+    ).toMatchObject({ payload: ciphertext, changeSeq: change, deleted: false });
+    const changed = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}?changedAfter=0`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(
+      (changed.json().messages as Array<{ id: string; payload: string }>).map(
+        (message) => message.id,
+      ),
+    ).toContain(id);
+    expect(
+      (changed.json().messages as Array<{ id: string; payload: string }>).find(
+        (message) => message.id === id,
+      )!.payload,
+    ).toBe(senderCopy);
+    const upToDate = await app.inject({
+      method: "GET",
+      url: `/history/${bob.userId}?changedAfter=${change}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(upToDate.json().messages).toEqual([]);
+  });
 });
