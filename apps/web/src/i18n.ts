@@ -85,6 +85,7 @@ export const strings = {
     editLimit: "Это сообщение уже изменено максимальное число раз",
     editNotEditable: "Это сообщение нельзя изменить",
     editPending: "Дождитесь отправки сообщения",
+    editMessageDeleted: "Сообщение уже удалено",
     editUnknownMessage:
       "Сообщение не найдено. Обновите страницу и попробуйте снова.",
     deleteRequest: "Запросить удаление у собеседника",
@@ -227,6 +228,7 @@ export const strings = {
       "This message has already been edited the maximum number of times",
     editNotEditable: "This message cannot be edited",
     editPending: "Wait until the message is sent",
+    editMessageDeleted: "The message was already deleted",
     editUnknownMessage:
       "The message was not found. Reload the page and try again.",
     deleteRequest: "Request deletion from the other person",
@@ -368,6 +370,7 @@ export const strings = {
     editLimit: "Це повідомлення вже змінено максимальну кількість разів",
     editNotEditable: "Це повідомлення не можна змінити",
     editPending: "Зачекайте на надсилання повідомлення",
+    editMessageDeleted: "Повідомлення вже видалено",
     editUnknownMessage:
       "Повідомлення не знайдено. Оновіть сторінку та спробуйте ще раз.",
     deleteRequest: "Запросити видалення у співрозмовника",

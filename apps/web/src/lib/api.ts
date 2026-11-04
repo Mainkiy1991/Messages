@@ -19,6 +19,8 @@ export type ConversationSummary = {
   peerId: string;
   lastSeq: string;
   lastCreatedAt: string;
+  /** Highest change number of the chat; absent means the server sent none. */
+  lastChangeSeq?: string;
 };
 export type ConversationClear = {
   peerId: string;
@@ -32,6 +34,10 @@ export type HistoryMessage = {
   payload: string;
   createdAt: string;
   deliveredAt: string | null;
+  /** Set when the row was erased or edited; absent in older responses. */
+  changeSeq?: string | null;
+  /** The row was erased: its payload is empty. */
+  deleted?: boolean;
 };
 export type ContactBookResponse = { version: string; blob: string | null };
 export function resolveApiUrl(
@@ -204,6 +210,39 @@ export function getHistoryAfter(
   fetcher: FetchLike = fetch,
 ) {
   const params = new URLSearchParams({ limit: "50", after });
+  return request<{
+    messages: HistoryMessage[];
+    hasMore: boolean;
+    peerReadUpToSeq: string | null;
+  }>(fetcher, `/history/${peerId}?${params}`, token);
+}
+
+/**
+ * Replaces the content of your own message row. The body has exactly the two
+ * ciphertexts the server stores, and a successful answer is an empty 204.
+ */
+export function updateMessage(
+  id: string,
+  ciphertext: string,
+  senderCopy: string,
+  token: string,
+  fetcher: FetchLike = fetch,
+) {
+  return request<void>(fetcher, `/messages/${id}`, token, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ciphertext, senderCopy }),
+  });
+}
+
+/** Rows of one chat whose change number is above the known one. */
+export function getHistoryChangedAfter(
+  peerId: string,
+  token: string,
+  changedAfter: string,
+  fetcher: FetchLike = fetch,
+) {
+  const params = new URLSearchParams({ limit: "100", changedAfter });
   return request<{
     messages: HistoryMessage[];
     hasMore: boolean;

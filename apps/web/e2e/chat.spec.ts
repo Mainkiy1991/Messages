@@ -1496,11 +1496,15 @@ test.describe("real browser chat", () => {
     await send(a.page, "Width compare");
     await openChat(b.page, alice.id);
     const bobText = b.page.locator(".message-list .message-text");
-    await expect(bobText.filter({ hasText: "First version" })).toBeVisible();
+    /* A row is matched by the beginning of its text, not by a substring. */
+    const rowStart = (text: string) => new RegExp(`^${text}`, "u");
+    await expect(
+      bobText.filter({ hasText: rowStart("First version") }),
+    ).toBeVisible();
 
     const rows = a.page.locator('[data-testid="message-row"]');
-    const firstRow = rows.filter({ hasText: "First version" });
-    const widthRow = rows.filter({ hasText: "Width compare" });
+    const firstRow = rows.filter({ hasText: rowStart("First version") });
+    const widthRow = rows.filter({ hasText: rowStart("Width compare") });
     const firstBubble = firstRow.getByTestId("message");
     const widthBubble = widthRow.getByTestId("message");
     await expect(firstBubble).toHaveAttribute("data-status", "read");
@@ -1570,6 +1574,13 @@ test.describe("real browser chat", () => {
     await expect(a.page.getByTestId("edited-mark")).toHaveCount(1);
     await expect(b.page.getByTestId("edited-mark")).toHaveCount(1);
     await expect(b.page.getByTestId("edited-mark")).toHaveText("edited");
+    /* The edit replaced the same row: the peer has no extra bubble. */
+    const bobRows = b.page.locator('[data-testid="message-row"]');
+    await expect(bobRows).toHaveCount(2);
+    await expect(rows).toHaveCount(2);
+    await expect(bobRows.nth(0).locator(".message-text")).toHaveText(
+      "Width compare",
+    );
 
     // "edited" is a separate line under the status, with the same type.
     const markLayout = await b.page

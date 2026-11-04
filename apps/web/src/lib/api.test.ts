@@ -10,8 +10,10 @@ import {
 import { clearSession, restoreServerSession } from "../session.js";
 import {
   deleteConversation,
+  getHistoryChangedAfter,
   getUserKeys,
   loginToServer,
+  updateMessage,
   verifyUserKeys,
 } from "./api.js";
 import { resolveApiUrl } from "./api.js";
@@ -118,6 +120,53 @@ describe("API request timeout", () => {
     });
     await vi.advanceTimersByTimeAsync(10_000);
     await assertion;
+  });
+});
+
+describe("edit in place API", () => {
+  it("sends the two ciphertexts as JSON to the row of the message", async () => {
+    let requestUrl = "";
+    let requestInit: RequestInit | undefined;
+    await updateMessage(
+      "row-id",
+      "cipher-text",
+      "sender-copy",
+      "session-token",
+      async (input, init) => {
+        requestUrl = String(input);
+        requestInit = init;
+        return new Response(null, { status: 204 });
+      },
+    );
+    expect(requestUrl).toBe("http://localhost:3000/messages/row-id");
+    expect(requestInit?.method).toBe("PUT");
+    expect(new Headers(requestInit?.headers).get("Content-Type")).toBe(
+      "application/json",
+    );
+    expect(new Headers(requestInit?.headers).get("Authorization")).toBe(
+      "Bearer session-token",
+    );
+    expect(JSON.parse(String(requestInit?.body))).toEqual({
+      ciphertext: "cipher-text",
+      senderCopy: "sender-copy",
+    });
+  });
+
+  it("reads changed rows with the changedAfter cursor and a page of one hundred", async () => {
+    let requestUrl = "";
+    const page = await getHistoryChangedAfter(
+      "ab".repeat(32),
+      "session-token",
+      "42",
+      async (input) => {
+        requestUrl = String(input);
+        return Response.json({ messages: [], hasMore: false });
+      },
+    );
+    expect(requestUrl).toBe(
+      `http://localhost:3000/history/${"ab".repeat(32)}?limit=100&changedAfter=42`,
+    );
+    expect(page).toEqual({ messages: [], hasMore: false });
   });
 });
 
