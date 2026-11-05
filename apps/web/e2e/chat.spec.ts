@@ -7,6 +7,7 @@ import {
   type Page,
 } from "@playwright/test";
 import { createRequire } from "node:module";
+import { strings } from "../src/i18n.js";
 
 const require = createRequire(import.meta.url);
 const { Pool } = require("../../server/node_modules/pg") as {
@@ -23,6 +24,7 @@ type User = {
   expectedDisconnect: boolean;
   expectedContactsFailure: boolean;
   expectedDeleteFailure: boolean;
+  expectedEditFailure: boolean;
 };
 type Fixtures = {
   serverControl: { stop(): Promise<void>; start(): Promise<void> };
@@ -56,6 +58,7 @@ async function openUser(browser: Browser): Promise<User> {
     expectedDisconnect: false,
     expectedContactsFailure: false,
     expectedDeleteFailure: false,
+    expectedEditFailure: false,
   };
   page.on("pageerror", (error) =>
     user.errors.push(`pageerror: ${error.message}`),
@@ -79,12 +82,17 @@ async function openUser(browser: Browser): Promise<User> {
     const expectedDeleteFailure =
       user.expectedDeleteFailure &&
       message.text() === "Failed to load resource: net::ERR_FAILED";
+    // The same console error comes from the deliberately aborted edit request.
+    const expectedEditFailure =
+      user.expectedEditFailure &&
+      message.text() === "Failed to load resource: net::ERR_FAILED";
     // Chromium emits this network diagnostic during the deliberately stopped-server window.
     if (
       !expectedSocketRefusal &&
       !expectedApiRefusal &&
       !expectedContactsFailure &&
-      !expectedDeleteFailure
+      !expectedDeleteFailure &&
+      !expectedEditFailure
     )
       user.errors.push(`console.error: ${message.text()}`);
   });
@@ -1679,6 +1687,68 @@ test.describe("real browser chat", () => {
     await expect(banner).toHaveCount(0);
     expect(await outline(editedBubble)).toBe("none");
     await expect(a.page.getByTestId("message-input")).toHaveValue("");
+  });
+
+  test("keeps the edit draft and shows the failure above the composer at 360px", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    /* A row is matched by the beginning of its text, not by a substring. */
+    const rowStart = (text: string) => new RegExp(`^${text}`, "u");
+
+    await openChat(a.page, bob.id);
+    await send(a.page, "Version with connection");
+    await expect(
+      a.page.locator('[data-testid="message"][data-status="delivered"]'),
+    ).toContainText("Version with connection");
+    await openChat(b.page, alice.id);
+    const bobText = b.page.locator(".message-list .message-text");
+    await expect(
+      bobText.filter({ hasText: rowStart("Version with connection") }),
+    ).toBeVisible();
+
+    await a.page.setViewportSize({ width: 360, height: 640 });
+    const oldRow = a.page
+      .getByTestId("message-row")
+      .filter({ hasText: rowStart("Version with connection") });
+    await oldRow.getByTestId("message").hover();
+    await oldRow.getByTestId("edit-message").click();
+    await expect(a.page.getByTestId("edit-banner")).toBeVisible();
+    const edited = "Version without connection";
+    await a.page.getByTestId("message-input").fill(edited);
+
+    // Without a connection the PUT is cut off; the draft and the mode stay.
+    const editRoute = async (route: import("@playwright/test").Route) => {
+      if (route.request().method() === "PUT") await route.abort();
+      else await route.continue();
+    };
+    await a.page.route("**/messages/**", editRoute);
+    a.expectedEditFailure = true;
+    await a.page.getByTestId("send-message").click();
+    const composerError = a.page.getByTestId("composer-error");
+    await expect(composerError).toHaveText(strings.en.serverUnavailable);
+    a.expectedEditFailure = false;
+    await expect(a.page.getByTestId("edit-banner")).toBeVisible();
+    await expect(a.page.getByTestId("message-input")).toHaveValue(edited);
+    const errorBox = (await composerError.boundingBox())!;
+    expect(errorBox.x).toBeGreaterThanOrEqual(0);
+    expect(errorBox.y).toBeGreaterThanOrEqual(0);
+    expect(errorBox.width).toBeLessThanOrEqual(360);
+    expect(errorBox.x + errorBox.width).toBeLessThanOrEqual(360);
+    expect(errorBox.y + errorBox.height).toBeLessThanOrEqual(640);
+
+    // The same tap goes through once the route is gone.
+    await a.page.unroute("**/messages/**", editRoute);
+    await a.page.getByTestId("send-message").click();
+    await expect(a.page.getByTestId("composer-error")).toHaveCount(0);
+    await expect(a.page.getByTestId("edit-banner")).toHaveCount(0);
+    await expect(bobText.filter({ hasText: rowStart(edited) })).toBeVisible();
+    await expect(
+      bobText.filter({ hasText: rowStart("Version with connection") }),
+    ).toHaveCount(0);
   });
 
   test("requests deletion, answers it and keeps the state after reload", async ({

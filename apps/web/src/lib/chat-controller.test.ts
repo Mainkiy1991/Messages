@@ -2279,6 +2279,41 @@ describe("ChatController edits in place", () => {
       (message) => message.clientMsgId === pending.clientMsgId,
     )!;
   };
+  /* An own message loaded from history, so no live confirmation is needed. */
+  const historyRow = (input: {
+    rowId: string;
+    seq: string;
+    clientMsgId: string;
+    text: string;
+    target?: string;
+    offset?: number;
+  }) => ({
+    id: input.rowId,
+    seq: input.seq,
+    direction: "out" as const,
+    clientMsgId: input.clientMsgId,
+    payload: encryptHistoryEntry({
+      historyKey: alice.historyKey,
+      clientMsgId: input.clientMsgId,
+      peerId: bobId,
+      senderId: aliceId,
+      ...(input.target === undefined ? {} : { messageId: input.target }),
+      text: input.text,
+      sentAt,
+    }),
+    createdAt: rowTime(input.offset ?? 0),
+    deliveredAt: null,
+  });
+  /* Drops the cached peer key so the next request has to fetch it again. */
+  const dropCachedPeerKey = (
+    f: { controller: ChatController },
+    peerId: string,
+  ) => {
+    const internals = f.controller as unknown as {
+      peerKeys: Map<string, Uint8Array>;
+    };
+    internals.peerKeys.delete(peerId);
+  };
   /* Drops the socket and signs in on the next one, as after a lost connection. */
   const reconnect = async (f: { sockets: TestSocket[] }) => {
     f.sockets.at(-1)!.close(1006);
@@ -2474,6 +2509,228 @@ describe("ChatController edits in place", () => {
     expect(await first).toEqual({ ok: true });
     expect(chatOf(f, bobId)!.messages[0]!.text).toBe("one");
     expect(chatOf(f, bobId)!.messages[0]!.rev).toBe(1);
+    f.controller.stop();
+  });
+
+  it("holds the row while the peer key is still loading", async () => {
+    let hold = false;
+    let releaseKeys: (() => void) | undefined;
+    const puts: string[] = [];
+    const target = newReplayMessageId();
+    const clientMsgId = "31".repeat(16);
+    const f = makeController({
+      initialSession: session("token-a"),
+      userKeys: async () => {
+        if (hold) {
+          await new Promise<void>((resolve) => {
+            releaseKeys = resolve;
+          });
+        }
+        return userKeys(bob);
+      },
+      getHistory: async () => ({
+        hasMore: false,
+        peerReadUpToSeq: null,
+        messages: [
+          historyRow({
+            rowId: "row-1",
+            seq: "1",
+            clientMsgId,
+            text: "original",
+            target,
+          }),
+        ],
+      }),
+      updateMessage: async (id) => {
+        puts.push(id);
+      },
+    });
+    f.controller.start();
+    await waitFor(() => f.sockets.length === 1);
+    await authenticate(f.sockets[0]!);
+    await f.controller.openChat(bobId);
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
+
+    /* The peer key is no longer cached, so the edit has to fetch it again. */
+    dropCachedPeerKey(f, bobId);
+    hold = true;
+    const first = f.controller.sendEdit(bobId, target, "one");
+    expect(await f.controller.sendEdit(bobId, target, "two")).toEqual({
+      ok: false,
+      error: "edit_pending",
+    });
+    await waitFor(() => releaseKeys !== undefined);
+    releaseKeys!();
+    expect(await first).toEqual({ ok: true });
+    expect(puts).toEqual(["row-1"]);
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("one");
+    /* The same row is free again once the request is over. */
+    expect(await f.controller.sendEdit(bobId, target, "three")).toEqual({
+      ok: true,
+    });
+    expect(puts).toHaveLength(2);
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("three");
+    f.controller.stop();
+  });
+
+  it("frees the row when the peer key request fails", async () => {
+    let hold = false;
+    const puts: string[] = [];
+    const target = newReplayMessageId();
+    const clientMsgId = "32".repeat(16);
+    const f = makeController({
+      initialSession: session("token-a"),
+      userKeys: async () => {
+        if (hold) throw new TypeError("Network unavailable");
+        return userKeys(bob);
+      },
+      getHistory: async () => ({
+        hasMore: false,
+        peerReadUpToSeq: null,
+        messages: [
+          historyRow({
+            rowId: "row-1",
+            seq: "1",
+            clientMsgId,
+            text: "original",
+            target,
+          }),
+        ],
+      }),
+      updateMessage: async (id) => {
+        puts.push(id);
+      },
+    });
+    f.controller.start();
+    await waitFor(() => f.sockets.length === 1);
+    await authenticate(f.sockets[0]!);
+    await f.controller.openChat(bobId);
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
+
+    /* The peer key is no longer cached, so the edit has to fetch it again. */
+    dropCachedPeerKey(f, bobId);
+    hold = true;
+    expect(await f.controller.sendEdit(bobId, target, "one")).toEqual({
+      ok: false,
+      error: "server_unavailable",
+    });
+    expect(puts).toEqual([]);
+    /* The failed attempt left nothing in flight. */
+    hold = false;
+    expect(await f.controller.sendEdit(bobId, target, "two")).toEqual({
+      ok: true,
+    });
+    expect(puts).toEqual(["row-1"]);
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("two");
+    f.controller.stop();
+  });
+
+  it("ignores an update of a legacy row without a replay id", async () => {
+    const target = newReplayMessageId();
+    const f = makeController({
+      keys: bob,
+      userId: bobId,
+      initialSession: { ...session("token-b"), userId: bobId },
+    });
+    f.controller.start();
+    await waitFor(() => f.sockets.length === 1);
+    await authenticate(f.sockets[0]!, bobId);
+    await f.controller.openChat(aliceId);
+    /* A v1 frame has no inner id, so the row cannot be matched by an edit. */
+    f.sockets[0]!.frame({
+      type: "message",
+      id: "legacy-row",
+      from: aliceId,
+      seq: "1",
+      ciphertext:
+        "AQICAgICAgICAgICAgICAgICAgICAgICAgeF2KPOnZtjgFOw3w6S1atAt23V1Swl41qiLEmNa16oSRlJ546e4gHvOOIaDBqDcVAtlbJhAb5xyeG/3VW7Ggo/Wf0N7IQQ5x1TZRM=",
+      createdAt: rowTime(500),
+    });
+    const peerTextToBob = (text: string, messageId: string, rev?: number) =>
+      encryptTextMessage({
+        senderEncryptionPrivateKey: alice.encryption.privateKey,
+        recipientEncryptionPublicKey: bob.encryption.publicKey,
+        senderId: aliceId,
+        recipientId: bobId,
+        text,
+        sentAt,
+        messageId,
+        ...(rev === undefined ? {} : { rev }),
+      });
+    deliver(f, {
+      id: "v2-row",
+      seq: "2",
+      ciphertext: peerTextToBob("versioned text", target),
+      from: aliceId,
+    });
+    const rowOf = (rowId: string) =>
+      chatOf(f, aliceId)!.messages.find((message) => message.id === rowId)!;
+    await waitFor(
+      () =>
+        chatOf(f, aliceId)?.messages.length === 2 &&
+        rowOf("legacy-row").text === "Тест vector 👋",
+    );
+    expect(rowOf("legacy-row").replayId).toBeUndefined();
+
+    update(f, {
+      id: "legacy-row",
+      from: aliceId,
+      to: bobId,
+      seq: "1",
+      changeSeq: "3",
+      payload: peerTextToBob("legacy edit", target, 1),
+    });
+    await settle();
+    expect(rowOf("legacy-row").text).toBe("Тест vector 👋");
+    /* The same frame still applies to a row that has a replay id. */
+    update(f, {
+      id: "v2-row",
+      from: aliceId,
+      to: bobId,
+      seq: "2",
+      changeSeq: "4",
+      payload: peerTextToBob("versioned edit", target, 1),
+    });
+    await waitFor(() => rowOf("v2-row").text === "versioned edit");
+    f.controller.stop();
+  });
+
+  it("ignores an update the chat was cleared past", async () => {
+    const target = newReplayMessageId();
+    const f = await connected();
+    await f.controller.openChat(bobId);
+    deliver(f, {
+      id: "row-1",
+      seq: "10",
+      ciphertext: peerText(target, "original"),
+    });
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 1);
+    /* The row stays loaded, but the conversation was cleared up to seq 10. */
+    const internals = f.controller as unknown as {
+      clearedBeforeSeqs: Map<string, string>;
+    };
+    internals.clearedBeforeSeqs.set(bobId, "10");
+
+    update(f, {
+      id: "row-1",
+      from: bobId,
+      to: aliceId,
+      seq: "10",
+      changeSeq: "11",
+      payload: peerText(target, "late edit", 1),
+    });
+    await settle();
+    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
+    /* A row above the clear threshold still takes its update. */
+    update(f, {
+      id: "row-1",
+      from: bobId,
+      to: aliceId,
+      seq: "11",
+      changeSeq: "12",
+      payload: peerText(target, "new edit", 1),
+    });
+    await waitFor(() => chatOf(f, bobId)!.messages[0]!.text === "new edit");
     f.controller.stop();
   });
 
