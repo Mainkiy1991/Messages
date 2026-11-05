@@ -835,42 +835,6 @@ select {
   color: #5145cd;
   font-weight: 650;
 }
-.delete-notice {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 8px;
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px solid #e4e6ee;
-  min-width: 0;
-  color: #73798a;
-  font-size: 0.85rem;
-  line-height: 1.35;
-}
-.delete-notice-text {
-  flex: 1 1 12em;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.delete-notice-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 8px;
-  min-width: 0;
-}
-.delete-notice-actions button {
-  flex: 0 0 auto;
-  padding: 4px 6px;
-  font-size: 0.85rem;
-}
-.delete-notice-accept {
-  color: #5145cd;
-  font-weight: 650;
-}
-.delete-notice-keep {
-  color: #73798a;
-}
 .message-deleted {
   color: #73798a;
   font-style: italic;

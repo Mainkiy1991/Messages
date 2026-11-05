@@ -1751,154 +1751,84 @@ test.describe("real browser chat", () => {
     ).toHaveCount(0);
   });
 
-  test("requests deletion, answers it and keeps the state after reload", async ({
+  test("erases your own message for both sides and keeps the stub after reload", async ({
     browser,
   }) => {
     test.setTimeout(180_000);
-
     const a = await openUser(browser);
     const b = await openUser(browser);
     const alice = await createAccount(a.page);
     const bob = await createAccount(b.page);
 
     await openChat(a.page, bob.id);
-    await send(a.page, "Secret");
-    await send(a.page, "Other");
+    await send(a.page, "Stays in the chat");
+    await send(a.page, "Secret to erase");
     await openChat(b.page, alice.id);
+    /* A row is matched by the beginning of its text, not by a substring. */
+    const rowStart = (text: string) => new RegExp(`^${text}`, "u");
     const bobText = b.page.locator(".message-list .message-text");
-    await expect(bobText.filter({ hasText: "Secret" })).toBeVisible();
-    await expect(bobText.filter({ hasText: "Other" })).toBeVisible();
+    await expect(
+      bobText.filter({ hasText: rowStart("Secret to erase") }),
+    ).toBeVisible();
 
     const rows = a.page.locator('[data-testid="message-row"]');
-    // The state note under a message also contains the word "other", so a row
-    // is matched by the beginning of its text, which is the message itself.
-    const rowWith = (text: string) =>
-      rows.filter({ hasText: new RegExp(`^${text}`, "u") });
-    const secretRow = rowWith("Secret");
-    const otherRow = rowWith("Other");
-    const secretBubble = secretRow.getByTestId("message");
-    const otherBubble = otherRow.getByTestId("message");
-    await expect(secretBubble).toHaveAttribute("data-status", "read");
-
-    // The basket lives in the row next to the bubble, not inside it.
-    const basket = secretRow.getByTestId("request-delete");
+    const rowWith = (text: string) => rows.filter({ hasText: rowStart(text) });
+    const secretRow = rowWith("Secret to erase");
+    const basket = secretRow.getByTestId("delete-message");
+    /* The basket is icon-only and appears on hover of its own row. */
+    await expect(basket).toHaveCount(1);
+    expect((await basket.innerText()).trim()).toBe("");
+    expect(await basket.getAttribute("aria-label")).toBe("Delete message");
     const opacity = (locator: typeof basket) =>
       locator.evaluate((element) => getComputedStyle(element).opacity);
-    // The hover-only basket stays in the DOM but is invisible until hovered.
     expect(await opacity(basket)).toBe("0");
-    await secretBubble.hover();
+    await secretRow.getByTestId("message").hover();
     await expect.poll(() => opacity(basket)).toBe("1");
-
-    // Icon only: no caption, a 32x32 hit area and a 14-16px icon.
-    expect((await basket.innerText()).trim()).toBe("");
-    expect(await basket.getAttribute("aria-label")).toBe(
-      "Request deletion from the other person",
-    );
-    const basketBox = (await basket.boundingBox())!;
-    expect(basketBox.width).toBeGreaterThanOrEqual(32);
-    expect(basketBox.height).toBeGreaterThanOrEqual(32);
-    const iconSize = await basket
-      .locator("svg")
-      .evaluate((icon) => Number.parseFloat(getComputedStyle(icon).width));
-    expect(iconSize).toBeGreaterThanOrEqual(14);
-    expect(iconSize).toBeLessThanOrEqual(16);
-
-    // Pencil first, then the basket, then the bubble.
-    const pencilBox = (await secretRow
-      .getByTestId("edit-message")
-      .boundingBox())!;
-    const secretBox = (await secretBubble.boundingBox())!;
-    expect(pencilBox.x).toBeLessThan(basketBox.x);
-    expect(basketBox.x + basketBox.width).toBeLessThanOrEqual(secretBox.x + 1);
-
-    // One confirmation row at a time, then the request is sent.
     await basket.click();
+
+    /* Nothing is erased before the confirmation. */
     const confirm = a.page.getByTestId("delete-confirm");
     await expect(confirm).toBeVisible();
     await expect(confirm).toContainText(
-      "Ask the other person to delete this message?",
+      "Delete this message? Its text will be erased on the server and for the other person.",
     );
-    await confirm.getByTestId("confirm-delete-request").click();
-    await expect(confirm).toHaveCount(0);
-    await expect(secretRow.getByTestId("deletion-mark")).toHaveText(
-      "deletion requested",
-    );
-    await expect(secretBubble).toContainText("Secret");
+    await expect(
+      a.page.locator(".message-list .message-text").filter({
+        hasText: rowStart("Secret to erase"),
+      }),
+    ).toBeVisible();
+    await a.page.getByTestId("confirm-delete-message").click();
 
-    // The recipient sees the notice; the text is still there.
-    const notice = b.page.getByTestId("delete-notice");
-    await expect(notice).toHaveCount(1);
-    await expect(notice).toContainText(
-      "The other person asks to delete this message",
+    /* Your own row keeps its place and becomes a stub. */
+    await expect(a.page.getByTestId("message-deleted")).toHaveCount(1);
+    await expect(a.page.getByTestId("message-deleted")).toHaveText(
+      "You deleted this message",
     );
-    await expect(notice.getByTestId("accept-delete")).toBeVisible();
-    await expect(notice.getByTestId("keep-message")).toBeVisible();
-
-    // Narrow screen: the notice wraps instead of overflowing the message list,
-    // and the two actions stay left of the bubble inside the conversation.
-    await a.page.setViewportSize({ width: 360, height: 640 });
-    await b.page.setViewportSize({ width: 360, height: 640 });
-    await otherBubble.hover();
-    const narrowBasket = otherRow.getByTestId("request-delete");
-    const narrowPencil = otherRow.getByTestId("edit-message");
-    await expect.poll(() => opacity(narrowBasket)).toBe("1");
-    const narrowPencilBox = (await narrowPencil.boundingBox())!;
-    const narrowBasketBox = (await narrowBasket.boundingBox())!;
-    const narrowBubbleBox = (await otherBubble.boundingBox())!;
-    const conversation = (await a.page.locator(".conversation").boundingBox())!;
-    expect(narrowPencilBox.x).toBeGreaterThanOrEqual(conversation.x - 1);
-    expect(narrowBubbleBox.x).toBeGreaterThanOrEqual(
-      narrowBasketBox.x + narrowBasketBox.width - 1,
-    );
-    expect(narrowBubbleBox.x + narrowBubbleBox.width).toBeLessThanOrEqual(
-      conversation.x + conversation.width + 1,
-    );
-    await expect(notice).toBeVisible();
-    expect(
-      await b.page
-        .locator(".message-list")
-        .evaluate((list) => list.scrollWidth - list.clientWidth),
-    ).toBeLessThanOrEqual(0);
-    await a.page.setViewportSize({ width: 1440, height: 900 });
-    await b.page.setViewportSize({ width: 1440, height: 900 });
-
-    // "Keep": the notice disappears, the text stays and the author is told.
-    await notice.getByTestId("keep-message").click();
-    await expect(notice).toHaveCount(0);
-    await expect(bobText.filter({ hasText: "Secret" })).toBeVisible();
-    await expect(secretRow.getByTestId("deletion-mark")).toHaveText(
-      "the other person kept the message",
-    );
-    // A refused request cannot be repeated, so the basket is gone for good.
-    await expect(secretRow.getByTestId("request-delete")).toHaveCount(0);
-
-    // "Delete for me": the recipient loses the text, the author keeps it.
-    await otherBubble.hover();
-    await otherRow.getByTestId("request-delete").click();
-    await a.page.getByTestId("confirm-delete-request").click();
-    const secondNotice = b.page.getByTestId("delete-notice");
-    await expect(secondNotice).toHaveCount(1);
-    await secondNotice.getByTestId("accept-delete").click();
-    await expect(secondNotice).toHaveCount(0);
-    await expect(b.page.getByTestId("message-deleted")).toHaveCount(1);
-    await expect(b.page.getByTestId("message-deleted")).toHaveText(
-      "Message deleted",
-    );
-    await expect(bobText.filter({ hasText: "Other" })).toHaveCount(0);
-    await expect(otherRow.getByTestId("deletion-mark")).toHaveText(
-      "the other person deleted it on their side",
-    );
+    await expect(rows).toHaveCount(2);
     await expect(
       a.page
         .locator(".message-list .message-text")
-        .filter({ hasText: "Other" }),
+        .filter({ hasText: rowStart("Stays in the chat") }),
     ).toBeVisible();
-    // The chat list preview does not reveal the hidden text either.
+
+    /* The peer gets the stub of an erased message instead of the text. */
+    await expect(b.page.locator('[data-testid="message-row"]')).toHaveCount(2);
+    await expect(b.page.getByTestId("message-deleted")).toHaveCount(1);
+    await expect(b.page.getByTestId("message-deleted")).toHaveText(
+      "The other person deleted this message",
+    );
+
+    /* Neither the chat nor the list of chats keeps the text anywhere. */
+    expect(await a.page.content()).not.toContain("Secret to erase");
+    expect(await b.page.content()).not.toContain("Secret to erase");
+    await expect(
+      chatWith(a.page, bob.id).locator(".chat-item-copy > span"),
+    ).toHaveText("Message deleted");
     await expect(
       chatWith(b.page, alice.id).locator(".chat-item-copy > span"),
     ).toHaveText("Message deleted");
 
-    // The state comes from history, so a reload keeps it on both sides.
+    /* After a reload the stub comes from the history on both sides. */
     await a.page.reload();
     await b.page.reload();
     for (const user of [a, b]) {
@@ -1907,22 +1837,57 @@ test.describe("real browser chat", () => {
         "connected",
       );
     }
-    await expect(a.page.getByTestId("deletion-mark")).toHaveCount(2);
-    await expect(secretRow.getByTestId("deletion-mark")).toHaveText(
-      "the other person kept the message",
+    await expect(a.page.getByTestId("message-deleted")).toHaveText(
+      "You deleted this message",
     );
-    await expect(otherRow.getByTestId("deletion-mark")).toHaveText(
-      "the other person deleted it on their side",
+    await expect(b.page.getByTestId("message-deleted")).toHaveText(
+      "The other person deleted this message",
     );
+    await expect(a.page.locator('[data-testid="message-row"]')).toHaveCount(2);
+    await expect(b.page.locator('[data-testid="message-row"]')).toHaveCount(2);
+    expect(await a.page.content()).not.toContain("Secret to erase");
+    expect(await b.page.content()).not.toContain("Secret to erase");
+  });
+  test("shows the stub to a peer who was away when the message was erased", async ({
+    browser,
+  }) => {
+    test.setTimeout(180_000);
+    const a = await openUser(browser);
+    let b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+
+    await openChat(a.page, bob.id);
+    await send(a.page, "Erased while away");
+    await openChat(b.page, alice.id);
+    const rowStart = (text: string) => new RegExp(`^${text}`, "u");
     await expect(
-      a.page
+      b.page
         .locator(".message-list .message-text")
-        .filter({ hasText: "Other" }),
+        .filter({ hasText: rowStart("Erased while away") }),
     ).toBeVisible();
-    await expect(a.page.getByTestId("request-delete")).toHaveCount(0);
-    await expect(b.page.getByTestId("delete-notice")).toHaveCount(0);
+
+    /* Bob closes the tab, so the frame of the deletion reaches nobody. */
+    await b.context.close();
+
+    const rows = a.page.locator('[data-testid="message-row"]');
+    const rowWith = (text: string) => rows.filter({ hasText: rowStart(text) });
+    await rowWith("Erased while away").getByTestId("message").hover();
+    await rowWith("Erased while away").getByTestId("delete-message").click();
+    await a.page.getByTestId("confirm-delete-message").click();
+    await expect(a.page.getByTestId("message-deleted")).toHaveText(
+      "You deleted this message",
+    );
+
+    /* Bob opens the app again: the history gives a stub instead of the text. */
+    b = await openUser(browser);
+    await signIn(b.page, bob.phrase);
+    await openChat(b.page, alice.id);
+    await expect(b.page.locator('[data-testid="message-row"]')).toHaveCount(1);
     await expect(b.page.getByTestId("message-deleted")).toHaveCount(1);
-    await expect(bobText.filter({ hasText: "Other" })).toHaveCount(0);
-    await expect(bobText.filter({ hasText: "Secret" })).toBeVisible();
+    await expect(b.page.getByTestId("message-deleted")).toHaveText(
+      "The other person deleted this message",
+    );
+    expect(await b.page.content()).not.toContain("Erased while away");
   });
 });

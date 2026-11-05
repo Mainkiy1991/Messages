@@ -49,10 +49,8 @@ import {
 } from "./components/message-edit.js";
 import {
   DeleteConfirmBar,
-  DeleteRequestButton,
-  DeleteRequestNotice,
+  DeleteMessageButton,
   DeletedMessageText,
-  DeletionMark,
 } from "./components/message-delete.js";
 import {
   canEditMessage,
@@ -65,9 +63,8 @@ import {
   type MessageEditState,
 } from "./lib/message-edit.js";
 import {
-  canRequestDeletion,
+  canDeleteMessage,
   chatPreviewAfterDeletion,
-  isDeletedIncoming,
 } from "./lib/message-delete.js";
 import "./style.css";
 
@@ -588,6 +585,27 @@ function App() {
     setEditState(null);
   }, [activePeer, editState]);
   useEffect(() => {
+    /* Another device or a frame erased the row that is being edited here. */
+    if (!editState || editState.peerId !== activePeer) return;
+    const target = activeChat?.messages.find(
+      (message) =>
+        message.replayId === editState.targetId && message.direction === "out",
+    );
+    if (!target?.deleted) return;
+    setDraft(draftAfterEdit(editState));
+    setEditState(null);
+  }, [activeChat, activePeer, editState]);
+  useEffect(() => {
+    /* The row waiting for the confirmation was erased on another device. */
+    if (!deleteConfirmId) return;
+    const target = activeChat?.messages.find(
+      (message) => message.id === deleteConfirmId,
+    );
+    if (target && !target.deleted) return;
+    setDeleteConfirmId(null);
+    setDeleteError("");
+  }, [activeChat, deleteConfirmId]);
+  useEffect(() => {
     setActiveEditId(null);
     setDeleteConfirmId(null);
     setDeleteError("");
@@ -627,17 +645,11 @@ function App() {
                       ? t.editUnknownMessage
                       : code === "message_deleted"
                         ? t.editMessageDeleted
-                        : code === "message_pending"
-                          ? t.editPending
-                          : code === "not_deletable"
-                            ? t.deleteNotDeletable
-                            : code === "already_requested"
-                              ? t.deleteAlreadyRequested
-                              : code === "no_request"
-                                ? t.deleteNoRequest
-                                : code === "already_answered"
-                                  ? t.deleteAlreadyAnswered
-                                  : t.badPeerKey;
+                        : code === "not_deletable"
+                          ? t.deleteNotDeletable
+                          : code === "delete_pending"
+                            ? t.deletePending
+                            : t.badPeerKey;
   useEffect(() => {
     if (!keys || screen !== "home") return;
     let cancelled = false;
@@ -700,6 +712,12 @@ function App() {
           },
       });
       if (!result.ok) {
+        /* An erased message leaves the edit mode; the reason stays visible. */
+        if (result.error === "message_deleted") {
+          cancelEdit();
+          setComposerError(errorText(result.error));
+          return;
+        }
         setComposerError(errorText(result.error));
         return;
       }
@@ -762,8 +780,7 @@ function App() {
         hasSelection,
         actionable:
           canEditMessage(message, userId) ||
-          (canRequestDeletion({ message, userId, peerId: activePeer }) &&
-            !editState),
+          (canDeleteMessage(message) && !editState),
       }),
     );
   }
@@ -776,58 +793,33 @@ function App() {
     window.requestAnimationFrame(resizeComposer);
   }
 
-  /** Opens the confirmation row under the chat; only one request at a time. */
-  function beginDeleteRequest(message: ChatMessage) {
+  /** Opens the confirmation row above the composer; one deletion at a time. */
+  function beginDeleteMessage(message: ChatMessage) {
     if (!activePeer) return;
-    if (!canRequestDeletion({ message, userId, peerId: activePeer })) return;
-    const targetId = message.replayId;
-    if (!targetId) return;
+    if (!canDeleteMessage(message)) return;
     setActiveEditId(null);
     setDeleteError("");
-    setDeleteConfirmId(targetId);
+    setDeleteConfirmId(message.id);
   }
 
-  function cancelDeleteRequest() {
+  function cancelDeleteMessage() {
     setDeleteConfirmId(null);
     setDeleteError("");
   }
 
-  async function confirmDeleteRequest() {
+  async function confirmDeleteMessage() {
     if (!deleteConfirmId || !activePeer) return;
-    const result = await controllerRef.current?.sendDeleteRequest(
+    const result = await controllerRef.current?.deleteMessage(
       activePeer,
       deleteConfirmId,
     );
     if (!result?.ok) {
+      /* The confirmation stays open, so the attempt can be repeated. */
       setDeleteError(errorText(result?.error ?? "server_unavailable"));
       return;
     }
     setDeleteConfirmId(null);
     setDeleteError("");
-  }
-
-  /** The recipient answers the request: hide the message here or keep it. */
-  async function answerDeleteRequest(targetId: string, accept: boolean) {
-    if (!activePeer) return;
-    const result = await controllerRef.current?.sendDeleteAnswer(
-      activePeer,
-      targetId,
-      accept,
-    );
-    if (!result?.ok) {
-      setDeleteError(errorText(result?.error ?? "server_unavailable"));
-      return;
-    }
-    setDeleteError("");
-  }
-
-  /** Note under your own message: what the other person did with the request. */
-  function deletionMarkText(message: ChatMessage): string {
-    return message.deletion === "accepted"
-      ? t.deleteAccepted
-      : message.deletion === "declined"
-        ? t.deleteDeclined
-        : t.deleteRequested;
   }
 
   function retryMessage(message: ChatMessage) {
@@ -836,7 +828,8 @@ function App() {
   }
 
   function statusText(message: ChatMessage): string {
-    if (message.direction !== "out" || isSavedChat) return "";
+    if (message.direction !== "out" || isSavedChat || message.deleted)
+      return "";
     return message.status === "read"
       ? t.read
       : message.status === "delivered"
@@ -1630,13 +1623,11 @@ function App() {
                             label={t.edit}
                             onEdit={beginEdit}
                           />
-                          <DeleteRequestButton
+                          <DeleteMessageButton
                             message={message}
-                            userId={userId}
-                            peerId={activePeer}
-                            label={t.deleteRequest}
+                            label={t.deleteMessage}
                             editing={Boolean(editState)}
-                            onRequest={beginDeleteRequest}
+                            onDelete={beginDeleteMessage}
                           />
                           <article
                             data-testid="message"
@@ -1650,8 +1641,14 @@ function App() {
                             onClick={() => selectMessageForEdit(message)}
                           >
                             <div className="message-text">
-                              {isDeletedIncoming(message) ? (
-                                <DeletedMessageText label={t.messageDeleted} />
+                              {message.deleted ? (
+                                <DeletedMessageText
+                                  label={
+                                    message.direction === "out"
+                                      ? t.deletedOwnMessage
+                                      : t.deletedPeerMessage
+                                  }
+                                />
                               ) : message.decryptFailed ? (
                                 t.decryptFailed
                               ) : (
@@ -1665,39 +1662,10 @@ function App() {
                               )}
                               {statusText(message) && ` ${statusText(message)}`}
                             </small>
-                            {message.direction === "in" &&
-                              message.deletion === "pending" && (
-                                <DeleteRequestNotice
-                                  text={t.deleteNotice}
-                                  acceptLabel={t.deleteAccept}
-                                  keepLabel={t.deleteKeep}
-                                  onAccept={() => {
-                                    if (message.replayId)
-                                      void answerDeleteRequest(
-                                        message.replayId,
-                                        true,
-                                      );
-                                  }}
-                                  onKeep={() => {
-                                    if (message.replayId)
-                                      void answerDeleteRequest(
-                                        message.replayId,
-                                        false,
-                                      );
-                                  }}
-                                />
-                              )}
-                            {message.edited && !isDeletedIncoming(message) && (
+                            {message.edited && !message.deleted && (
                               <EditedMark label={t.edited} />
                             )}
-                            {message.direction === "out" &&
-                              message.deletion && (
-                                <DeletionMark
-                                  status={message.deletion}
-                                  label={deletionMarkText(message)}
-                                />
-                              )}
-                            {message.status === "error" && (
+                            {message.status === "error" && !message.deleted && (
                               <>
                                 <span className="error">
                                   {errorText(message.error ?? "send_failed")}
@@ -1742,10 +1710,10 @@ function App() {
                     {deleteConfirmId && !editState && (
                       <DeleteConfirmBar
                         text={t.deleteConfirm}
-                        sendLabel={t.deleteConfirmSend}
+                        sendLabel={t.delete}
                         cancelLabel={t.cancel}
-                        onSend={() => void confirmDeleteRequest()}
-                        onCancel={cancelDeleteRequest}
+                        onSend={() => void confirmDeleteMessage()}
+                        onCancel={cancelDeleteMessage}
                       />
                     )}
                     <form

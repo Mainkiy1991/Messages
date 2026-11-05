@@ -4,10 +4,6 @@ import {
   decryptHistoryEntry,
   decryptTextMessage,
   encryptContactBook,
-  encryptDeleteAnswerMessage,
-  encryptDeleteRequestMessage,
-  encryptHistoryDeleteAnswerEntry,
-  encryptHistoryDeleteRequestEntry,
   encryptHistoryEntry,
   encryptTextMessage,
   MAX_EDIT_REV,
@@ -25,6 +21,7 @@ import {
   getHistoryChangedAfter,
   updateMessage,
   deleteConversation,
+  deleteMessage as deleteMessageRow,
   putContacts,
   type ContactBookResponse,
   type ConversationClear,
@@ -50,8 +47,6 @@ import {
 } from "./websocket.js";
 
 export type SendStatus = "sending" | "sent" | "delivered" | "read" | "error";
-/** Where a delete request of the original author stands in this chat. */
-export type DeletionStatus = "pending" | "accepted" | "declined";
 export type ChatMessage = {
   id: string;
   clientMsgId?: string;
@@ -68,7 +63,8 @@ export type ChatMessage = {
   replayAuthor?: string;
   countedUnread?: boolean;
   edited?: boolean;
-  deletion?: DeletionStatus;
+  /** The row was erased on the server: the text is gone and stays gone. */
+  deleted?: boolean;
   /** Edit revision of the row; absent or zero means the original text. */
   rev?: number;
   /** Decrypted send time, which stays the same after an edit. */
@@ -112,15 +108,9 @@ export type SendEditError =
   | "edit_limit"
   | "message_deleted";
 export type SendEditResult = { ok: true } | { ok: false; error: SendEditError };
-/** Why a delete request or answer was rejected; the UI is a separate task. */
+/** Why deleting a message of your own was rejected; the basket hides these. */
 export type SendDeleteError =
-  | ChatError
-  | "unknown_message"
-  | "not_deletable"
-  | "message_pending"
-  | "already_requested"
-  | "no_request"
-  | "already_answered";
+  ChatError | "unknown_message" | "not_deletable" | "delete_pending";
 export type SendDeleteResult =
   { ok: true } | { ok: false; error: SendDeleteError };
 
@@ -180,6 +170,8 @@ export type ChatControllerDependencies = {
     senderCopy: string,
     token: string,
   ) => Promise<void>;
+  /** Erases the content of your own row; the answer is an empty 204. */
+  deleteMessage?: (id: string, token: string) => Promise<void>;
   getContacts?: (token: string) => Promise<ContactBookResponse>;
   getHistoryAfter?: (
     peerId: string,
@@ -229,12 +221,12 @@ export class ChatController {
   private readonly peerReadMarkers = new Map<string, string>();
   /** Row IDs whose edit request is still on its way to the server. */
   private readonly pendingEdits = new Set<string>();
+  /** Row IDs whose delete request is still on its way to the server. */
+  private readonly pendingDeletes = new Set<string>();
   /** Highest change number of a chat whose rows are already applied here. */
   private readonly knownChangeSeqs = new Map<string, string>();
   /** Last change number the conversation list reported per chat. */
   private readonly serverChangeSeqs = new Map<string, string>();
-  /** Delete requests and answers per (chat, original author, target ID). */
-  private readonly deleteStates = new Map<string, DeleteState>();
   private readonly clearedBeforeSeqs = new Map<string, string>();
   private readonly sessionLocalPeers = new Set<string>();
   private serverConversationPeers = new Set<string>();
@@ -380,9 +372,7 @@ export class ChatController {
         let sentAt: number | undefined;
         let createdAt = new Date().toISOString();
         let decryptFailed = false;
-        /* Delete requests and answers wait instead of a placeholder. */
-        let queuedState = false;
-        /* Rows of the old edit mechanism leave the queue instead of sending. */
+        /* Rows of the old mechanisms leave the queue instead of sending. */
         let dropFrame = false;
         try {
           const decrypted = decryptHistoryEntry({
@@ -392,26 +382,9 @@ export class ChatController {
             senderId: this.userId,
             entry: frame.senderCopy,
           });
-          if (decrypted.type === "edit") {
+          /* Only a text row of the current protocol is worth sending again. */
+          if (decrypted.type && decrypted.type !== "text") {
             dropFrame = true;
-          } else if (decrypted.type === "delete_request") {
-            queuedState = true;
-            if (decrypted.target)
-              this.applyDeleteRequest({
-                peerId: frame.to,
-                author: this.userId,
-                targetId: decrypted.target,
-              });
-          } else if (decrypted.type === "delete_answer") {
-            queuedState = true;
-            if (decrypted.target && typeof decrypted.accept === "boolean")
-              this.applyDeleteAnswer({
-                peerId: frame.to,
-                author: this.userId,
-                originalAuthor: frame.to,
-                targetId: decrypted.target,
-                accept: decrypted.accept,
-              });
           } else {
             text = decrypted.text ?? "";
             replayId = decrypted.id;
@@ -430,11 +403,10 @@ export class ChatController {
               frame.clientMsgId,
             );
           } catch {
-            console.warn("Could not remove a queued edit row");
+            console.warn("Could not remove a queued row of an old mechanism");
           }
           continue;
         }
-        if (queuedState) continue;
         this.upsertMessage(frame.to, {
           id: frame.clientMsgId,
           clientMsgId: frame.clientMsgId,
@@ -766,10 +738,14 @@ export class ChatController {
         if (typeof changeSeq !== "string" || !/^\d+$/u.test(changeSeq))
           continue;
         if (BigInt(changeSeq) > BigInt(next)) next = changeSeq;
-        /* Erased rows and locally cleared rows have nothing to apply. */
-        if (entry.deleted || !/^\d+$/u.test(entry.seq)) continue;
+        if (!/^\d+$/u.test(entry.seq)) continue;
         const threshold = this.clearedBeforeSeqs.get(peerId);
         if (threshold && BigInt(entry.seq) <= BigInt(threshold)) continue;
+        /* An erased row has no payload left: it only leaves a stub behind. */
+        if (entry.deleted) {
+          this.applyDeleted(peerId, entry.id, entry.direction);
+          continue;
+        }
         await this.acceptUpdatedRow({
           peerId,
           direction: entry.direction,
@@ -934,14 +910,34 @@ export class ChatController {
         });
       }
       const threshold = this.clearedBeforeSeqs.get(peerId);
-      /* Erased rows are skipped here; the placeholder is a later task. */
       const visibleMessages = page.messages.filter(
-        (entry) =>
-          !entry.deleted &&
-          (!threshold || BigInt(entry.seq) > BigInt(threshold)),
+        (entry) => !threshold || BigInt(entry.seq) > BigInt(threshold),
       );
       const messages = await Promise.all(
         visibleMessages.map(async (entry) => {
+          /* An erased row keeps its place as a stub: no text, no payload. */
+          if (entry.deleted)
+            return {
+              id: entry.id,
+              clientMsgId: entry.clientMsgId,
+              seq: entry.seq,
+              text: "",
+              createdAt: entry.createdAt,
+              direction: entry.direction,
+              ...(entry.direction === "out"
+                ? {
+                    status:
+                      page.peerReadUpToSeq &&
+                      BigInt(entry.seq) <= BigInt(page.peerReadUpToSeq)
+                        ? "read"
+                        : entry.deliveredAt
+                          ? "delivered"
+                          : "sent",
+                  }
+                : {}),
+              deleted: true,
+              arrivalOrder: this.arrivalOrder++,
+            } as ChatMessage;
           try {
             const decrypted =
               entry.direction === "out"
@@ -961,30 +957,6 @@ export class ChatController {
                     recipientId: this.userId,
                     ciphertext: entry.payload,
                   });
-            if (decrypted.type === "delete_request") {
-              /* Requests and answers are rows of the history, not messages. */
-              if (decrypted.target)
-                this.applyDeleteRequest({
-                  peerId,
-                  author: entry.direction === "out" ? this.userId : peerId,
-                  targetId: decrypted.target,
-                  seq: entry.seq,
-                });
-              return null;
-            }
-            if (decrypted.type === "delete_answer") {
-              if (decrypted.target && typeof decrypted.accept === "boolean")
-                this.applyDeleteAnswer({
-                  peerId,
-                  author: entry.direction === "out" ? this.userId : peerId,
-                  originalAuthor:
-                    entry.direction === "out" ? peerId : this.userId,
-                  targetId: decrypted.target,
-                  accept: decrypted.accept,
-                  seq: entry.seq,
-                });
-              return null;
-            }
             if (decrypted.type && decrypted.type !== "text") return null;
             return {
               id: entry.id,
@@ -1059,10 +1031,7 @@ export class ChatController {
                       );
                       return {
                         unreadCount: reconciled.unreadCount,
-                        messages: this.applyStoredEdits(
-                          peerId,
-                          mergeMessages(reconciled.messages, messages),
-                        ),
+                        messages: mergeMessages(reconciled.messages, messages),
                       };
                     })(),
                     hasMore: after ? item.hasMore : page.hasMore,
@@ -1473,6 +1442,7 @@ export class ChatController {
     if (!original) return { ok: false, error: "unknown_message" };
     if (
       original.decryptFailed ||
+      original.deleted ||
       original.direction !== "out" ||
       original.replayAuthor !== this.userId
     )
@@ -1480,9 +1450,6 @@ export class ChatController {
     if (original.status === "sending" || this.pendingEdits.has(original.id))
       return { ok: false, error: "edit_pending" };
     if (!original.clientMsgId || !original.seq || original.status === "error")
-      return { ok: false, error: "not_editable" };
-    /* A hidden or requested message is not editable until the answer declines. */
-    if (original.deletion === "pending" || original.deletion === "accepted")
       return { ok: false, error: "not_editable" };
     if (!text.trim() || Array.from(text).length > MAX_MESSAGE_CHARS)
       return { ok: false, error: "invalid_text" };
@@ -1541,7 +1508,11 @@ export class ChatController {
           put(original.id, ciphertext, senderCopy, token),
         );
       } catch (error) {
-        return { ok: false, error: editRequestError(error) };
+        const failure = editRequestError(error);
+        /* The row was erased elsewhere: leave the stub, keep the error text. */
+        if (failure === "message_deleted")
+          this.applyDeleted(peerId, original.id, "out");
+        return { ok: false, error: failure };
       }
     } finally {
       this.pendingEdits.delete(original.id);
@@ -1552,148 +1523,104 @@ export class ChatController {
   }
 
   /**
-   * Asks the peer to hide your own message. The request travels as a normal
-   * encrypted frame (queue, statuses and retries are shared with text) and is
-   * applied locally right after it is queued.
+   * Erases your own message on the server: DELETE /messages/:id by the ID of the
+   * server row, so it works for v1 rows and for saved messages too. There is no
+   * queue and no retry: without a connection the call fails and the message
+   * stays as it was. The row itself becomes a stub with an empty text.
    */
-  async sendDeleteRequest(
+  async deleteMessage(
     peerId: string,
-    targetId: string,
+    rowId: string,
   ): Promise<SendDeleteResult> {
-    const original = this.state.chats
+    const message = this.state.chats
       .find((chat) => chat.peerId === peerId)
-      ?.messages.find((message) => message.replayId === targetId);
-    if (!original) return { ok: false, error: "unknown_message" };
+      ?.messages.find((item) => item.id === rowId);
+    if (!message) return { ok: false, error: "unknown_message" };
+    /* Only your own row that the server already knows can be erased. */
     if (
-      !original.replayId ||
-      original.decryptFailed ||
-      original.direction !== "out" ||
-      original.replayAuthor !== this.userId ||
-      peerId === this.userId
+      message.direction !== "out" ||
+      message.deleted ||
+      !message.seq ||
+      message.status === "sending" ||
+      message.status === "error"
     )
       return { ok: false, error: "not_deletable" };
-    if (original.status === "sending")
-      return { ok: false, error: "message_pending" };
-    if (this.deleteStates.get(editKey(peerId, this.userId, targetId))?.request)
-      return { ok: false, error: "already_requested" };
-    let recipientEncryptionPublicKey: Uint8Array;
+    /*
+     * The row is taken before the first await, so a second tap while the
+     * session is still being ensured cannot start a parallel deletion.
+     */
+    if (this.pendingDeletes.has(message.id))
+      return { ok: false, error: "delete_pending" };
+    this.pendingDeletes.add(message.id);
     try {
-      recipientEncryptionPublicKey = await this.getVerifiedPeerKey(peerId);
+      const session = await this.connection.ensureSession();
+      const remove =
+        this.deps.deleteMessage ??
+        ((id: string, token: string) =>
+          deleteMessageRow(id, token, this.deps.fetcher));
+      await this.withFreshSession(session.token, (token) =>
+        remove(message.id, token),
+      );
     } catch (error) {
-      return { ok: false, error: this.peerKeyError(error) };
+      return { ok: false, error: deleteRequestError(error) };
+    } finally {
+      this.pendingDeletes.delete(message.id);
     }
-    const sentAt = (this.deps.now ?? Date.now)();
-    const clientMsgId = (this.deps.makeClientMsgId ?? newClientMsgId)();
-    const frame: OutgoingFrame = {
-      type: "send",
-      clientMsgId,
-      to: peerId,
-      ciphertext: encryptDeleteRequestMessage({
-        senderEncryptionPrivateKey: this.keys.encryption.privateKey,
-        recipientEncryptionPublicKey,
-        senderId: this.userId,
-        recipientId: peerId,
-        target: targetId,
-        sentAt,
-      }),
-      senderCopy: encryptHistoryDeleteRequestEntry({
-        historyKey: this.keys.historyKey,
-        clientMsgId,
-        peerId,
-        senderId: this.userId,
-        target: targetId,
-        sentAt,
-      }),
-    };
-    try {
-      await (this.deps.outbox ?? indexedDbOutbox).put(this.userId, frame);
-    } catch {
-      return { ok: false, error: "server_unavailable" };
-    }
-    this.applyDeleteRequest({ peerId, author: this.userId, targetId });
+    this.applyDeleted(peerId, message.id, "out");
     this.update({ error: "" });
-    try {
-      this.connection.send(frame);
-    } catch {
-      this.setError("server_unavailable");
-    }
     return { ok: true };
   }
 
   /**
-   * Answers a peer's delete request: `accept` hides the original at its author
-   * and in this chat. The answer is applied locally as soon as it is queued.
+   * Replaces one row with the stub of an erased message: the text, the frame,
+   * the revision, the edit note, the send time and the failure marks are gone,
+   * while the ID, the sequence, the time and the place stay. An incoming row
+   * that was counted as unread stops counting. Returns false when the chat does
+   * not hold that row, so a frame about an unknown row changes nothing.
    */
-  async sendDeleteAnswer(
+  private applyDeleted(
     peerId: string,
-    targetId: string,
-    accept: boolean,
-  ): Promise<SendDeleteResult> {
-    const original = this.state.chats
-      .find((chat) => chat.peerId === peerId)
-      ?.messages.find((message) => message.replayId === targetId);
-    if (!original) return { ok: false, error: "unknown_message" };
-    if (
-      !original.replayId ||
-      original.decryptFailed ||
-      original.direction !== "in" ||
-      original.replayAuthor !== peerId ||
-      peerId === this.userId
-    )
-      return { ok: false, error: "not_deletable" };
-    const state = this.deleteStates.get(editKey(peerId, peerId, targetId));
-    if (!state?.request) return { ok: false, error: "no_request" };
-    if (state.answer) return { ok: false, error: "already_answered" };
-    let recipientEncryptionPublicKey: Uint8Array;
-    try {
-      recipientEncryptionPublicKey = await this.getVerifiedPeerKey(peerId);
-    } catch (error) {
-      return { ok: false, error: this.peerKeyError(error) };
-    }
-    const sentAt = (this.deps.now ?? Date.now)();
-    const clientMsgId = (this.deps.makeClientMsgId ?? newClientMsgId)();
-    const frame: OutgoingFrame = {
-      type: "send",
-      clientMsgId,
-      to: peerId,
-      ciphertext: encryptDeleteAnswerMessage({
-        senderEncryptionPrivateKey: this.keys.encryption.privateKey,
-        recipientEncryptionPublicKey,
-        senderId: this.userId,
-        recipientId: peerId,
-        target: targetId,
-        accept,
-        sentAt,
-      }),
-      senderCopy: encryptHistoryDeleteAnswerEntry({
-        historyKey: this.keys.historyKey,
-        clientMsgId,
-        peerId,
-        senderId: this.userId,
-        target: targetId,
-        accept,
-        sentAt,
-      }),
+    rowId: string,
+    direction: "in" | "out",
+  ): boolean {
+    const chat = this.state.chats.find((item) => item.peerId === peerId);
+    if (!chat) return false;
+    const index = chat.messages.findIndex(
+      (message) => message.id === rowId && message.direction === direction,
+    );
+    if (index < 0) return false;
+    const previous = chat.messages[index]!;
+    const messages = chat.messages.slice();
+    const stub: ChatMessage = {
+      id: previous.id,
+      ...(previous.clientMsgId ? { clientMsgId: previous.clientMsgId } : {}),
+      ...(previous.replayId ? { replayId: previous.replayId } : {}),
+      ...(previous.replayAuthor ? { replayAuthor: previous.replayAuthor } : {}),
+      ...(previous.seq ? { seq: previous.seq } : {}),
+      ...(previous.status ? { status: previous.status } : {}),
+      createdAt: previous.createdAt,
+      direction: previous.direction,
+      arrivalOrder: previous.arrivalOrder,
+      text: "",
+      deleted: true,
     };
-    try {
-      await (this.deps.outbox ?? indexedDbOutbox).put(this.userId, frame);
-    } catch {
-      return { ok: false, error: "server_unavailable" };
-    }
-    this.applyDeleteAnswer({
-      peerId,
-      author: this.userId,
-      originalAuthor: peerId,
-      targetId,
-      accept,
+    messages[index] = stub;
+    const wasUnread =
+      previous.direction === "in" && previous.countedUnread === true;
+    this.update({
+      chats: this.state.chats.map((item) =>
+        item.peerId === peerId
+          ? {
+              ...item,
+              messages,
+              unreadCount: wasUnread
+                ? Math.max(0, item.unreadCount - 1)
+                : item.unreadCount,
+            }
+          : item,
+      ),
     });
-    this.update({ error: "" });
-    try {
-      this.connection.send(frame);
-    } catch {
-      this.setError("server_unavailable");
-    }
-    return { ok: true };
+    return true;
   }
 
   /**
@@ -1746,7 +1673,7 @@ export class ChatController {
     const message = chat?.messages.find(
       (item) => item.id === input.rowId && item.direction === input.direction,
     );
-    if (!message) return false;
+    if (!message || message.deleted) return false;
     /* The sender copy needs the client message ID of the row itself. */
     const clientMsgId = input.clientMsgId || message.clientMsgId;
     if (input.direction === "out" && !clientMsgId) return false;
@@ -1779,8 +1706,7 @@ export class ChatController {
 
   /**
    * Replaces the text of one row in place. Its time, server sequence, status and
-   * position stay, so the chat is neither reordered nor counted as unread. The
-   * stored delete states are re-applied because they own the hidden text.
+   * position stay, so the chat is neither reordered nor counted as unread.
    */
   private applyInPlaceText(
     peerId: string,
@@ -1797,122 +1723,11 @@ export class ChatController {
     if (index < 0) return;
     const messages = chat.messages.slice();
     messages[index] = { ...chat.messages[index]!, text, rev, edited: true };
-    const next = this.applyStoredEdits(peerId, messages);
-    this.update({
-      chats: this.state.chats.map((item) =>
-        item.peerId === peerId ? { ...item, messages: next } : item,
-      ),
-    });
-  }
-
-  /**
-   * A delete request is accepted only from the original author and only once
-   * per original; it never becomes a bubble, an unread count or a reorder.
-   */
-  private applyDeleteRequest(input: IncomingDeleteRequest): void {
-    /* Saved messages have no peer to ask, so nothing is tracked there. */
-    if (input.peerId === this.userId) return;
-    if (!this.registerDeleteRequest(input)) return;
-    this.refreshStoredState(input.peerId, input.targetId);
-  }
-
-  /**
-   * An answer counts only when it comes from the peer of the original author.
-   * It is stored even before its request is known, but acts after the request.
-   */
-  private applyDeleteAnswer(input: IncomingDeleteAnswer): void {
-    if (input.peerId === this.userId) return;
-    if (input.author === input.originalAuthor) return;
-    if (!this.registerDeleteAnswer(input)) return;
-    this.refreshStoredState(input.peerId, input.targetId);
-  }
-
-  /** One request per original; a lower server seq wins when both are known. */
-  private registerDeleteRequest(input: IncomingDeleteRequest): boolean {
-    const key = editKey(input.peerId, input.author, input.targetId);
-    const current = this.deleteStates.get(key);
-    if (
-      current?.request &&
-      (!input.seq ||
-        !current.request.seq ||
-        BigInt(input.seq) >= BigInt(current.request.seq))
-    )
-      return false;
-    this.deleteStates.set(key, {
-      ...current,
-      request: input.seq ? { seq: input.seq } : {},
-    });
-    return true;
-  }
-
-  /** The first answer is final; a lower server seq wins when both are known. */
-  private registerDeleteAnswer(input: IncomingDeleteAnswer): boolean {
-    const key = editKey(input.peerId, input.originalAuthor, input.targetId);
-    const current = this.deleteStates.get(key);
-    if (
-      current?.answer &&
-      (!input.seq ||
-        !current.answer.seq ||
-        BigInt(input.seq) >= BigInt(current.answer.seq))
-    )
-      return false;
-    this.deleteStates.set(key, {
-      ...current,
-      answer: {
-        accept: input.accept,
-        ...(input.seq ? { seq: input.seq } : {}),
-      },
-    });
-    return true;
-  }
-
-  /** Re-applies delete states to a chat that already holds the row. */
-  private refreshStoredState(peerId: string, targetId: string): void {
-    const chat = this.state.chats.find((item) => item.peerId === peerId);
-    if (!chat?.messages.some((message) => message.replayId === targetId))
-      return;
-    const messages = this.applyStoredEdits(peerId, chat.messages);
-    if (messages === chat.messages) return;
     this.update({
       chats: this.state.chats.map((item) =>
         item.peerId === peerId ? { ...item, messages } : item,
       ),
     });
-  }
-
-  private applyStoredEdit(peerId: string, message: ChatMessage): ChatMessage {
-    if (!message.replayId || !message.replayAuthor || message.decryptFailed)
-      return message;
-    const key = editKey(peerId, message.replayAuthor, message.replayId);
-    let result = message;
-    /* A request without an effective answer leaves the original untouched. */
-    const deletion = deletionStatus(this.deleteStates.get(key));
-    if (result.deletion !== deletion) {
-      const next: ChatMessage = { ...result };
-      if (deletion === undefined) delete next.deletion;
-      else next.deletion = deletion;
-      result = next;
-    }
-    /* The peer hid the text: keep it out of memory and drop late edits. */
-    if (result.deletion !== "accepted" || result.direction !== "in")
-      return result;
-    if (result.text === "" && result.edited === undefined) return result;
-    const cleared: ChatMessage = { ...result, text: "" };
-    delete cleared.edited;
-    return cleared;
-  }
-
-  private applyStoredEdits(
-    peerId: string,
-    messages: ChatMessage[],
-  ): ChatMessage[] {
-    let changed = false;
-    const result = messages.map((message) => {
-      const next = this.applyStoredEdit(peerId, message);
-      if (next !== message) changed = true;
-      return next;
-    });
-    return changed ? result : messages;
   }
 
   retryMessage(peerId: string, clientMsgId: string): void {
@@ -2034,14 +1849,40 @@ export class ChatController {
       return;
     }
     if (
+      frame.type === "message_deleted" &&
+      typeof frame.id === "string" &&
+      typeof frame.from === "string" &&
+      typeof frame.to === "string" &&
+      typeof frame.seq === "string" &&
+      typeof frame.changeSeq === "string"
+    ) {
+      const fromAuthor = frame.from === this.userId;
+      const peerId = fromAuthor
+        ? frame.to
+        : frame.to === this.userId
+          ? frame.from
+          : "";
+      if (!peerId) return;
+      const direction = fromAuthor ? "out" : "in";
+      const clearedBeforeSeq = this.clearedBeforeSeqs.get(peerId);
+      if (
+        /^\d+$/u.test(frame.seq) &&
+        clearedBeforeSeq &&
+        BigInt(frame.seq) <= BigInt(clearedBeforeSeq)
+      )
+        return;
+      /* An unknown row, a repeat and a foreign direction change nothing. */
+      if (this.applyDeleted(peerId, frame.id, direction))
+        this.raiseKnownChangeSeq(peerId, frame.changeSeq);
+      return;
+    }
+    if (
       frame.type === "message" &&
       typeof frame.id === "string" &&
       typeof frame.from === "string" &&
       typeof frame.ciphertext === "string" &&
       typeof frame.createdAt === "string"
     ) {
-      /* An erased row has an empty payload; its placeholder is a later task. */
-      if (frame.deleted === true) return;
       const clearedBeforeSeq = this.clearedBeforeSeqs.get(frame.from);
       if (
         typeof frame.seq === "string" &&
@@ -2050,6 +1891,21 @@ export class ChatController {
         BigInt(frame.seq) <= BigInt(clearedBeforeSeq)
       )
         return;
+      /* An erased row that was never delivered keeps its place as a stub. */
+      if (frame.deleted === true) {
+        this.upsertMessage(frame.from, {
+          id: frame.id,
+          direction: frame.from === this.userId ? "out" : "in",
+          ...(typeof frame.seq === "string" && /^\d+$/u.test(frame.seq)
+            ? { seq: frame.seq }
+            : {}),
+          createdAt: frame.createdAt,
+          text: "",
+          deleted: true,
+          arrivalOrder: this.arrivalOrder++,
+        });
+        return;
+      }
       let text = "";
       let replayId: string | undefined;
       let sentAt: number | undefined;
@@ -2068,33 +1924,6 @@ export class ChatController {
           recipientId: this.userId,
           ciphertext: frame.ciphertext,
         });
-        if (decrypted.type === "delete_request") {
-          /* A request is never a message either. */
-          if (decrypted.target)
-            this.applyDeleteRequest({
-              peerId: frame.from,
-              author: frame.from,
-              targetId: decrypted.target,
-              ...(typeof frame.seq === "string" && /^\d+$/u.test(frame.seq)
-                ? { seq: frame.seq }
-                : {}),
-            });
-          return;
-        }
-        if (decrypted.type === "delete_answer") {
-          if (decrypted.target && typeof decrypted.accept === "boolean")
-            this.applyDeleteAnswer({
-              peerId: frame.from,
-              author: frame.from,
-              originalAuthor: this.userId,
-              targetId: decrypted.target,
-              accept: decrypted.accept,
-              ...(typeof frame.seq === "string" && /^\d+$/u.test(frame.seq)
-                ? { seq: frame.seq }
-                : {}),
-            });
-          return;
-        }
         if (decrypted.type && decrypted.type !== "text") return;
         text = decrypted.text ?? "";
         replayId = decrypted.id;
@@ -2105,7 +1934,7 @@ export class ChatController {
         /* Render a safe placeholder; WebSocket still acks this frame. */
         decryptFailed = true;
       }
-      const message: ChatMessage = this.applyStoredEdit(frame.from, {
+      const message: ChatMessage = {
         id: frame.id,
         ...(replayId ? { replayId, replayAuthor: frame.from } : {}),
         text,
@@ -2120,7 +1949,7 @@ export class ChatController {
         ...plainEditFields({ rev, sentAt }),
         ...(decryptFailed ? { decryptFailed: true } : {}),
         arrivalOrder: this.arrivalOrder++,
-      });
+      };
       const existing = this.state.chats.find(
         (chat) => chat.peerId === frame.from,
       );
@@ -2300,15 +2129,12 @@ export class ChatController {
       ? {
           ...chat,
           unreadCount: unreadCount ?? chat.unreadCount,
-          messages: this.applyStoredEdits(
-            peerId,
-            mergeMessages(chat.messages, [message]),
-          ),
+          messages: mergeMessages(chat.messages, [message]),
         }
       : {
           peerId,
           unreadCount: unreadCount ?? 0,
-          messages: this.applyStoredEdits(peerId, [message]),
+          messages: [message],
         };
     const chats = chat
       ? this.state.chats.map((item) =>
@@ -2351,52 +2177,6 @@ export const WAKING_TIMEOUT_MS = 90_000;
 export const MAX_MESSAGE_CHARS = 4000;
 /** Reserve of change numbers read again on the first catch-up request. */
 const CHANGE_CATCHUP_RESERVE = 100n;
-
-/** One request and at most one answer per (chat, original author, target). */
-type DeleteState = {
-  request?: { seq?: string };
-  answer?: { accept: boolean; seq?: string };
-};
-
-type IncomingDeleteRequest = {
-  peerId: string;
-  author: string;
-  targetId: string;
-  seq?: string;
-};
-
-type IncomingDeleteAnswer = {
-  peerId: string;
-  author: string;
-  originalAuthor: string;
-  targetId: string;
-  accept: boolean;
-  seq?: string;
-};
-
-/** A delete state belongs to one chat, one author and one original message ID. */
-function editKey(peerId: string, author: string, targetId: string): string {
-  return `${peerId}\n${author}\n${targetId}`;
-}
-
-/**
- * A request without an effective answer is pending. An answer that is not
- * newer than the request in the server sequence does not act.
- */
-function deletionStatus(
-  state: DeleteState | undefined,
-): DeletionStatus | undefined {
-  if (!state?.request) return undefined;
-  const answer = state.answer;
-  if (
-    !answer ||
-    (answer.seq &&
-      state.request.seq &&
-      BigInt(answer.seq) <= BigInt(state.request.seq))
-  )
-    return "pending";
-  return answer.accept ? "accepted" : "declined";
-}
 
 export function unreadAfterHistoryMerge(
   chat: Chat,
@@ -2453,6 +2233,19 @@ function editRequestError(error: unknown): SendEditError {
   return "send_failed";
 }
 
+/** Why DELETE /messages/:id failed: a foreign or missing row, no connection. */
+function deleteRequestError(error: unknown): SendDeleteError {
+  if (error instanceof ApiError) {
+    if (error.status === 404) return "unknown_message";
+    if (error.status === 0 || error.code === "network_timeout")
+      return "server_unavailable";
+    if (error.status >= 500) return "server_unavailable";
+    return "send_failed";
+  }
+  if (error instanceof TypeError) return "server_unavailable";
+  return "send_failed";
+}
+
 function isV2Envelope(value: string): boolean {
   try {
     return base64ToBytes(value)[0] === 2;
@@ -2471,6 +2264,10 @@ function compareMessages(a: ChatMessage, b: ChatMessage): number {
   );
 }
 
+/**
+ * A message that was erased on one side stays erased: an older page, a late
+ * frame or a cached row cannot bring its text, its revision or its bubble back.
+ */
 export function mergeMessages(
   existing: ChatMessage[],
   incoming: ChatMessage[],
@@ -2490,6 +2287,27 @@ export function mergeMessages(
     if (index < 0) result.push(message);
     else {
       const previous = result[index]!;
+      if (previous.deleted || message.deleted) {
+        const erased = previous.deleted ? previous : message;
+        const other = previous.deleted ? message : previous;
+        const merged: ChatMessage = {
+          ...other,
+          ...erased,
+          text: "",
+          deleted: true,
+          status: mergeStatus(previous.status, message.status),
+        };
+        /* The stub of an erased row has neither a bubble nor an edit state. */
+        delete merged.frame;
+        delete merged.rev;
+        delete merged.edited;
+        delete merged.sentAt;
+        delete merged.error;
+        delete merged.decryptFailed;
+        delete merged.countedUnread;
+        result[index] = merged;
+        continue;
+      }
       /* A newer revision always wins, so reloading a page cannot roll an edit back. */
       const previousRev = previous.rev ?? 0;
       const incomingRev = message.rev ?? 0;
