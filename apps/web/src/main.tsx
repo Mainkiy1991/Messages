@@ -130,6 +130,8 @@ function App() {
   const [activeEditId, setActiveEditId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState("");
+  const [composerError, setComposerError] = useState("");
+  const [contactNameError, setContactNameError] = useState("");
   const [chatError, setChatError] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileSection, setProfileSection] = useState<
@@ -589,6 +591,8 @@ function App() {
     setActiveEditId(null);
     setDeleteConfirmId(null);
     setDeleteError("");
+    setComposerError("");
+    setContactNameError("");
   }, [activePeer]);
   useLayoutEffect(() => {
     const list = messageListRef.current;
@@ -696,12 +700,12 @@ function App() {
           },
       });
       if (!result.ok) {
-        setChatError(errorText(result.error));
+        setComposerError(errorText(result.error));
         return;
       }
       setEditState(null);
       setDraft(draftAfterEdit(editState));
-      setChatError("");
+      setComposerError("");
       window.requestAnimationFrame(resizeComposer);
       return;
     }
@@ -709,7 +713,7 @@ function App() {
     await controllerRef.current?.sendText(text);
     setDraft((current) => (current === text ? "" : current));
     const error = controllerRef.current?.getSnapshot().error;
-    setChatError(error ? errorText(error) : "");
+    setComposerError(error ? errorText(error) : "");
   }
 
   function resizeComposer() {
@@ -733,7 +737,7 @@ function App() {
     setDeleteConfirmId(null);
     setDeleteError("");
     setDraft(message.text);
-    setChatError("");
+    setComposerError("");
     window.requestAnimationFrame(() => {
       composerRef.current?.focus();
       resizeComposer();
@@ -768,7 +772,7 @@ function App() {
     if (!editState) return;
     setDraft(draftAfterEdit(editState));
     setEditState(null);
-    setChatError("");
+    setComposerError("");
     window.requestAnimationFrame(resizeComposer);
   }
 
@@ -1459,6 +1463,7 @@ function App() {
                             setContactNameDraft(
                               chatState.contacts[activePeer] ?? "",
                             );
+                            setContactNameError("");
                             setEditingName(true);
                           }}
                         >
@@ -1484,9 +1489,10 @@ function App() {
                                 activePeer,
                                 contactNameDraft,
                               );
-                            if (!saved) setChatError(t.contactSaveFailed);
+                            if (!saved)
+                              setContactNameError(t.contactSaveFailed);
                             else {
-                              setChatError("");
+                              setContactNameError("");
                               setEditingName(false);
                             }
                           }}
@@ -1552,6 +1558,15 @@ function App() {
                         )}
                       </div>
                     </div>
+                    {contactNameError && (
+                      <p
+                        className="error"
+                        data-testid="contact-name-error"
+                        role="alert"
+                      >
+                        {contactNameError}
+                      </p>
+                    )}
                     <div
                       className="message-list"
                       ref={messageListRef}
@@ -1706,6 +1721,15 @@ function App() {
                         role="alert"
                       >
                         {deleteError}
+                      </p>
+                    )}
+                    {composerError && (
+                      <p
+                        className="error composer-error"
+                        data-testid="composer-error"
+                        role="alert"
+                      >
+                        {composerError}
                       </p>
                     )}
                     {editState && (

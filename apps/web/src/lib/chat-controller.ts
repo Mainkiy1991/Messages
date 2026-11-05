@@ -1488,55 +1488,61 @@ export class ChatController {
       return { ok: false, error: "invalid_text" };
     const rev = (original.rev ?? 0) + 1;
     if (rev > MAX_EDIT_REV) return { ok: false, error: "edit_limit" };
-    let recipientEncryptionPublicKey: Uint8Array;
-    try {
-      recipientEncryptionPublicKey =
-        peerId === this.userId
-          ? this.keys.encryption.publicKey
-          : await this.getVerifiedPeerKey(peerId);
-    } catch (error) {
-      return { ok: false, error: this.peerKeyError(error) };
-    }
-    /* The row keeps the sent time of the original, so its place is stable. */
-    const sentAt = original.sentAt ?? Date.parse(original.createdAt);
-    let ciphertext: string;
-    let senderCopy: string;
-    try {
-      ciphertext = encryptTextMessage({
-        senderEncryptionPrivateKey: this.keys.encryption.privateKey,
-        recipientEncryptionPublicKey,
-        senderId: this.userId,
-        recipientId: peerId,
-        text,
-        sentAt,
-        messageId: targetId,
-        rev,
-      });
-      senderCopy = encryptHistoryEntry({
-        historyKey: this.keys.historyKey,
-        clientMsgId: original.clientMsgId,
-        peerId,
-        senderId: this.userId,
-        messageId: targetId,
-        text,
-        sentAt,
-        rev,
-      });
-    } catch {
-      return { ok: false, error: "send_failed" };
-    }
+    /*
+     * The row is taken before the first await, so a second tap while the peer
+     * key is still being fetched cannot start a parallel edit of the same row.
+     */
     this.pendingEdits.add(original.id);
     try {
-      const session = await this.connection.ensureSession();
-      const put =
-        this.deps.updateMessage ??
-        ((id: string, cipher: string, copy: string, token: string) =>
-          updateMessage(id, cipher, copy, token, this.deps.fetcher));
-      await this.withFreshSession(session.token, (token) =>
-        put(original.id, ciphertext, senderCopy, token),
-      );
-    } catch (error) {
-      return { ok: false, error: editRequestError(error) };
+      let recipientEncryptionPublicKey: Uint8Array;
+      try {
+        recipientEncryptionPublicKey =
+          peerId === this.userId
+            ? this.keys.encryption.publicKey
+            : await this.getVerifiedPeerKey(peerId);
+      } catch (error) {
+        return { ok: false, error: this.peerKeyError(error) };
+      }
+      /* The row keeps the sent time of the original, so its place is stable. */
+      const sentAt = original.sentAt ?? Date.parse(original.createdAt);
+      let ciphertext: string;
+      let senderCopy: string;
+      try {
+        ciphertext = encryptTextMessage({
+          senderEncryptionPrivateKey: this.keys.encryption.privateKey,
+          recipientEncryptionPublicKey,
+          senderId: this.userId,
+          recipientId: peerId,
+          text,
+          sentAt,
+          messageId: targetId,
+          rev,
+        });
+        senderCopy = encryptHistoryEntry({
+          historyKey: this.keys.historyKey,
+          clientMsgId: original.clientMsgId,
+          peerId,
+          senderId: this.userId,
+          messageId: targetId,
+          text,
+          sentAt,
+          rev,
+        });
+      } catch {
+        return { ok: false, error: "send_failed" };
+      }
+      try {
+        const session = await this.connection.ensureSession();
+        const put =
+          this.deps.updateMessage ??
+          ((id: string, cipher: string, copy: string, token: string) =>
+            updateMessage(id, cipher, copy, token, this.deps.fetcher));
+        await this.withFreshSession(session.token, (token) =>
+          put(original.id, ciphertext, senderCopy, token),
+        );
+      } catch (error) {
+        return { ok: false, error: editRequestError(error) };
+      }
     } finally {
       this.pendingEdits.delete(original.id);
     }
