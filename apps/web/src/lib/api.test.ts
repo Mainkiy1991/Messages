@@ -10,6 +10,7 @@ import {
 import { clearSession, restoreServerSession } from "../session.js";
 import {
   deleteConversation,
+  deleteMessage,
   getHistoryChangedAfter,
   getUserKeys,
   loginToServer,
@@ -167,6 +168,29 @@ describe("edit in place API", () => {
       `http://localhost:3000/history/${"ab".repeat(32)}?limit=100&changedAfter=42`,
     );
     expect(page).toEqual({ messages: [], hasMore: false });
+  });
+});
+
+describe("delete own message API", () => {
+  it("sends a bare DELETE to the server row without a body or Content-Type", async () => {
+    let requestUrl = "";
+    let requestInit: RequestInit | undefined;
+    const result = await deleteMessage(
+      "row-id",
+      "session-token",
+      async (input, init) => {
+        requestUrl = String(input);
+        requestInit = init;
+        return new Response(null, { status: 204 });
+      },
+    );
+    expect(requestUrl).toBe("http://localhost:3000/messages/row-id");
+    expect(requestInit?.method).toBe("DELETE");
+    const headers = new Headers(requestInit?.headers);
+    expect(headers.get("Content-Type")).toBeNull();
+    expect(headers.get("Authorization")).toBe("Bearer session-token");
+    expect(requestInit?.body).toBeUndefined();
+    expect(result).toBeUndefined();
   });
 });
 

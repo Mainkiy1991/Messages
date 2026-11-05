@@ -1,50 +1,23 @@
 import type { Chat, ChatMessage } from "./chat-controller.js";
 
 /**
- * The delete request is shown only where the controller would accept it: your
- * own delivered v2 message in a chat with somebody else, without a request in
- * flight and without a previous answer. The saved-messages chat is excluded
- * because deleting there has no second person to ask.
+ * The basket is shown only where the controller would accept the deletion: your
+ * own row that the server already knows, that is neither on its way nor failed
+ * and that is not erased yet. Saved messages are deletable too: their author is
+ * you, so nothing has to be agreed with a second person.
  */
-export function canRequestDeletion(input: {
-  message: Pick<
-    ChatMessage,
-    | "direction"
-    | "status"
-    | "replayId"
-    | "replayAuthor"
-    | "decryptFailed"
-    | "deletion"
-  >;
-  userId: string;
-  peerId: string;
-}): boolean {
-  const { message, userId, peerId } = input;
-  if (message.direction !== "out") return false;
-  if (!userId || !peerId) return false;
-  if (peerId === userId) return false;
-  if (message.replayAuthor !== userId) return false;
-  if (!message.replayId) return false;
-  if (message.decryptFailed) return false;
-  if (message.status === "sending" || message.status === "error") return false;
-  if (message.deletion !== undefined) return false;
-  return true;
-}
-
-/**
- * The other person agreed to hide the message, so its text and the "edited"
- * note are replaced by a stub. A declined request changes nothing.
- */
-export function isDeletedIncoming(
-  message: Pick<ChatMessage, "direction" | "deletion">,
+export function canDeleteMessage(
+  message: Pick<ChatMessage, "direction" | "status" | "deleted" | "seq">,
 ): boolean {
-  return message.direction === "in" && message.deletion === "accepted";
+  if (message.direction !== "out") return false;
+  if (message.deleted) return false;
+  if (message.status === "sending" || message.status === "error") return false;
+  return Boolean(message.seq);
 }
 
 /**
  * The chat list shows the text of the last message, which would reveal a
- * message the other person has just agreed to hide. `null` keeps the ordinary
- * preview of `chatPreview`.
+ * message that was erased. `null` keeps the ordinary preview of `chatPreview`.
  */
 export function chatPreviewAfterDeletion(
   chat: Pick<Chat, "loadingHistory" | "messages">,
@@ -52,6 +25,6 @@ export function chatPreviewAfterDeletion(
 ): string | null {
   if (chat.loadingHistory) return null;
   const latest = chat.messages.at(-1);
-  if (!latest || !isDeletedIncoming(latest)) return null;
+  if (!latest?.deleted) return null;
   return messageDeleted;
 }

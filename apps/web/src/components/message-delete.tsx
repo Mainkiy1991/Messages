@@ -1,37 +1,33 @@
-import type { ChatMessage, DeletionStatus } from "../lib/chat-controller.js";
-import { canRequestDeletion } from "../lib/message-delete.js";
+import type { ChatMessage } from "../lib/chat-controller.js";
+import { canDeleteMessage } from "../lib/message-delete.js";
 
 /**
  * Basket action of your own bubble. It sits next to the pencil and is icon-only:
  * the caption lives in `aria-label`/`title` so the bubble never grows. It is
- * hidden while the message is being edited and wherever a request makes no
- * sense (foreign, unsent, failed, already asked or answered, saved messages).
+ * hidden while the message is being edited and wherever deletion makes no sense
+ * (foreign, unsent, failed, already erased).
  */
-export function DeleteRequestButton({
+export function DeleteMessageButton({
   message,
-  userId,
-  peerId,
   label,
   editing,
-  onRequest,
+  onDelete,
 }: {
   message: ChatMessage;
-  userId: string;
-  peerId: string;
   label: string;
   editing?: boolean;
-  onRequest: (message: ChatMessage) => void;
+  onDelete: (message: ChatMessage) => void;
 }) {
   if (editing) return null;
-  if (!canRequestDeletion({ message, userId, peerId })) return null;
+  if (!canDeleteMessage(message)) return null;
   return (
     <button
       type="button"
       className="message-delete"
-      data-testid="request-delete"
+      data-testid="delete-message"
       aria-label={label}
       title={label}
-      onClick={() => onRequest(message)}
+      onClick={() => onDelete(message)}
     >
       <svg
         className="message-delete-icon"
@@ -69,7 +65,7 @@ export function DeleteConfirmBar({
         <button
           type="button"
           className="text-button delete-confirm-send"
-          data-testid="confirm-delete-request"
+          data-testid="confirm-delete-message"
           onClick={onSend}
         >
           {sendLabel}
@@ -77,7 +73,7 @@ export function DeleteConfirmBar({
         <button
           type="button"
           className="text-button edit-banner-cancel"
-          data-testid="cancel-delete-request"
+          data-testid="cancel-delete-message"
           onClick={onCancel}
         >
           {cancelLabel}
@@ -87,65 +83,7 @@ export function DeleteConfirmBar({
   );
 }
 
-/** Notice inside the bubble of the recipient: delete here or keep it. */
-export function DeleteRequestNotice({
-  text,
-  acceptLabel,
-  keepLabel,
-  onAccept,
-  onKeep,
-}: {
-  text: string;
-  acceptLabel: string;
-  keepLabel: string;
-  onAccept: () => void;
-  onKeep: () => void;
-}) {
-  return (
-    <div className="delete-notice" data-testid="delete-notice">
-      <span className="delete-notice-text">{text}</span>
-      <span className="delete-notice-actions">
-        <button
-          type="button"
-          className="text-button delete-notice-accept"
-          data-testid="accept-delete"
-          onClick={onAccept}
-        >
-          {acceptLabel}
-        </button>
-        <button
-          type="button"
-          className="text-button delete-notice-keep"
-          data-testid="keep-message"
-          onClick={onKeep}
-        >
-          {keepLabel}
-        </button>
-      </span>
-    </div>
-  );
-}
-
-/** State of the request under the status of your own message. */
-export function DeletionMark({
-  status,
-  label,
-}: {
-  status: DeletionStatus;
-  label: string;
-}) {
-  return (
-    <span
-      className="edited-mark"
-      data-testid="deletion-mark"
-      data-deletion={status}
-    >
-      {label}
-    </span>
-  );
-}
-
-/** Stub that replaces the text the other person agreed to hide. */
+/** Stub that replaces the text of an erased message. */
 export function DeletedMessageText({ label }: { label: string }) {
   return (
     <span className="message-deleted" data-testid="message-deleted">
