@@ -6,12 +6,6 @@ import {
   decryptTextMessage,
   deriveKeys,
   encryptContactBook,
-  encryptDeleteAnswerMessage,
-  encryptDeleteRequestMessage,
-  encryptEditMessage,
-  encryptHistoryDeleteAnswerEntry,
-  encryptHistoryDeleteRequestEntry,
-  encryptHistoryEditEntry,
   encryptHistoryEntry,
   encryptTextMessage,
   newReplayMessageId,
@@ -27,7 +21,7 @@ import {
   type ChatControllerDependencies,
   type ChatMessage,
 } from "./chat-controller.js";
-import type { IncomingFrame, OutgoingFrame } from "./websocket.js";
+import type { IncomingFrame } from "./websocket.js";
 import type { ServerSession } from "../session.js";
 
 const alice = deriveKeys(
@@ -48,6 +42,13 @@ const session = (token: string): ServerSession => ({
   expiresAt: future(),
   userId: aliceId,
 });
+const legacyNonTextCiphertexts = {
+  edit: "AgEBAQEBAQEBAQEBAQEBAQGWs+NWSWulnCPh1jBKTyyajaskYk+GViejcKwpEwTAw8A/HPT2Y+ftzYNVQUOw76y8Db1ijPQlaiy1TE1L+rV11EIXgnKXuRqBI/k8bsPLWje/+EscVo+5O2ulkC+GbN9xGILghFze93cduzSMiyEzb4jPHDdGypmY0hmhi3WFlZe+U2TjjDvVL24OmFloJTrwWZv+wvORKnAM3GEO8N3WNnSKXmlC1SXjEgJ6TW+x0NC0",
+  delete_request:
+    "AgEBAQEBAQEBAQEBAQEBAQGhnARIQpsNtmdZ27i0PwuAKTt8vsYI7Yh/0+MhCM2H/RV40AZFsYrDFS9WDAeV0ESYLALPDG7kOKLmR+AdtnfFYdSFpeKAXcs40kDcand+IFpKuYEi6+HtNF1ogrbtAPaZyHTcDH7PtZxbFWHig4FUnkvJu3cxPI2ZKpVVKFn1dNT5AshLLe1BMnKYRu1G0YzYh/G9L+8r5u+xW4kcUbYH/p8=",
+  delete_answer:
+    "AgEBAQEBAQEBAQEBAQEBAQHWhZZjrgppFGMKODjVhbwHNv1eruyP++GgSzvmBRs1YQaxHHuVOpoMOvArAj1fUcqjRRse/2Juo+h01LMGMHn5miakHNg074MG/LKr/uG5283h+1jLVB5LmIVOPRuwUpXK1fw1otlzGfkQGNufG1DqiZ8YHEf42UPRnrjdGOnyFn8RVsd0ZbXBR9Eb4SxVvppuJhKApykiQQ1dpuhw17gjBzd/Pr6YMnI4+5WK/cK0",
+};
 const userKeys = (keys: typeof alice): UserKeys => ({
   userId: bytesToHex(keys.identity.publicKey),
   encryptionPublicKey: bytesToHex(keys.encryption.publicKey),
@@ -111,6 +112,7 @@ function makeController(
     logout?: (token: string) => Promise<void>;
     getConversations?: ChatControllerDependencies["getConversations"];
     deleteConversation?: ChatControllerDependencies["deleteConversation"];
+    eraseConversation?: ChatControllerDependencies["eraseConversation"];
     getContacts?: ChatControllerDependencies["getContacts"];
     getHistory?: ChatControllerDependencies["getHistory"];
     getHistoryAfter?: ChatControllerDependencies["getHistoryAfter"];
@@ -154,6 +156,7 @@ function makeController(
       logout: options.logout,
       getConversations: options.getConversations,
       deleteConversation: options.deleteConversation,
+      eraseConversation: options.eraseConversation,
       getContacts: options.getContacts,
       getHistory: options.getHistory,
       getHistoryAfter: options.getHistoryAfter,
@@ -1468,7 +1471,7 @@ describe("ChatController", () => {
       getHistory: async () => ({ hasMore: false, messages: [] }),
     });
     await f.controller.openChat(bobId);
-    const deleted = await f.controller.deleteChat(bobId);
+    const deleted = await f.controller.clearChat(bobId);
     expect(deleted).toBe(false);
     expect(
       f.controller.getSnapshot().chats.map((chat) => chat.peerId),
@@ -2926,17 +2929,8 @@ describe("ChatController edits in place", () => {
     send(peerText(newReplayMessageId(), "wrong id", 1));
     await settle();
     expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
-    /* Not a text payload: a delete request cannot replace a text. */
-    send(
-      encryptDeleteRequestMessage({
-        senderEncryptionPrivateKey: bob.encryption.privateKey,
-        recipientEncryptionPublicKey: alice.encryption.publicKey,
-        senderId: bobId,
-        recipientId: aliceId,
-        target,
-        sentAt: sentAt + 500,
-      }),
-    );
+    /* A legacy non-text type cannot replace the row's current revision. */
+    send(legacyNonTextCiphertexts.delete_request);
     await settle();
     expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
     /* Broken base64 must not even produce a placeholder. */
@@ -3052,246 +3046,26 @@ describe("ChatController edits in place", () => {
     });
   });
 
-  it("skips rows of the old mechanisms in history, frames and the queue", async () => {
-    const target = newReplayMessageId();
-    const clientMsgId = "14".repeat(16);
-    const editClientMsgId = "15".repeat(16);
-    const requestClientMsgId = "16".repeat(16);
-    const answerClientMsgId = "17".repeat(16);
-    const removed: string[] = [];
-    const queued: OutgoingFrame[] = [
-      {
-        type: "send",
-        clientMsgId: editClientMsgId,
-        to: bobId,
-        ciphertext: encryptEditMessage({
-          senderEncryptionPrivateKey: alice.encryption.privateKey,
-          recipientEncryptionPublicKey: bob.encryption.publicKey,
-          senderId: aliceId,
-          recipientId: bobId,
-          target,
-          rev: 1,
-          text: "queued old edit",
-          sentAt,
-        }),
-        senderCopy: encryptHistoryEditEntry({
-          historyKey: alice.historyKey,
-          clientMsgId: editClientMsgId,
-          peerId: bobId,
-          senderId: aliceId,
-          target,
-          rev: 1,
-          text: "queued old edit",
-          sentAt,
-        }),
-      },
-      {
-        type: "send",
-        clientMsgId: requestClientMsgId,
-        to: bobId,
-        ciphertext: encryptDeleteRequestMessage({
-          senderEncryptionPrivateKey: alice.encryption.privateKey,
-          recipientEncryptionPublicKey: bob.encryption.publicKey,
-          senderId: aliceId,
-          recipientId: bobId,
-          target,
-          sentAt,
-        }),
-        senderCopy: encryptHistoryDeleteRequestEntry({
-          historyKey: alice.historyKey,
-          clientMsgId: requestClientMsgId,
-          peerId: bobId,
-          senderId: aliceId,
-          target,
-          sentAt,
-        }),
-      },
-      {
-        type: "send",
-        clientMsgId: answerClientMsgId,
-        to: bobId,
-        ciphertext: encryptDeleteAnswerMessage({
-          senderEncryptionPrivateKey: alice.encryption.privateKey,
-          recipientEncryptionPublicKey: bob.encryption.publicKey,
-          senderId: aliceId,
-          recipientId: bobId,
-          target,
-          accept: true,
-          sentAt,
-        }),
-        senderCopy: encryptHistoryDeleteAnswerEntry({
-          historyKey: alice.historyKey,
-          clientMsgId: answerClientMsgId,
-          peerId: bobId,
-          senderId: aliceId,
-          target,
-          accept: true,
-          sentAt,
-        }),
-      },
-    ];
-    const f = makeController({
-      initialSession: session("token-a"),
-      outbox: {
-        list: async () => queued,
-        put: async () => undefined,
-        remove: async (_userId, id) => {
-          removed.push(id);
-          const index = queued.findIndex((frame) => frame.clientMsgId === id);
-          if (index >= 0) queued.splice(index, 1);
-        },
-        clear: async () => undefined,
-      },
-      getHistory: async () => ({
-        hasMore: false,
-        peerReadUpToSeq: null,
-        messages: [
-          {
-            id: "row-1",
-            seq: "1",
-            direction: "out" as const,
-            clientMsgId,
-            payload: encryptHistoryEntry({
-              historyKey: alice.historyKey,
-              clientMsgId,
-              peerId: bobId,
-              senderId: aliceId,
-              messageId: target,
-              text: "original",
-              sentAt,
-            }),
-            createdAt: rowTime(),
-            deliveredAt: null,
-          },
-          {
-            id: "row-2",
-            seq: "2",
-            direction: "out" as const,
-            clientMsgId: editClientMsgId,
-            payload: encryptHistoryEditEntry({
-              historyKey: alice.historyKey,
-              clientMsgId: editClientMsgId,
-              peerId: bobId,
-              senderId: aliceId,
-              target,
-              rev: 1,
-              text: "old edit row",
-              sentAt: sentAt + 1000,
-            }),
-            createdAt: rowTime(1000),
-            deliveredAt: null,
-          },
-          {
-            id: "row-3",
-            seq: "3",
-            direction: "out" as const,
-            clientMsgId: requestClientMsgId,
-            payload: encryptHistoryDeleteRequestEntry({
-              historyKey: alice.historyKey,
-              clientMsgId: requestClientMsgId,
-              peerId: bobId,
-              senderId: aliceId,
-              target,
-              sentAt: sentAt + 1500,
-            }),
-            createdAt: rowTime(1500),
-            deliveredAt: null,
-          },
-          {
-            id: "row-4",
-            seq: "4",
-            direction: "out" as const,
-            clientMsgId: answerClientMsgId,
-            payload: encryptHistoryDeleteAnswerEntry({
-              historyKey: alice.historyKey,
-              clientMsgId: answerClientMsgId,
-              peerId: bobId,
-              senderId: aliceId,
-              target,
-              accept: true,
-              sentAt: sentAt + 2000,
-            }),
-            createdAt: rowTime(2000),
-            deliveredAt: null,
-          },
-        ],
-      }),
-    });
-    f.controller.start();
-    await waitFor(() => f.sockets.length === 1);
-    await authenticate(f.sockets[0]!);
+  it("silently skips legacy edit and delete protocol messages", async () => {
+    const f = await connected();
     await f.controller.openChat(bobId);
-    await waitFor(() => chatOf(f, bobId)?.historyLoaded === true);
+    for (const [index, ciphertext] of Object.values(
+      legacyNonTextCiphertexts,
+    ).entries()) {
+      f.sockets[0]!.frame({
+        type: "message",
+        id: `legacy-row-${index}`,
+        from: bobId,
+        seq: String(index + 1),
+        ciphertext,
+        createdAt: rowTime(index * 500),
+      });
+    }
     await settle();
-    expect(removed).toEqual(
-      expect.arrayContaining([
-        editClientMsgId,
-        requestClientMsgId,
-        answerClientMsgId,
-      ]),
-    );
-    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
-    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
+    expect(chatOf(f, bobId)?.messages).toEqual([]);
     expect(
-      f.sockets[0]!.decoded().some(
-        (frame) =>
-          frame.clientMsgId === editClientMsgId ||
-          frame.clientMsgId === requestClientMsgId ||
-          frame.clientMsgId === answerClientMsgId,
-      ),
+      chatOf(f, bobId)?.messages.some((message) => message.decryptFailed),
     ).toBe(false);
-    /* A live frame of an old mechanism is skipped as an unknown type. */
-    f.sockets[0]!.frame({
-      type: "message",
-      id: "row-5",
-      from: bobId,
-      seq: "5",
-      ciphertext: encryptEditMessage({
-        senderEncryptionPrivateKey: bob.encryption.privateKey,
-        recipientEncryptionPublicKey: alice.encryption.publicKey,
-        senderId: bobId,
-        recipientId: aliceId,
-        target,
-        rev: 1,
-        text: "old frame edit",
-        sentAt: sentAt + 2500,
-      }),
-      createdAt: rowTime(2500),
-    });
-    f.sockets[0]!.frame({
-      type: "message",
-      id: "row-6",
-      from: bobId,
-      seq: "6",
-      ciphertext: encryptDeleteRequestMessage({
-        senderEncryptionPrivateKey: bob.encryption.privateKey,
-        recipientEncryptionPublicKey: alice.encryption.publicKey,
-        senderId: bobId,
-        recipientId: aliceId,
-        target,
-        sentAt: sentAt + 3000,
-      }),
-      createdAt: rowTime(3000),
-    });
-    f.sockets[0]!.frame({
-      type: "message",
-      id: "row-7",
-      from: bobId,
-      seq: "7",
-      ciphertext: encryptDeleteAnswerMessage({
-        senderEncryptionPrivateKey: bob.encryption.privateKey,
-        recipientEncryptionPublicKey: alice.encryption.publicKey,
-        senderId: bobId,
-        recipientId: aliceId,
-        target,
-        accept: true,
-        sentAt: sentAt + 3500,
-      }),
-      createdAt: rowTime(3500),
-    });
-    await settle();
-    expect(chatOf(f, bobId)!.messages).toHaveLength(1);
-    expect(chatOf(f, bobId)!.messages[0]!.text).toBe("original");
     f.controller.stop();
   });
 
@@ -3630,6 +3404,15 @@ describe("ChatController deletes own messages", () => {
       changeSeq: string;
     },
   ) => f.sockets[0]!.frame({ type: "message_deleted", ...row });
+  const messagesErasedFrame = (
+    f: { sockets: TestSocket[] },
+    row: {
+      from: string;
+      to: string;
+      upToSeq: string;
+      changeSeq: string;
+    },
+  ) => f.sockets[0]!.frame({ type: "messages_erased", ...row });
   /* Sends your own text and lets the server confirm the row and its sequence. */
   const sendFromAlice = async (
     f: { controller: ChatController; sockets: TestSocket[] },
@@ -3656,6 +3439,102 @@ describe("ChatController deletes own messages", () => {
       (message) => message.clientMsgId === pending.clientMsgId,
     )!;
   };
+
+  it("deletes a chat only after the server erase succeeds", async () => {
+    const calls: Array<{ peerId: string; token: string }> = [];
+    const f = await connected({
+      eraseConversation: async (peerId, token) => {
+        calls.push({ peerId, token });
+        return { erased: 1, clearedBeforeSeq: "1" };
+      },
+    });
+    await f.controller.openChat(bobId);
+    await sendFromAlice(f, bobId, "erase me", { id: "row-1", seq: "1" });
+
+    expect(await f.controller.deleteChat(bobId)).toBe(true);
+    expect(calls).toEqual([{ peerId: bobId, token: "token-a" }]);
+    expect(chatOf(f, bobId)).toBeUndefined();
+    expect(f.controller.getSnapshot().activePeer).toBe("");
+    f.controller.stop();
+  });
+
+  it("keeps the chat unchanged when the server erase fails", async () => {
+    const f = await connected({
+      eraseConversation: async () => {
+        throw new TypeError("offline");
+      },
+    });
+    await f.controller.openChat(bobId);
+    const sent = await sendFromAlice(f, bobId, "keep me", {
+      id: "row-1",
+      seq: "1",
+    });
+    const before = chatOf(f, bobId)?.messages;
+
+    expect(await f.controller.deleteChat(bobId)).toBe(false);
+    expect(chatOf(f, bobId)?.messages).toEqual(before);
+    expect(chatOf(f, bobId)?.messages[0]).toEqual(sent);
+    expect(f.controller.getSnapshot().error).toBe("delete_failed");
+    f.controller.stop();
+  });
+
+  it("erases only incoming rows up to the peer boundary and adjusts unread", async () => {
+    const f = await connected();
+    await f.controller.openChat(bobId);
+    await sendFromAlice(f, bobId, "my outgoing", { id: "out-3", seq: "3" });
+    await f.controller.openChat(charlieId);
+    deliver(f, {
+      id: "in-1",
+      seq: "1",
+      ciphertext: peerText(newReplayMessageId(), "first incoming"),
+    });
+    deliver(f, {
+      id: "in-2",
+      seq: "2",
+      ciphertext: peerText(newReplayMessageId(), "second incoming"),
+    });
+    deliver(f, {
+      id: "in-4",
+      seq: "4",
+      ciphertext: peerText(newReplayMessageId(), "after boundary"),
+    });
+    await waitFor(() => chatOf(f, bobId)?.messages.length === 4);
+    expect(chatOf(f, bobId)?.unreadCount).toBe(3);
+
+    messagesErasedFrame(f, {
+      from: bobId,
+      to: aliceId,
+      upToSeq: "2",
+      changeSeq: "20",
+    });
+    await waitFor(
+      () =>
+        chatOf(f, bobId)?.messages.filter((message) => message.deleted)
+          .length === 2,
+    );
+    const messages = chatOf(f, bobId)!.messages;
+    expect(messages.find((message) => message.id === "in-1")).toMatchObject({
+      deleted: true,
+    });
+    expect(messages.find((message) => message.id === "in-2")).toMatchObject({
+      deleted: true,
+    });
+    expect(messages.find((message) => message.id === "in-4")).toMatchObject({
+      text: "after boundary",
+    });
+    expect(
+      messages.find((message) => message.id === "in-4"),
+    ).not.toHaveProperty("deleted");
+    expect(messages.find((message) => message.id === "out-3")).toMatchObject({
+      text: "my outgoing",
+      direction: "out",
+    });
+    expect(
+      messages.find((message) => message.id === "out-3"),
+    ).not.toHaveProperty("deleted");
+    expect(chatOf(f, bobId)?.unreadCount).toBe(1);
+    f.controller.stop();
+  });
   /* Marks the chat as cleared up to a sequence, keeping the loaded rows. */
   const clearedPast = (
     f: { controller: ChatController },

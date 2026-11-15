@@ -11,6 +11,7 @@ import { clearSession, restoreServerSession } from "../session.js";
 import {
   deleteConversation,
   deleteMessage,
+  eraseConversation,
   getHistoryChangedAfter,
   getUserKeys,
   loginToServer,
@@ -215,5 +216,28 @@ describe("delete conversation API", () => {
       "Bearer session-token",
     );
     expect(result).toEqual({ clearedBeforeSeq: "100" });
+  });
+
+  it("sends an authenticated JSON POST to erase the conversation", async () => {
+    let requestUrl = "";
+    let requestInit: RequestInit | undefined;
+    const result = await eraseConversation(
+      "ab".repeat(32),
+      "session-token",
+      async (input, init) => {
+        requestUrl = String(input);
+        requestInit = init;
+        return Response.json({ erased: 3, clearedBeforeSeq: "100" });
+      },
+    );
+    expect(requestUrl).toBe(
+      `http://localhost:3000/conversations/${"ab".repeat(32)}/erase`,
+    );
+    expect(requestInit?.method).toBe("POST");
+    const headers = new Headers(requestInit?.headers);
+    expect(headers.get("Content-Type")).toBe("application/json");
+    expect(headers.get("Authorization")).toBe("Bearer session-token");
+    expect(requestInit?.body).toBe("{}");
+    expect(result).toEqual({ erased: 3, clearedBeforeSeq: "100" });
   });
 });

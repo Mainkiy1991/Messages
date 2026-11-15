@@ -21,6 +21,7 @@ import {
   getHistoryChangedAfter,
   updateMessage,
   deleteConversation,
+  eraseConversation as eraseConversationRequest,
   deleteMessage as deleteMessageRow,
   putContacts,
   type ContactBookResponse,
@@ -144,6 +145,10 @@ export type ChatControllerDependencies = {
     peerId: string,
     token: string,
   ) => Promise<{ clearedBeforeSeq: string }>;
+  eraseConversation?: (
+    peerId: string,
+    token: string,
+  ) => Promise<{ erased: number; clearedBeforeSeq: string }>;
   getHistory?: (
     peerId: string,
     token: string,
@@ -1280,18 +1285,48 @@ export class ChatController {
     this.update({ activePeer: "" });
   }
 
+  async clearChat(peerId: string): Promise<boolean> {
+    return this.applyConversationAction(peerId, (id, token) => {
+      const clear =
+        this.deps.deleteConversation ??
+        ((peerIdToClear: string, sessionToken: string) =>
+          deleteConversation(peerIdToClear, sessionToken, this.deps.fetcher));
+      return clear(id, token);
+    });
+  }
+
   async deleteChat(peerId: string): Promise<boolean> {
+    return this.applyConversationAction(peerId, (id, token) => {
+      const erase =
+        this.deps.eraseConversation ??
+        ((peerIdToErase: string, sessionToken: string) =>
+          eraseConversationRequest(
+            peerIdToErase,
+            sessionToken,
+            this.deps.fetcher,
+          ));
+      return erase(id, token);
+    });
+  }
+
+  private async applyConversationAction(
+    peerId: string,
+    request: (
+      peerId: string,
+      token: string,
+    ) => Promise<{ clearedBeforeSeq: string }>,
+  ): Promise<boolean> {
     let result: { clearedBeforeSeq: string };
     try {
       const session = await this.connection.ensureSession();
-      const remove =
-        this.deps.deleteConversation ??
-        ((id: string, token: string) =>
-          deleteConversation(id, token, this.deps.fetcher));
       result = await this.withFreshSession(session.token, (token) =>
-        remove(peerId, token),
+        request(peerId, token),
       );
     } catch {
+      this.update({ error: "delete_failed" });
+      return false;
+    }
+    if (!/^\d{1,19}$/u.test(result.clearedBeforeSeq)) {
       this.update({ error: "delete_failed" });
       return false;
     }
@@ -1590,6 +1625,7 @@ export class ChatController {
     );
     if (index < 0) return false;
     const previous = chat.messages[index]!;
+    if (previous.deleted) return false;
     const messages = chat.messages.slice();
     const stub: ChatMessage = {
       id: previous.id,
@@ -1787,6 +1823,36 @@ export class ChatController {
   }
 
   private async handleFrame(frame: IncomingFrame): Promise<void> {
+    if (
+      frame.type === "messages_erased" &&
+      typeof frame.from === "string" &&
+      typeof frame.to === "string" &&
+      frame.to === this.userId &&
+      frame.from !== this.userId &&
+      typeof frame.upToSeq === "string" &&
+      /^\d{1,19}$/u.test(frame.upToSeq) &&
+      typeof frame.changeSeq === "string" &&
+      /^\d{1,19}$/u.test(frame.changeSeq)
+    ) {
+      const peerId = frame.from;
+      const chat = this.state.chats.find((item) => item.peerId === peerId);
+      if (!chat) return;
+      const threshold = BigInt(frame.upToSeq);
+      let changed = false;
+      for (const message of chat.messages) {
+        if (
+          message.direction === "in" &&
+          !message.deleted &&
+          message.seq &&
+          /^\d{1,19}$/u.test(message.seq) &&
+          BigInt(message.seq) <= threshold
+        ) {
+          changed = this.applyDeleted(peerId, message.id, "in") || changed;
+        }
+      }
+      if (changed) this.raiseKnownChangeSeq(peerId, frame.changeSeq);
+      return;
+    }
     if (
       frame.type === "conversation_cleared" &&
       typeof frame.peerId === "string" &&

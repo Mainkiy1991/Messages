@@ -78,10 +78,12 @@ async function openUser(browser: Browser): Promise<User> {
       /Failed to load resource: the server responded with a status of 500/u.test(
         message.text(),
       );
-    // Chromium reports the intentionally aborted DELETE route as a console error.
+    // Chromium reports intentionally failed conversation requests as console errors.
     const expectedDeleteFailure =
       user.expectedDeleteFailure &&
-      message.text() === "Failed to load resource: net::ERR_FAILED";
+      /Failed to load resource: net::ERR_(?:FAILED|INTERNET_DISCONNECTED)/u.test(
+        message.text(),
+      );
     // The same console error comes from the deliberately aborted edit request.
     const expectedEditFailure =
       user.expectedEditFailure &&
@@ -462,7 +464,7 @@ test.describe("real browser chat", () => {
     ).toHaveAttribute("data-status", "read");
   });
 
-  test("deletes a chat only for Alice, keeps it deleted after reload, and shows Bob's new message", async ({
+  test("clears a chat only for Alice, keeps it cleared after reload, and shows Bob's new message", async ({
     browser,
   }) => {
     const a = await openUser(browser);
@@ -473,14 +475,16 @@ test.describe("real browser chat", () => {
     await openChat(a.page, bob.id);
     await send(a.page, "Old conversation");
     await openChat(b.page, alice.id);
-    await expect(b.page.locator(".message-list .message-text")).toContainText(
-      "Old conversation",
-    );
+    await expect(
+      b.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: /^Old conversation/u }),
+    ).toBeVisible();
 
     await a.page.getByTestId("chat-menu").click();
-    await a.page.getByTestId("delete-chat").click();
+    await a.page.getByTestId("clear-chat").click();
     await expect(a.page.getByRole("alertdialog")).toContainText(
-      "The conversation will be deleted only for you, on all your devices.",
+      "The conversation will be cleared only for you, on all your devices.",
     );
     await a.page.getByRole("button", { name: "Cancel" }).click();
     await expect(chatWith(a.page, bob.id)).toBeVisible();
@@ -489,12 +493,14 @@ test.describe("real browser chat", () => {
     );
 
     await a.page.getByTestId("chat-menu").click();
-    await a.page.getByTestId("delete-chat").click();
-    await a.page.getByTestId("confirm-delete-chat").click();
+    await a.page.getByTestId("clear-chat").click();
+    await a.page.getByTestId("confirm-clear-chat").click();
     await expect(chatWith(a.page, bob.id)).toHaveCount(0);
-    await expect(b.page.locator(".message-list .message-text")).toContainText(
-      "Old conversation",
-    );
+    await expect(
+      b.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: /^Old conversation/u }),
+    ).toBeVisible();
 
     await a.page.reload();
     await expect(a.page.getByTestId("connection-status")).toHaveAttribute(
@@ -505,9 +511,11 @@ test.describe("real browser chat", () => {
     await send(b.page, "A new conversation");
     await expect(chatWith(a.page, bob.id)).toBeVisible();
     await chatWith(a.page, bob.id).click();
-    await expect(a.page.locator(".message-list .message-text")).toHaveText([
-      "A new conversation",
-    ]);
+    await expect(
+      a.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: /^A new conversation/u }),
+    ).toBeVisible();
   });
 
   test("keeps the chat on network failure and allows retry from the confirmation dialog", async ({
@@ -527,20 +535,98 @@ test.describe("real browser chat", () => {
     await a.page.route("**/conversations/**", deleteRoute);
     a.expectedDeleteFailure = true;
     await a.page.getByTestId("chat-menu").click();
-    await a.page.getByTestId("delete-chat").click();
-    await a.page.getByTestId("confirm-delete-chat").click();
-    await expect(a.page.getByRole("alertdialog")).toContainText(
-      "Could not delete the conversation. Check your connection and try again.",
+    await a.page.getByTestId("clear-chat").click();
+    await a.page.getByTestId("confirm-clear-chat").click();
+    await expect(a.page.getByTestId("chat-error")).toBeVisible();
+    await expect(a.page.getByTestId("chat-error")).toHaveText(
+      "Could not clear the chat. Check your connection and try again.",
     );
     a.expectedDeleteFailure = false;
     await expect(chatWith(a.page, bob.id)).toBeVisible();
-    await expect(a.page.locator(".message-list .message-text")).toContainText(
-      "Keep me if deletion fails",
-    );
+    await expect(
+      a.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: /^Keep me if deletion fails/u }),
+    ).toBeVisible();
 
     await a.page.unroute("**/conversations/**", deleteRoute);
-    await a.page.getByTestId("confirm-delete-chat").click();
+    await a.page.getByTestId("confirm-clear-chat").click();
     await expect(chatWith(a.page, bob.id)).toHaveCount(0);
+  });
+
+  test("erases Alice's messages for Bob as one stub and keeps Bob's own message", async ({
+    browser,
+  }) => {
+    test.setTimeout(180_000);
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+
+    await openChat(a.page, bob.id);
+    await send(a.page, "Erase group one");
+    await send(a.page, "Erase group two");
+    await send(a.page, "Erase group three");
+    await openChat(b.page, alice.id);
+    const bobMessages = b.page.locator(".message-list .message-text");
+    for (const text of [
+      "Erase group one",
+      "Erase group two",
+      "Erase group three",
+    ])
+      await expect(
+        bobMessages.filter({ hasText: new RegExp(`^${text}`, "u") }),
+      ).toBeVisible();
+
+    await send(b.page, "Bob's own message");
+    await a.page.getByTestId("chat-menu").click();
+    await a.page.getByTestId("delete-chat").click();
+    await expect(a.page.getByRole("alertdialog")).toContainText(
+      "all your messages in it will be erased from the server",
+    );
+    await a.page.getByTestId("confirm-delete-chat").click();
+
+    await expect(b.page.getByTestId("message-deleted")).toHaveCount(1);
+    await expect(b.page.getByTestId("message-deleted")).toHaveText(
+      "The other person deleted these messages",
+    );
+    await expect(
+      bobMessages.filter({ hasText: /^Bob's own message/u }),
+    ).toBeVisible();
+    await expect(b.page.locator('[data-testid="message-row"]')).toHaveCount(2);
+  });
+
+  test("shows a visible error and keeps the chat when delete-chat is offline", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const bob = await createAccount(b.page);
+    await createAccount(a.page);
+    await openChat(a.page, bob.id);
+    await send(a.page, "Keep this while offline");
+    a.expectedDeleteFailure = true;
+    await a.context.setOffline(true);
+
+    await a.page.getByTestId("chat-menu").click();
+    await a.page.getByTestId("delete-chat").click();
+    await a.page.getByTestId("confirm-delete-chat").click();
+    const error = a.page.getByTestId("chat-error");
+    await expect(error).toBeVisible();
+    expect(
+      await error.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return style.display !== "none" && style.visibility !== "hidden";
+      }),
+    ).toBe(true);
+    await expect(
+      a.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: /^Keep this while offline/u }),
+    ).toBeVisible();
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
+    a.expectedDeleteFailure = false;
+    await a.context.setOffline(false);
   });
 
   test("removes a cleared chat from another window without reloading at 360px", async ({
@@ -566,8 +652,8 @@ test.describe("real browser chat", () => {
     expect(
       await a.page.evaluate(() => document.documentElement.scrollWidth),
     ).toBeLessThanOrEqual(360);
-    await a.page.getByTestId("delete-chat").click();
-    await a.page.getByTestId("confirm-delete-chat").click();
+    await a.page.getByTestId("clear-chat").click();
+    await a.page.getByTestId("confirm-clear-chat").click();
     await expect(chatWith(a.page, bob.id)).toHaveCount(0);
     await expect(chatWith(secondWindow, bob.id)).toHaveCount(0);
     await expect(a.page.locator(".messenger")).not.toHaveClass(/show-chat/u);
@@ -1847,6 +1933,25 @@ test.describe("real browser chat", () => {
     await expect(b.page.locator('[data-testid="message-row"]')).toHaveCount(2);
     expect(await a.page.content()).not.toContain("Secret to erase");
     expect(await b.page.content()).not.toContain("Secret to erase");
+  });
+  test("uses a Saved messages deletion confirmation without peer wording", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const alice = await createAccount(a.page);
+    await openChat(a.page, alice.id);
+    await send(a.page, "Saved-only note");
+    const row = a.page
+      .locator('[data-testid="message-row"]')
+      .filter({ hasText: /^Saved-only note/u });
+    await row.getByTestId("message").hover();
+    await row.getByTestId("delete-message").click();
+
+    const confirmation = a.page.getByTestId("delete-confirm");
+    await expect(confirmation).toBeVisible();
+    await expect(confirmation).toContainText("Delete this note?");
+    expect(await confirmation.innerText()).not.toMatch(/peer|other person/u);
+    await a.page.getByTestId("cancel-delete-message").click();
   });
   test("shows the stub to a peer who was away when the message was erased", async ({
     browser,
