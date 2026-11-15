@@ -1,14 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "./chat-controller.js";
 import {
-  canRequestDeletion,
+  canDeleteMessage,
   chatPreviewAfterDeletion,
-  isDeletedIncoming,
 } from "./message-delete.js";
 import { canEditMessage, toggleEditAction } from "./message-edit.js";
 
 const aliceId = "a".repeat(64);
-const bobId = "b".repeat(64);
 
 function chatMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -19,79 +17,51 @@ function chatMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
     createdAt: "2026-01-01T00:00:00.000Z",
     direction: "out",
     status: "sent",
+    seq: "7",
     arrivalOrder: 1,
     ...overrides,
   };
 }
 
-function canRequest(
-  overrides: Partial<ChatMessage> = {},
-  peerId = bobId,
-): boolean {
-  return canRequestDeletion({
-    message: chatMessage(overrides),
-    userId: aliceId,
-    peerId,
-  });
+function canDelete(overrides: Partial<ChatMessage> = {}): boolean {
+  return canDeleteMessage(chatMessage(overrides));
 }
 
-describe("delete request visibility", () => {
-  it("allows the request on your own delivered message", () => {
-    expect(canRequest()).toBe(true);
-    expect(canRequest({ status: "delivered" })).toBe(true);
-    expect(canRequest({ status: "read" })).toBe(true);
-    expect(canRequest({ status: undefined })).toBe(true);
+describe("delete action visibility", () => {
+  it("allows deleting your own message that the server already knows", () => {
+    expect(canDelete()).toBe(true);
+    expect(canDelete({ status: "delivered" })).toBe(true);
+    expect(canDelete({ status: "read" })).toBe(true);
+    expect(canDelete({ status: undefined })).toBe(true);
+    expect(canDelete({ replayId: undefined })).toBe(true);
   });
 
-  it("hides the request on a foreign, unsent, failed or undecrypted message", () => {
-    expect(canRequest({ direction: "in" })).toBe(false);
-    expect(canRequest({ status: "sending" })).toBe(false);
-    expect(canRequest({ status: "error" })).toBe(false);
-    expect(canRequest({ decryptFailed: true })).toBe(false);
-    expect(canRequest({ replayId: undefined })).toBe(false);
+  it("hides the basket on a foreign, unsent, failed or erased message", () => {
+    expect(canDelete({ direction: "in" })).toBe(false);
+    expect(canDelete({ status: "sending" })).toBe(false);
+    expect(canDelete({ status: "error" })).toBe(false);
+    expect(canDelete({ deleted: true })).toBe(false);
   });
 
-  it("hides the request without a known author, in saved messages and without a peer", () => {
-    expect(canRequest({ replayAuthor: undefined })).toBe(false);
-    expect(canRequest({ replayAuthor: bobId })).toBe(false);
-    expect(canRequest({}, aliceId)).toBe(false);
-    expect(canRequest({}, "")).toBe(false);
-    expect(
-      canRequestDeletion({ message: chatMessage(), userId: "", peerId: bobId }),
-    ).toBe(false);
-  });
-
-  it("hides the request once it was sent, accepted or declined", () => {
-    expect(canRequest({ deletion: "pending" })).toBe(false);
-    expect(canRequest({ deletion: "accepted" })).toBe(false);
-    expect(canRequest({ deletion: "declined" })).toBe(false);
+  it("hides the basket while the row has no server sequence", () => {
+    expect(canDelete({ seq: undefined, status: "sending" })).toBe(false);
+    expect(canDelete({ seq: undefined, status: "sent" })).toBe(false);
   });
 });
 
-describe("edit action after a delete request", () => {
-  it("keeps the pencil off while the request waits or was accepted", () => {
+describe("edit action after an erased message", () => {
+  it("keeps the pencil off an erased message", () => {
     expect(canEditMessage(chatMessage(), aliceId)).toBe(true);
-    expect(canEditMessage(chatMessage({ deletion: "pending" }), aliceId)).toBe(
-      false,
-    );
-    expect(canEditMessage(chatMessage({ deletion: "accepted" }), aliceId)).toBe(
-      false,
-    );
+    expect(canEditMessage(chatMessage({ deleted: true }), aliceId)).toBe(false);
   });
 
-  it("allows the pencil again after a refusal", () => {
-    expect(canEditMessage(chatMessage({ deletion: "declined" }), aliceId)).toBe(
-      true,
-    );
-  });
-
-  it("lets the caller replace the built-in edit check of the touch toggle", () => {
-    const waiting = chatMessage({ id: "row-2", deletion: "pending" });
+  it("lets the caller replace the built-in check of the touch toggle", () => {
+    const erased = chatMessage({ id: "row-2", deleted: true });
     const editable = chatMessage({ id: "row-3" });
     expect(
       toggleEditAction({
         current: null,
-        message: waiting,
+        message: erased,
         userId: aliceId,
         hasSelection: false,
       }),
@@ -99,7 +69,7 @@ describe("edit action after a delete request", () => {
     expect(
       toggleEditAction({
         current: null,
-        message: waiting,
+        message: erased,
         userId: aliceId,
         hasSelection: false,
         actionable: true,
@@ -127,28 +97,13 @@ describe("edit action after a delete request", () => {
   });
 });
 
-describe("deleted incoming message", () => {
-  it("marks only the incoming accepted message as deleted", () => {
-    expect(
-      isDeletedIncoming(chatMessage({ direction: "in", deletion: "accepted" })),
-    ).toBe(true);
-    expect(
-      isDeletedIncoming(
-        chatMessage({ direction: "out", deletion: "accepted" }),
-      ),
-    ).toBe(false);
-    expect(
-      isDeletedIncoming(chatMessage({ direction: "in", deletion: "pending" })),
-    ).toBe(false);
-    expect(isDeletedIncoming(chatMessage({ direction: "in" }))).toBe(false);
-  });
-
-  it("hides the preview of the chat whose last incoming message was deleted", () => {
+describe("chat preview of an erased message", () => {
+  it("shows the deleted note when the last record is erased", () => {
     const chat = {
       loadingHistory: false,
       messages: [
         chatMessage({ direction: "out", text: "hi" }),
-        chatMessage({ direction: "in", deletion: "accepted", text: "" }),
+        chatMessage({ direction: "in", deleted: true, text: "" }),
       ],
     };
     expect(chatPreviewAfterDeletion(chat, "Message deleted")).toBe(
@@ -156,17 +111,28 @@ describe("deleted incoming message", () => {
     );
     expect(
       chatPreviewAfterDeletion(
-        { ...chat, messages: [chatMessage({ direction: "in" })] },
+        {
+          ...chat,
+          messages: [
+            chatMessage({ direction: "out", deleted: true, text: "" }),
+          ],
+        },
         "Message deleted",
       ),
-    ).toBeNull();
+    ).toBe("Message deleted");
+  });
+
+  it("keeps the ordinary preview in every other case", () => {
+    const chat = {
+      loadingHistory: false,
+      messages: [chatMessage({ direction: "in" })],
+    };
+    expect(chatPreviewAfterDeletion(chat, "Message deleted")).toBeNull();
     expect(
       chatPreviewAfterDeletion(
         {
           ...chat,
-          messages: [
-            chatMessage({ direction: "in", deletion: "accepted", text: "" }),
-          ],
+          messages: [chatMessage({ direction: "in", deleted: true, text: "" })],
           loadingHistory: true,
         },
         "Message deleted",

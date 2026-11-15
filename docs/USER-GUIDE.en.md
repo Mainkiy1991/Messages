@@ -64,15 +64,19 @@ The other person sees the new text with an **edited** note next to the time. An 
 
 Messages sent before editing appeared (the old format) cannot be changed.
 
-## Deletion request
+## Deleting your own message
 
-You can ask the other person to delete your message: hover over it (on a phone, tap it) and press the basket icon next to the pencil. A question appears above the input field; send the request with **Send request** or close the row with **Cancel**.
+You can delete your own message yourself, without asking the other person: hover over it (on a phone, tap it) and press the basket icon next to the pencil. A question appears above the input field; confirm with **Delete** or close the row with **Cancel**.
 
-The other person sees a notice under the message: **The other person asks to delete this message**, with the buttons **Delete for me** and **Keep**. If they accept, the text is replaced with **Message deleted**; if they refuse, the message stays. Under your own message you see what happened: **deletion requested**, **the other person deleted it on their side**, or **the other person kept the message**.
+The text is erased on the server, and a note takes its place for both of you: **You deleted this message** for you and **The other person deleted this message** for them. The chat list shows **Message deleted** instead of the text. You can delete your own delivered message, including in Saved messages; messages that are still sending or failed cannot be deleted. A deletion cannot be undone.
 
-You cannot ask again: after a refusal the message stays with the other person for good. Your own copy does not disappear — this is a request to the other person, not a deletion on your side.
+Nothing is guaranteed.
 
-Nothing is guaranteed. This is hiding inside the other person's app: they may have read, copied or photographed the text earlier, a modified client can ignore the request, and the encrypted record stays on the server and is not erased. People who have not reloaded the page (F5) do not see the request, so you may see "deletion requested" indefinitely. Messages of the old format and Saved messages are not supported.
+- The other person may have read, copied or photographed the text earlier, and a modified client may have saved it.
+- The hosting provider may keep database backups for a limited time, and a dishonest server may have copied the data earlier.
+- Metadata stays: who wrote to whom and when, and that the row existed. The content is erased, not the fact of the conversation.
+- We do not erase messages of the other person.
+- A tab of the other person without a connection shows the stub after it reconnects or the page is reloaded. Clients that did not reload the page (F5) show "could not decrypt the message".
 
 ## PIN (optional)
 

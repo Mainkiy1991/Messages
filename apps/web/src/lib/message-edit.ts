@@ -14,10 +14,9 @@ export type MessageEditState = {
 
 /**
  * Only your own delivered text message can be edited. Foreign, undecrypted,
- * pending and failed messages are hidden from the action instead of failing
- * after a tap, because the controller and the server reject them anyway. A
- * delete request that is waiting for an answer or has been accepted freezes the
- * text; after a refusal the controller allows edits again.
+ * pending, failed and erased messages are hidden from the action instead of
+ * failing after a tap, because the controller and the server reject them
+ * anyway.
  */
 export function canEditMessage(
   message: Pick<
@@ -27,16 +26,14 @@ export function canEditMessage(
     | "replayId"
     | "decryptFailed"
     | "replayAuthor"
-    | "deletion"
+    | "deleted"
   >,
   userId?: string,
 ): boolean {
   if (message.direction !== "out") return false;
-  if (message.decryptFailed) return false;
+  if (message.decryptFailed || message.deleted) return false;
   if (!message.replayId) return false;
   if (message.status === "sending" || message.status === "error") return false;
-  if (message.deletion === "pending" || message.deletion === "accepted")
-    return false;
   if (userId && message.replayAuthor && message.replayAuthor !== userId)
     return false;
   return true;
@@ -79,7 +76,7 @@ export function toggleEditAction(input: {
     | "replayId"
     | "decryptFailed"
     | "replayAuthor"
-    | "deletion"
+    | "deleted"
   >;
   userId?: string;
   hasSelection: boolean;

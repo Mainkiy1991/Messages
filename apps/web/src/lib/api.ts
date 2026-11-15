@@ -235,6 +235,19 @@ export function updateMessage(
   });
 }
 
+/**
+ * Erases your own row on the server: the ciphertext and the sender copy become
+ * empty and the row is marked as deleted. There is no body and no Content-Type;
+ * both the first request and a repeat answer with an empty 204.
+ */
+export function deleteMessage(
+  id: string,
+  token: string,
+  fetcher: FetchLike = fetch,
+) {
+  return request<void>(fetcher, `/messages/${id}`, token, { method: "DELETE" });
+}
+
 /** Rows of one chat whose change number is above the known one. */
 export function getHistoryChangedAfter(
   peerId: string,
