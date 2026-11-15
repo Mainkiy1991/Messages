@@ -1939,7 +1939,12 @@ test.describe("real browser chat", () => {
   }) => {
     const a = await openUser(browser);
     const alice = await createAccount(a.page);
-    await openChat(a.page, alice.id);
+    await a.page.getByRole("button", { name: /New chat/u }).click();
+    await a.page.getByTestId("peer-id-input").fill(alice.id);
+    await a.page.getByTestId("new-chat").click();
+    await expect(a.page.getByTestId("saved-chat-title")).toHaveText(
+      "Saved messages",
+    );
     await send(a.page, "Saved-only note");
     const row = a.page
       .locator('[data-testid="message-row"]')
