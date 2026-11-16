@@ -27,6 +27,35 @@ const bobId = bytesToHex(bob.identity.publicKey);
 const sentAt = 1_700_000_000_000;
 const contactKey = new Uint8Array(32).fill(7);
 const contactId = "ab".repeat(32);
+const legacyUnknownTypeFixtures = [
+  {
+    type: "edit",
+    id: "EREREREREREREREREREREQ==",
+    clientMsgId: "11111111111111111111111111111111",
+    ciphertext:
+      "AhERERERERERERERERERERGc2nPm60mI/r5fH0gPpkc8bbYRFdHwd1BipmagyiwpksDMvbgTySIkRCc8/+NpmI5Gd2/ZK+6ge79fu25LNwhk8mkEJWCGpP1jW2m0Dk40AooCTUiQ88fCA71nwv9DZZRevbl7+C9znDDAQKFLknbjLsZ7BDGXvcyypQHOdOlzJJqor/MDabTbjHBX9i1NRYup1dinnhC3+99E3nuUioGegBdwof09rZfQgj/LYrJTmx27ueYM",
+    historyEntry:
+      "AhERERERERERERERERERERFfBQO0jLpe478Nr73TkmhvGodc+x7uhVbunh3PYWO/6LMrsWlDLd3+j1wWfmHIuae2zBvM9XnDlryjGKtqWT2j1yYEj8SRpK83G9HewcA+9Ti+KXihb1PR3dctSi5q/kvZgK7MjRVrEQ8OvtB0B2inkMSrH1E7BjQEOLl8qdXiVj5Ptni5Qr/yAs7tbcZuRYH+57/Uz4VZRma3/6KXexdEEZQSnf3cH70XbR9NctOegmf0ZIsw",
+  },
+  {
+    type: "delete_request",
+    id: "IiIiIiIiIiIiIiIiIiIiIg==",
+    clientMsgId: "22222222222222222222222222222222",
+    ciphertext:
+      "AiIiIiIiIiIiIiIiIiIiIiLdb1ZGReLo4ckiUz3lWKt/k3d+dSpAxl90Ph7XH0o1Yk5CN4opWAqrknQlXkobgqO52qoq2cySSZHIkcYSLAR2gIMASDwAbNBP2AjoiuPmLyXLo2nWnHe0VWqZaHLQ1+plZybV9/cOigQWqK2GsgRm89HZ+2jgpAWIIqklEX+2CberKkAWHSA8aMmPwzn50HIn4xBaHZeDXXBmgCb06JhRngg=",
+    historyEntry:
+      "AiIiIiIiIiIiIiIiIiIiIiJroes0Z5oZlO4OU1Y8tfM77H5SEDNNhfAYgY7jTOV7hyeFCHIF3q4iAo2ceapWALSX1mm8YEQvSoRqXSYLkj4XVIKzWyf11HjS1vadiYVM09JnpO3G/oYZIuXqgMUQRb399EwTbcfoHJRakX+D7/PT3cSy7vW5lsCIOLVUf+MrkwMPDWx/btwNNOQ9vQeZAObdiUaoImq0TSX6YInlAVuhKr8=",
+  },
+  {
+    type: "delete_answer",
+    id: "MzMzMzMzMzMzMzMzMzMzMw==",
+    clientMsgId: "33333333333333333333333333333333",
+    ciphertext:
+      "AjMzMzMzMzMzMzMzMzMzMzPFcpJNdJg0pa8l2UvqKdccmPEGTlEFRpL9ejBcoZ7xxHI2157F/raIJ5krIEfarQLi4BQs7AxwTAFNVYoY3j/gQ3xRMTa9BE0pyI8MnFS3W+bq8UYJxlc+oPp1tFaUYSMq3WC7ykz5nQYqbQoDbX7a4sTNhNeZJdhhyp85DCpK/9acNj28mb/FiDQ9M7+kjpKgID2W8vK5TSwx3h0JpbOetG/oD6+5wZ2KPe/jLLxc",
+    historyEntry:
+      "AjMzMzMzMzMzMzMzMzMzMzNxKw9M4AwSirQiXKMFjq+QJakYQ6sFceLqGGs2usxGUiuxcZuktZMpJkMxcp+dNtPWDKzHuQc4LklYwy6KaDXNi2B5jwdD+vSFBil97EGoL69zq5RFrlOHAKcqTXkAFaGIHQbbGF41hUFhnXtirpx2tfck5UYgG89uNnsZ0aOIEcAEN4DhsOl+hE3SqXgw8czFO8MSkzBtsSCxg/IJR5RI6ZRe6c6CijizwDyjwxMY",
+  },
+] as const;
 
 describe("encrypted contact books", () => {
   it("decrypts the fixed contact-book compatibility vector", () => {
@@ -314,6 +343,25 @@ describe("recipient messages", () => {
       }).text,
     ).toBe("Bob to Alice");
   });
+
+  it("decrypts legacy protocol messages as unknown types", () => {
+    for (const fixture of legacyUnknownTypeFixtures) {
+      expect(
+        decryptTextMessage({
+          recipientEncryptionPrivateKey: bob.encryption.privateKey,
+          senderEncryptionPublicKey: alice.encryption.publicKey,
+          senderId: aliceId,
+          recipientId: bobId,
+          ciphertext: fixture.ciphertext,
+        }),
+      ).toEqual({
+        v: 2,
+        id: fixture.id,
+        type: fixture.type,
+        sentAt,
+      });
+    }
+  });
 });
 
 describe("sender history entries", () => {
@@ -413,6 +461,25 @@ describe("sender history entries", () => {
           "AQMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA0gQ2LVLX0ZISjtniITtdIAyg+HM38K0SjQr9/8BXbYeMc0cZuf1UB0S7sYpBJdLyE+y54dqCLqstpzW76YNj1QvwR1UBHoapfcMoUI=",
       }),
     ).toEqual({ text: "Тест vector 👋", sentAt });
+  });
+
+  it("decrypts legacy history entries as unknown types", () => {
+    for (const fixture of legacyUnknownTypeFixtures) {
+      expect(
+        decryptHistoryEntry({
+          historyKey: alice.historyKey,
+          clientMsgId: fixture.clientMsgId,
+          senderId: aliceId,
+          peerId: bobId,
+          entry: fixture.historyEntry,
+        }),
+      ).toEqual({
+        v: 2,
+        id: fixture.id,
+        type: fixture.type,
+        sentAt,
+      });
+    }
   });
 });
 

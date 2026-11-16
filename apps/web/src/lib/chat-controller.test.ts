@@ -49,6 +49,29 @@ const legacyNonTextCiphertexts = {
   delete_answer:
     "AgEBAQEBAQEBAQEBAQEBAQHWhZZjrgppFGMKODjVhbwHNv1eruyP++GgSzvmBRs1YQaxHHuVOpoMOvArAj1fUcqjRRse/2Juo+h01LMGMHn5miakHNg074MG/LKr/uG5283h+1jLVB5LmIVOPRuwUpXK1fw1otlzGfkQGNufG1DqiZ8YHEf42UPRnrjdGOnyFn8RVsd0ZbXBR9Eb4SxVvppuJhKApykiQQ1dpuhw17gjBzd/Pr6YMnI4+5WK/cK0",
 };
+const legacyProtocolRows = {
+  edit: {
+    clientMsgId: "11111111111111111111111111111111",
+    ciphertext:
+      "AhERERERERERERERERERERGc2nPm60mI/r5fH0gPpkc8bbYRFdHwd1BipmagyiwpksDMvbgTySIkRCc8/+NpmI5Gd2/ZK+6ge79fu25LNwhk8mkEJWCGpP1jW2m0Dk40AooCTUiQ88fCA71nwv9DZZRevbl7+C9znDDAQKFLknbjLsZ7BDGXvcyypQHOdOlzJJqor/MDabTbjHBX9i1NRYup1dinnhC3+99E3nuUioGegBdwof09rZfQgj/LYrJTmx27ueYM",
+    senderCopy:
+      "AhERERERERERERERERERERFfBQO0jLpe478Nr73TkmhvGodc+x7uhVbunh3PYWO/6LMrsWlDLd3+j1wWfmHIuae2zBvM9XnDlryjGKtqWT2j1yYEj8SRpK83G9HewcA+9Ti+KXihb1PR3dctSi5q/kvZgK7MjRVrEQ8OvtB0B2inkMSrH1E7BjQEOLl8qdXiVj5Ptni5Qr/yAs7tbcZuRYH+57/Uz4VZRma3/6KXexdEEZQSnf3cH70XbR9NctOegmf0ZIsw",
+  },
+  delete_request: {
+    clientMsgId: "22222222222222222222222222222222",
+    ciphertext:
+      "AiIiIiIiIiIiIiIiIiIiIiLdb1ZGReLo4ckiUz3lWKt/k3d+dSpAxl90Ph7XH0o1Yk5CN4opWAqrknQlXkobgqO52qoq2cySSZHIkcYSLAR2gIMASDwAbNBP2AjoiuPmLyXLo2nWnHe0VWqZaHLQ1+plZybV9/cOigQWqK2GsgRm89HZ+2jgpAWIIqklEX+2CberKkAWHSA8aMmPwzn50HIn4xBaHZeDXXBmgCb06JhRngg=",
+    senderCopy:
+      "AiIiIiIiIiIiIiIiIiIiIiJroes0Z5oZlO4OU1Y8tfM77H5SEDNNhfAYgY7jTOV7hyeFCHIF3q4iAo2ceapWALSX1mm8YEQvSoRqXSYLkj4XVIKzWyf11HjS1vadiYVM09JnpO3G/oYZIuXqgMUQRb399EwTbcfoHJRakX+D7/PT3cSy7vW5lsCIOLVUf+MrkwMPDWx/btwNNOQ9vQeZAObdiUaoImq0TSX6YInlAVuhKr8=",
+  },
+  delete_answer: {
+    clientMsgId: "33333333333333333333333333333333",
+    ciphertext:
+      "AjMzMzMzMzMzMzMzMzMzMzPFcpJNdJg0pa8l2UvqKdccmPEGTlEFRpL9ejBcoZ7xxHI2157F/raIJ5krIEfarQLi4BQs7AxwTAFNVYoY3j/gQ3xRMTa9BE0pyI8MnFS3W+bq8UYJxlc+oPp1tFaUYSMq3WC7ykz5nQYqbQoDbX7a4sTNhNeZJdhhyp85DCpK/9acNj28mb/FiDQ9M7+kjpKgID2W8vK5TSwx3h0JpbOetG/oD6+5wZ2KPe/jLLxc",
+    senderCopy:
+      "AjMzMzMzMzMzMzMzMzMzMzNxKw9M4AwSirQiXKMFjq+QJakYQ6sFceLqGGs2usxGUiuxcZuktZMpJkMxcp+dNtPWDKzHuQc4LklYwy6KaDXNi2B5jwdD+vSFBil97EGoL69zq5RFrlOHAKcqTXkAFaGIHQbbGF41hUFhnXtirpx2tfck5UYgG89uNnsZ0aOIEcAEN4DhsOl+hE3SqXgw8czFO8MSkzBtsSCxg/IJR5RI6ZRe6c6CijizwDyjwxMY",
+  },
+};
 const userKeys = (keys: typeof alice): UserKeys => ({
   userId: bytesToHex(keys.identity.publicKey),
   encryptionPublicKey: bytesToHex(keys.encryption.publicKey),
@@ -3066,6 +3089,92 @@ describe("ChatController edits in place", () => {
     expect(
       chatOf(f, bobId)?.messages.some((message) => message.decryptFailed),
     ).toBe(false);
+    f.controller.stop();
+  });
+
+  it("skips legacy protocol entries in history next to ordinary text", async () => {
+    const messages = Object.entries(legacyProtocolRows).map(
+      ([type, entry], index) => ({
+        id: `legacy-history-${type}`,
+        seq: String(index + 1),
+        direction: "out" as const,
+        clientMsgId: entry.clientMsgId,
+        payload: entry.senderCopy,
+        createdAt: rowTime(index),
+        deliveredAt: null,
+      }),
+    );
+    const clientMsgId = "44444444444444444444444444444444";
+    messages.push({
+      id: "ordinary-history",
+      seq: "4",
+      direction: "out",
+      clientMsgId,
+      payload: encryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId,
+        peerId: bobId,
+        senderId: aliceId,
+        text: "ordinary text",
+        sentAt,
+      }),
+      createdAt: rowTime(4),
+      deliveredAt: null,
+    });
+    const f = makeController({
+      initialSession: session("token-a"),
+      getHistory: async () => ({
+        hasMore: false,
+        peerReadUpToSeq: null,
+        messages,
+      }),
+    });
+
+    await f.controller.openChat(bobId);
+    await waitFor(() => chatOf(f, bobId)?.historyLoaded === true);
+
+    const history = chatOf(f, bobId)!.messages;
+    expect(history.map((message) => message.text)).toEqual(["ordinary text"]);
+    expect(history.some((message) => message.decryptFailed)).toBe(false);
+    f.controller.stop();
+  });
+
+  it("removes legacy protocol frames from the outbox without sending them", async () => {
+    vi.stubGlobal("window", {});
+    const frames = Object.values(legacyProtocolRows).map((entry) => ({
+      type: "send" as const,
+      clientMsgId: entry.clientMsgId,
+      to: bobId,
+      ciphertext: entry.ciphertext,
+      senderCopy: entry.senderCopy,
+    }));
+    let queuedFrames = frames;
+    const removed: string[] = [];
+    const f = await connected({
+      getConversations: async () => ({ conversations: [] }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      outbox: {
+        list: async () => queuedFrames,
+        put: async () => undefined,
+        remove: async (_userId, clientMsgId) => {
+          removed.push(clientMsgId);
+          queuedFrames = queuedFrames.filter(
+            (frame) => frame.clientMsgId !== clientMsgId,
+          );
+        },
+        clear: async () => undefined,
+      },
+    });
+
+    await waitFor(() => removed.length === frames.length);
+
+    expect(removed.sort()).toEqual(
+      frames.map((frame) => frame.clientMsgId).sort(),
+    );
+    expect(
+      f.sockets[0]!.decoded().filter((frame) => frame.type === "send"),
+    ).toEqual([]);
+    expect(chatOf(f, bobId)?.messages ?? []).toEqual([]);
     f.controller.stop();
   });
 
