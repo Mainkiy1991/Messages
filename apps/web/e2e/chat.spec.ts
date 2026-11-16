@@ -469,6 +469,7 @@ test.describe("real browser chat", () => {
   }) => {
     const user = await openUser(browser);
     const { page } = user;
+    await createAccount(page);
     const bob = await createAccount((await openUser(browser)).page);
     await page.setViewportSize({ width: 360, height: 780 });
     await openChat(page, bob.id);
