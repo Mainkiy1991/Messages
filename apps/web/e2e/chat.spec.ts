@@ -564,7 +564,7 @@ test.describe("real browser chat", () => {
     ).toBeLessThanOrEqual(360);
   });
 
-  test("clears a chat only for Alice, keeps it cleared after reload, and shows Bob's new message", async ({
+  test("keeps a chat listed after clearing for Alice and shows Bob's new message", async ({
     browser,
   }) => {
     const a = await openUser(browser);
@@ -595,7 +595,7 @@ test.describe("real browser chat", () => {
     await a.page.getByTestId("chat-menu").click();
     await a.page.getByTestId("clear-chat").click();
     await a.page.getByTestId("confirm-clear-chat").click();
-    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
     await expect(
       b.page
         .locator(".message-list .message-text")
@@ -607,7 +607,7 @@ test.describe("real browser chat", () => {
       "data-state",
       "connected",
     );
-    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
     await send(b.page, "A new conversation");
     await expect(chatWith(a.page, bob.id)).toBeVisible();
     await chatWith(a.page, bob.id).click();
@@ -651,7 +651,7 @@ test.describe("real browser chat", () => {
 
     await a.page.unroute("**/conversations/**", deleteRoute);
     await a.page.getByTestId("confirm-clear-chat").click();
-    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
   });
 
   test("erases Alice's messages for Bob as one stub and keeps Bob's own message", async ({
@@ -729,7 +729,7 @@ test.describe("real browser chat", () => {
     await a.context.setOffline(false);
   });
 
-  test("removes a cleared chat from another window without reloading at 360px", async ({
+  test("keeps a cleared chat in another window without reloading at 360px", async ({
     browser,
   }) => {
     const a = await openUser(browser);
@@ -754,9 +754,8 @@ test.describe("real browser chat", () => {
     ).toBeLessThanOrEqual(360);
     await a.page.getByTestId("clear-chat").click();
     await a.page.getByTestId("confirm-clear-chat").click();
-    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
-    await expect(chatWith(secondWindow, bob.id)).toHaveCount(0);
-    await expect(a.page.locator(".messenger")).not.toHaveClass(/show-chat/u);
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
+    await expect(chatWith(secondWindow, bob.id)).toBeVisible();
   });
 
   test("shows presence only after two-way chat and updates after reconnect", async ({

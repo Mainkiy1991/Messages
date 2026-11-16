@@ -99,7 +99,7 @@
 
 ### Сервер (№27d1, миграция 009, только добавляющая)
 
-- В таблицу conversation_clears добавляется колонка hidden boolean NOT NULL DEFAULT false. Старый код её не замечает.
+- Миграция 009 добавляет hidden boolean NOT NULL: существующие строки получают hidden=true, а для новых строк DEFAULT равен false.
 - DELETE /conversations/:peerId ставит hidden=false. POST /conversations/:peerId/erase ставит hidden=true. Тела и ответы не меняются.
 - GET /conversations возвращает чат, если в нём есть видимые сообщения ИЛИ есть строка в conversation_clears с hidden=false (тогда чат приходит без последнего сообщения и с признаком cleared: true). Чат с hidden=true и без видимых сообщений не возвращается. Новое сообщение делает чат видимым само: отдельно сбрасывать hidden не нужно.
 - Рамка conversation_cleared для своих устройств получает поле hidden (нет поля = false).
