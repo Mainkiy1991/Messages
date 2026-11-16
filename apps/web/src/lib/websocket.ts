@@ -298,6 +298,20 @@ export class ChatConnection {
       return;
     }
     if (frame.type === "pong") return;
+    if (frame.type === "own_message") {
+      if (
+        typeof frame.id === "string" &&
+        typeof frame.clientMsgId === "string" &&
+        typeof frame.senderCopy === "string" &&
+        typeof frame.createdAt === "string" &&
+        typeof frame.to === "string" &&
+        /^[0-9a-f]{64}$/iu.test(frame.to) &&
+        typeof frame.seq === "string" &&
+        /^\d+$/u.test(frame.seq)
+      )
+        await this.handlers.onFrame(frame);
+      return;
+    }
     if (
       frame.type === "messages_erased" &&
       (typeof frame.from !== "string" ||

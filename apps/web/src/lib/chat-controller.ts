@@ -2051,6 +2051,78 @@ export class ChatController {
         this.scheduleRead(frame.from);
       return;
     }
+    if (
+      frame.type === "own_message" &&
+      frame.to !== this.userId &&
+      typeof frame.to === "string" &&
+      typeof frame.id === "string" &&
+      typeof frame.clientMsgId === "string" &&
+      typeof frame.senderCopy === "string" &&
+      typeof frame.createdAt === "string" &&
+      typeof frame.seq === "string" &&
+      /^\d+$/u.test(frame.seq)
+    ) {
+      const peerId = frame.to;
+      const clearedBeforeSeq = this.clearedBeforeSeqs.get(peerId);
+      if (clearedBeforeSeq && BigInt(frame.seq) <= BigInt(clearedBeforeSeq))
+        return;
+      const existing = this.state.chats
+        .find((chat) => chat.peerId === peerId)
+        ?.messages.find(
+          (message) =>
+            message.clientMsgId === frame.clientMsgId ||
+            message.id === frame.id,
+        );
+      if (existing) {
+        this.upsertMessage(peerId, {
+          ...existing,
+          id: frame.id,
+          clientMsgId: frame.clientMsgId,
+          seq: frame.seq,
+          status: mergeStatus(existing.status, "sent"),
+        });
+        return;
+      }
+      let text = "";
+      let replayId: string | undefined;
+      let sentAt: number | undefined;
+      let rev: number | undefined;
+      let decryptFailed = false;
+      try {
+        const decrypted = decryptHistoryEntry({
+          historyKey: this.keys.historyKey,
+          clientMsgId: frame.clientMsgId,
+          peerId,
+          senderId: this.userId,
+          entry: frame.senderCopy,
+        });
+        if (decrypted.type && decrypted.type !== "text") return;
+        text = decrypted.text ?? "";
+        replayId = decrypted.id;
+        sentAt = decrypted.sentAt;
+        rev = decrypted.rev;
+      } catch {
+        if (isV2Envelope(frame.senderCopy)) return;
+        decryptFailed = true;
+      }
+      this.upsertMessage(peerId, {
+        id: frame.id,
+        clientMsgId: frame.clientMsgId,
+        seq: frame.seq,
+        ...(replayId ? { replayId, replayAuthor: this.userId } : {}),
+        text,
+        createdAt:
+          sentAt !== undefined
+            ? new Date(sentAt).toISOString()
+            : frame.createdAt,
+        direction: "out",
+        status: "sent",
+        ...plainEditFields({ rev, sentAt }),
+        ...(decryptFailed ? { decryptFailed: true } : {}),
+        arrivalOrder: this.arrivalOrder++,
+      });
+      return;
+    }
     if (frame.type === "sent" && typeof frame.clientMsgId === "string") {
       this.updateMessage(frame.clientMsgId, (message) => ({
         ...message,

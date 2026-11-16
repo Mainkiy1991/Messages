@@ -17,7 +17,11 @@ export type MessageRow = {
 export type MessageHub = {
   register(socket: WebSocket, userId: string): void;
   unregister(socket: WebSocket, userId: string): void;
-  sendToUser(userId: string, frame: Record<string, unknown>): void;
+  sendToUser(
+    userId: string,
+    frame: Record<string, unknown>,
+    excludeSocket?: WebSocket,
+  ): void;
   sendMailbox(socket: WebSocket, userId: string): Promise<void>;
   acknowledge(socket: WebSocket, ids: string[], userId: string): Promise<void>;
 };
@@ -73,8 +77,10 @@ export function createMessageHub(pool: Pool, batchSize = 200): MessageHub {
       if (sockets?.size === 0) active.delete(userId);
       pending.delete(socket);
     },
-    sendToUser(userId, frame) {
-      for (const socket of active.get(userId) ?? []) send(socket, frame);
+    sendToUser(userId, frame, excludeSocket) {
+      for (const socket of active.get(userId) ?? []) {
+        if (socket !== excludeSocket) send(socket, frame);
+      }
     },
     async sendMailbox(socket, userId) {
       await nextBatch(socket, userId);

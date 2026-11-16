@@ -688,6 +688,21 @@ export async function registerWebSocket(
               seq: row.seq,
             });
             if (isNew) {
+              if (row.recipient_id !== connection!.userId) {
+                hub.sendToUser(
+                  connection!.userId,
+                  {
+                    type: "own_message",
+                    id: row.id,
+                    to: row.recipient_id,
+                    clientMsgId: row.client_msg_id,
+                    senderCopy: row.sender_copy,
+                    createdAt,
+                    seq: row.seq,
+                  },
+                  socket,
+                );
+              }
               const clear = await pool.query<{ clearedBeforeSeq: string }>(
                 `SELECT COALESCE(
                    (SELECT cleared_before_seq::text FROM conversation_clears

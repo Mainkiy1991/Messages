@@ -2434,6 +2434,148 @@ suite("server authentication (PostgreSQL)", () => {
     socket.close();
   });
 
+  it("sends a new own_message only to the sender's other device", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const url = await listen();
+    const first = (await connectAuth(alice.token, url)).socket;
+    const second = (await connectAuth(alice.token, url)).socket;
+    const firstSent = nextFrame(first, (frame) => frame.type === "sent");
+    const secondSent = nextFrame(second, (frame) => frame.type === "sent");
+    const ownMessage = nextFrame(
+      second,
+      (frame) => frame.type === "own_message",
+    );
+    const recipient = (await connectAuth(bob.token, url)).socket;
+    const received = nextFrame(recipient, (frame) => frame.type === "message");
+    const frame = {
+      ...payload(bob.userId),
+      senderCopy: Buffer.from("encrypted sender copy").toString("base64"),
+    };
+
+    sendFrame(first, frame);
+    const [sent, , own, message] = await Promise.all([
+      firstSent,
+      secondSent,
+      ownMessage,
+      received,
+    ]);
+
+    expect(own).toEqual({
+      type: "own_message",
+      id: sent.id,
+      to: bob.userId,
+      clientMsgId: frame.clientMsgId,
+      senderCopy: frame.senderCopy,
+      createdAt: sent.createdAt,
+      seq: sent.seq,
+    });
+    expect(message).toMatchObject({
+      type: "message",
+      id: sent.id,
+      from: alice.userId,
+      ciphertext: frame.ciphertext,
+      seq: sent.seq,
+    });
+    expect(
+      (frameBuffers.get(first) ?? []).some(
+        (receivedFrame) => receivedFrame.type === "own_message",
+      ),
+    ).toBe(false);
+    first.close();
+    second.close();
+    recipient.close();
+  });
+
+  it("does not broadcast own_message when a clientMsgId is retried", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const url = await listen();
+    const first = (await connectAuth(alice.token, url)).socket;
+    const second = (await connectAuth(alice.token, url)).socket;
+    const recipient = (await connectAuth(bob.token, url)).socket;
+    const frame = payload(bob.userId);
+    const firstSent = nextFrame(first, (value) => value.type === "sent");
+    const secondSent = nextFrame(second, (value) => value.type === "sent");
+    const firstOwn = nextFrame(second, (value) => value.type === "own_message");
+    sendFrame(first, frame);
+    await Promise.all([firstSent, secondSent, firstOwn]);
+
+    const retryFirstSent = nextFrame(
+      first,
+      (value) =>
+        value.type === "sent" && value.clientMsgId === frame.clientMsgId,
+    );
+    const retrySecondSent = nextFrame(
+      second,
+      (value) =>
+        value.type === "sent" && value.clientMsgId === frame.clientMsgId,
+    );
+    sendFrame(first, frame);
+    await Promise.all([retryFirstSent, retrySecondSent]);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(
+      (frameBuffers.get(second) ?? []).some(
+        (value) => value.type === "own_message",
+      ),
+    ).toBe(false);
+    first.close();
+    second.close();
+    recipient.close();
+  });
+
+  it("does not send own_message for a message to yourself", async () => {
+    const alice = await createAccount();
+    const url = await listen();
+    const first = (await connectAuth(alice.token, url)).socket;
+    const second = (await connectAuth(alice.token, url)).socket;
+    const firstSent = nextFrame(first, (frame) => frame.type === "sent");
+    const secondSent = nextFrame(second, (frame) => frame.type === "sent");
+    const firstMessage = nextFrame(first, (frame) => frame.type === "message");
+    const secondMessage = nextFrame(
+      second,
+      (frame) => frame.type === "message",
+    );
+    sendFrame(first, payload(alice.userId));
+
+    await Promise.all([firstSent, secondSent, firstMessage, secondMessage]);
+    expect(
+      [
+        ...(frameBuffers.get(first) ?? []),
+        ...(frameBuffers.get(second) ?? []),
+      ].filter((frame) => frame.type === "own_message"),
+    ).toEqual([]);
+    first.close();
+    second.close();
+  });
+
+  it("keeps own_message private from other users while delivering to the recipient", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const charlie = await createAccount();
+    const url = await listen();
+    const sender = (await connectAuth(alice.token, url)).socket;
+    const recipient = (await connectAuth(bob.token, url)).socket;
+    const outsider = (await connectAuth(charlie.token, url)).socket;
+    const sent = nextFrame(sender, (frame) => frame.type === "sent");
+    const received = nextFrame(recipient, (frame) => frame.type === "message");
+    sendFrame(sender, payload(bob.userId));
+    const [sentFrame, message] = await Promise.all([sent, received]);
+    expect(message).toMatchObject({
+      type: "message",
+      id: sentFrame.id,
+      from: alice.userId,
+    });
+    expect(
+      (frameBuffers.get(outsider) ?? []).some(
+        (frame) => frame.type === "own_message",
+      ),
+    ).toBe(false);
+    sender.close();
+    recipient.close();
+    outsider.close();
+  });
+
   it("delivers a note to yourself with sent and message frames and ignores a repeated clientMsgId", async () => {
     const alice = await createAccount();
     const clientMsgId = randomId();
