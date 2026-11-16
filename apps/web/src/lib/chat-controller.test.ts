@@ -199,6 +199,19 @@ async function authenticate(socket: TestSocket, userId = aliceId) {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+function deliverFrame(controller: ChatController, frame: IncomingFrame) {
+  const handleFrame = (
+    controller as unknown as {
+      handleFrame(frame: IncomingFrame): Promise<void>;
+    }
+  ).handleFrame.bind(controller);
+  return handleFrame(frame);
+}
+
+function chatFor(controller: ChatController, peerId: string) {
+  return controller.getSnapshot().chats.find((chat) => chat.peerId === peerId);
+}
+
 describe("ChatController", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -273,6 +286,231 @@ describe("ChatController", () => {
     message = f.controller.getSnapshot().chats[0]!.messages[0]!;
     expect(message.status).toBe("delivered");
     f.controller.stop();
+  });
+
+  it("creates an outgoing sent message from own_message", async () => {
+    const f = makeController({ initialSession: session("token-own") });
+    const clientMsgId = "11111111111111111111111111111111";
+    const replayId = newReplayMessageId();
+    const sentAt = 1_700_000_000_000;
+    await deliverFrame(f.controller, {
+      type: "own_message",
+      id: "00000000-0000-4000-8000-000000000001",
+      to: bobId,
+      clientMsgId,
+      senderCopy: encryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId,
+        peerId: bobId,
+        senderId: aliceId,
+        messageId: replayId,
+        text: "sync to my other device",
+        sentAt,
+      }),
+      createdAt: new Date(sentAt).toISOString(),
+      seq: "7",
+    });
+
+    expect(chatFor(f.controller, bobId)).toMatchObject({
+      unreadCount: 0,
+      messages: [
+        {
+          id: "00000000-0000-4000-8000-000000000001",
+          clientMsgId,
+          seq: "7",
+          replayId,
+          replayAuthor: aliceId,
+          text: "sync to my other device",
+          createdAt: new Date(sentAt).toISOString(),
+          direction: "out",
+          status: "sent",
+        },
+      ],
+    });
+  });
+
+  it("merges a repeated own_message by clientMsgId without adding a row", async () => {
+    const f = makeController({
+      initialSession: session("token-own-duplicate"),
+    });
+    await f.controller.openChat(bobId);
+    await f.controller.sendText("one message");
+    const clientMsgId = chatFor(f.controller, bobId)?.messages[0]?.clientMsgId;
+    expect(clientMsgId).toBeDefined();
+    const senderCopy = encryptHistoryEntry({
+      historyKey: alice.historyKey,
+      clientMsgId: clientMsgId!,
+      peerId: bobId,
+      senderId: aliceId,
+      text: "one message",
+      sentAt: Date.now(),
+    });
+    await deliverFrame(f.controller, {
+      type: "own_message",
+      id: "00000000-0000-4000-8000-000000000002",
+      to: bobId,
+      clientMsgId: clientMsgId!,
+      senderCopy,
+      createdAt: new Date().toISOString(),
+      seq: "8",
+    });
+    await deliverFrame(f.controller, {
+      type: "own_message",
+      id: "00000000-0000-4000-8000-000000000002",
+      to: bobId,
+      clientMsgId: clientMsgId!,
+      senderCopy,
+      createdAt: new Date().toISOString(),
+      seq: "8",
+    });
+
+    expect(chatFor(f.controller, bobId)?.messages).toHaveLength(1);
+    expect(chatFor(f.controller, bobId)?.messages[0]).toMatchObject({
+      id: "00000000-0000-4000-8000-000000000002",
+      clientMsgId: clientMsgId!,
+      seq: "8",
+      status: "sent",
+    });
+  });
+
+  it("ignores own_message addressed to this same account", async () => {
+    const f = makeController();
+    await deliverFrame(f.controller, {
+      type: "own_message",
+      id: "00000000-0000-4000-8000-000000000004",
+      to: aliceId,
+      clientMsgId: "33333333333333333333333333333333",
+      senderCopy: "invalid-but-ignored",
+      createdAt: new Date().toISOString(),
+      seq: "1",
+    });
+    expect(f.controller.getSnapshot().chats).toEqual([]);
+  });
+
+  it("ignores own_message at or below the cleared sequence", async () => {
+    const f = makeController();
+    await deliverFrame(f.controller, {
+      type: "conversation_cleared",
+      peerId: bobId,
+      clearedBeforeSeq: "12",
+    });
+    const clientMsgId = "44444444444444444444444444444444";
+    await deliverFrame(f.controller, {
+      type: "own_message",
+      id: "00000000-0000-4000-8000-000000000005",
+      to: bobId,
+      clientMsgId,
+      senderCopy: encryptHistoryEntry({
+        historyKey: alice.historyKey,
+        clientMsgId,
+        peerId: bobId,
+        senderId: aliceId,
+        text: "cleared",
+        sentAt: Date.now(),
+      }),
+      createdAt: new Date().toISOString(),
+      seq: "12",
+    });
+    expect(chatFor(f.controller, bobId)).toBeUndefined();
+  });
+
+  it("silently skips a v2 sender copy encrypted with a different history key", async () => {
+    const f = makeController();
+    const clientMsgId = "55555555555555555555555555555555";
+    await deliverFrame(f.controller, {
+      type: "own_message",
+      id: "00000000-0000-4000-8000-000000000006",
+      to: bobId,
+      clientMsgId,
+      senderCopy: encryptHistoryEntry({
+        historyKey: charlie.historyKey,
+        clientMsgId,
+        peerId: bobId,
+        senderId: aliceId,
+        text: "not for this device",
+        sentAt: Date.now(),
+      }),
+      createdAt: new Date().toISOString(),
+      seq: "13",
+    });
+    expect(f.controller.getSnapshot().chats).toEqual([]);
+  });
+
+  it("keeps a safe placeholder when a non-v2 sender copy cannot be decrypted", async () => {
+    const f = makeController();
+    await deliverFrame(f.controller, {
+      type: "own_message",
+      id: "00000000-0000-4000-8000-000000000007",
+      to: bobId,
+      clientMsgId: "66666666666666666666666666666666",
+      senderCopy: "YQ==",
+      createdAt: new Date().toISOString(),
+      seq: "14",
+    });
+    expect(chatFor(f.controller, bobId)?.messages[0]).toMatchObject({
+      text: "",
+      direction: "out",
+      status: "sent",
+      decryptFailed: true,
+    });
+  });
+
+  it("does not duplicate own_message when the same row is loaded from history", async () => {
+    const clientMsgId = "77777777777777777777777777777777";
+    const senderCopy = encryptHistoryEntry({
+      historyKey: alice.historyKey,
+      clientMsgId,
+      peerId: bobId,
+      senderId: aliceId,
+      text: "same history row",
+      sentAt: Date.now(),
+    });
+    const historyRow = {
+      id: "00000000-0000-4000-8000-000000000008",
+      seq: "15",
+      direction: "out" as const,
+      clientMsgId,
+      payload: senderCopy,
+      createdAt: new Date().toISOString(),
+      deliveredAt: null,
+    };
+    const f = makeController({
+      initialSession: session("token-own-history"),
+      getHistory: async () => ({ hasMore: false, messages: [historyRow] }),
+    });
+    await deliverFrame(f.controller, {
+      type: "own_message",
+      id: historyRow.id,
+      to: bobId,
+      clientMsgId,
+      senderCopy,
+      createdAt: historyRow.createdAt,
+      seq: historyRow.seq,
+    });
+    await f.controller.openChat(bobId);
+    await waitFor(() => chatFor(f.controller, bobId)?.historyLoaded === true);
+    expect(chatFor(f.controller, bobId)?.messages).toHaveLength(1);
+    expect(chatFor(f.controller, bobId)?.messages[0]).toMatchObject({
+      id: historyRow.id,
+      seq: historyRow.seq,
+      text: "same history row",
+    });
+  });
+
+  it("silently skips legacy non-text sender copies", async () => {
+    const f = makeController();
+    for (const [index, entry] of Object.values(legacyProtocolRows).entries()) {
+      await deliverFrame(f.controller, {
+        type: "own_message",
+        id: `00000000-0000-4000-8000-${String(index + 10).padStart(12, "0")}`,
+        to: bobId,
+        clientMsgId: entry.clientMsgId,
+        senderCopy: entry.senderCopy,
+        createdAt: new Date().toISOString(),
+        seq: String(index + 16),
+      });
+    }
+    expect(chatFor(f.controller, bobId)).toBeUndefined();
   });
 
   it("shows error on timeout and retries the exact frame with the same clientMsgId", async () => {

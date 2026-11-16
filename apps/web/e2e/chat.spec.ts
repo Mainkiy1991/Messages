@@ -464,6 +464,40 @@ test.describe("real browser chat", () => {
     ).toHaveAttribute("data-status", "read");
   });
 
+  test("syncs own messages instantly across devices and keeps reply order", async ({
+    browser,
+  }) => {
+    const firstDevice = await openUser(browser);
+    const alice = await createAccount(firstDevice.page);
+    const secondDevice = await openUser(browser);
+    expect(await signIn(secondDevice.page, alice.phrase)).toBe(alice.id);
+    const bobUser = await openUser(browser);
+    const bob = await createAccount(bobUser.page);
+
+    await openChat(firstDevice.page, bob.id);
+    await openChat(secondDevice.page, bob.id);
+    await send(firstDevice.page, "Alice device one");
+    const secondDeviceMessages = secondDevice.page.locator(
+      ".message-list .message-text",
+    );
+    await expect(
+      secondDeviceMessages.filter({ hasText: /^Alice device one/u }),
+    ).toBeVisible();
+
+    await openChat(bobUser.page, alice.id);
+    await send(bobUser.page, "Bob replies");
+    await send(firstDevice.page, "Alice follows up");
+
+    for (const page of [firstDevice.page, secondDevice.page]) {
+      const messages = page.locator(".message-list .message-text");
+      await expect(messages).toHaveText([
+        /^Alice device one/u,
+        /^Bob replies/u,
+        /^Alice follows up/u,
+      ]);
+    }
+  });
+
   test("chat controls and long message fit a 360px viewport", async ({
     browser,
   }) => {

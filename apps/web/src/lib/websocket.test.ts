@@ -506,6 +506,50 @@ describe("websocket chat connection", () => {
     connection.stop();
   });
 
+  it("drops malformed own_message frames and forwards valid frames without ack", async () => {
+    const socket = new FakeSocket();
+    const socketFactory = vi.fn(() => socket as never);
+    const keys = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    const onFrame = vi.fn();
+    const connection = new ChatConnection(
+      keys,
+      {
+        token: "a".repeat(43),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+      },
+      { onState: vi.fn(), onFrame },
+      { socketFactory },
+    );
+    connection.start();
+    await waitFor(() => socketFactory.mock.calls.length === 1);
+    socket.open();
+    socket.frame({ type: "auth_ok" });
+    await waitFor(() => connection.currentToken() !== null);
+    const valid = {
+      type: "own_message",
+      id: "00000000-0000-4000-8000-000000000001",
+      to: "1".repeat(64),
+      clientMsgId: "2".repeat(32),
+      senderCopy: "encrypted-copy",
+      createdAt: new Date().toISOString(),
+      seq: "123",
+    };
+    socket.frame({ ...valid, to: "short", seq: 123 });
+    socket.frame(valid);
+    await waitFor(() => onFrame.mock.calls.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    expect(onFrame).toHaveBeenCalledWith(valid);
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    expect(connection.hasSeen(valid.id)).toBe(false);
+    expect(socket.sent.map((value) => JSON.parse(value).type)).not.toContain(
+      "ack",
+    );
+    connection.stop();
+  });
+
   it("splits acknowledgement batches at 200 IDs", async () => {
     const socket = new FakeSocket();
     const socketFactory = vi.fn(() => socket as never);
