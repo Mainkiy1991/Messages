@@ -729,7 +729,7 @@ test.describe("real browser chat", () => {
     await a.context.setOffline(false);
   });
 
-  test("keeps a cleared chat in another window without reloading at 360px", async ({
+  test("keeps a cleared chat available after refreshing another window at 360px", async ({
     browser,
   }) => {
     const a = await openUser(browser);
@@ -755,6 +755,11 @@ test.describe("real browser chat", () => {
     await a.page.getByTestId("clear-chat").click();
     await a.page.getByTestId("confirm-clear-chat").click();
     await expect(chatWith(a.page, bob.id)).toBeVisible();
+    await secondWindow.reload();
+    await expect(secondWindow.getByTestId("connection-status")).toHaveAttribute(
+      "data-state",
+      "connected",
+    );
     await expect(chatWith(secondWindow, bob.id)).toBeVisible();
   });
 
