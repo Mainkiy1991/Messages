@@ -298,6 +298,16 @@ export class ChatConnection {
       return;
     }
     if (frame.type === "pong") return;
+    if (
+      frame.type === "messages_erased" &&
+      (typeof frame.from !== "string" ||
+        typeof frame.to !== "string" ||
+        typeof frame.upToSeq !== "string" ||
+        !/^\d{1,19}$/u.test(frame.upToSeq) ||
+        typeof frame.changeSeq !== "string" ||
+        !/^\d{1,19}$/u.test(frame.changeSeq))
+    )
+      return;
     if (frame.type === "message" && typeof frame.id === "string") {
       if (!this.seen.has(frame.id)) {
         this.seen.add(frame.id);

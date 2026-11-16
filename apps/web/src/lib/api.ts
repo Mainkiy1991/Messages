@@ -26,6 +26,10 @@ export type ConversationClear = {
   peerId: string;
   clearedBeforeSeq: string;
 };
+export type ConversationErase = {
+  erased: number;
+  clearedBeforeSeq: string;
+};
 export type HistoryMessage = {
   id: string;
   seq: string;
@@ -185,6 +189,23 @@ export function deleteConversation(
     `/conversations/${peerId}`,
     token,
     { method: "DELETE" },
+  );
+}
+
+export function eraseConversation(
+  peerId: string,
+  token: string,
+  fetcher: FetchLike = fetch,
+) {
+  return request<ConversationErase>(
+    fetcher,
+    `/conversations/${peerId}/erase`,
+    token,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    },
   );
 }
 

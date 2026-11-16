@@ -36,7 +36,7 @@ Saved messages is a chat with yourself: notes, links, anything you do not want t
 
 - Open **New chat** and enter your own ID from Profile — **Saved messages** opens. Its row is always the first one in the chat list.
 - Notes are encrypted exactly like normal messages and synced: after signing in with the seed phrase they are available on all your devices.
-- Saved messages have no delivery or read statuses, no unread counter and no "online" status: you write only to yourself. The name cannot be changed, and clearing the chat deletes the notes only for you.
+- Saved messages have no delivery or read statuses, no unread counter and no "online" status: you write only to yourself. The name cannot be changed. **Clear chat** removes notes only for you, on all your devices; **Delete chat** also erases your messages from the server.
 - Honestly about metadata: the server can see that you wrote notes to yourself and when, but never their contents.
 
 ## Messages and statuses
@@ -70,13 +70,22 @@ You can delete your own message yourself, without asking the other person: hover
 
 The text is erased on the server, and a note takes its place for both of you: **You deleted this message** for you and **The other person deleted this message** for them. The chat list shows **Message deleted** instead of the text. You can delete your own delivered message, including in Saved messages; messages that are still sending or failed cannot be deleted. A deletion cannot be undone.
 
-Nothing is guaranteed.
+In Saved messages, the confirmation says **“Delete this note?”** and does not mention another person.
+
+## Clearing and deleting a chat
+
+- **Clear chat** clears the history only for you, on all your devices. Messages remain on the server and with the other person.
+- **Delete chat** also clears the history on all your devices, and additionally erases all your messages in that conversation from the server. The other person's messages are not affected; one collapsed **“The other person deleted these messages”** note remains where your messages were.
+- In Saved messages, this only applies to your notes. There is no other person in that chat. Its confirmations and stubs say **“You deleted this message”** or **“You deleted these messages.”**
+
+Nothing is guaranteed when deleting a chat.
 
 - The other person may have read, copied or photographed the text earlier, and a modified client may have saved it.
 - The hosting provider may keep database backups for a limited time, and a dishonest server may have copied the data earlier.
 - Metadata stays: who wrote to whom and when, and that the row existed. The content is erased, not the fact of the conversation.
 - We do not erase messages of the other person.
 - A tab of the other person without a connection shows the stub after it reconnects or the page is reloaded. Clients that did not reload the page (F5) show "could not decrypt the message".
+- Unsent messages cannot be deleted.
 
 ## PIN (optional)
 

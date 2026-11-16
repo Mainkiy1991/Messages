@@ -65,6 +65,8 @@ import {
 import {
   canDeleteMessage,
   chatPreviewAfterDeletion,
+  collapseDeletedMessages,
+  deletedMessageLabel,
 } from "./lib/message-delete.js";
 import "./style.css";
 
@@ -105,7 +107,9 @@ function App() {
   const [showLogoutSkipWarning, setShowLogoutSkipWarning] = useState(false);
   const [logoutPhrase, setLogoutPhrase] = useState("");
   const [logoutError, setLogoutError] = useState(false);
-  const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
+  const [chatConfirmation, setChatConfirmation] = useState<
+    "clear" | "erase" | null
+  >(null);
   const [showForgotPinConfirmation, setShowForgotPinConfirmation] =
     useState(false);
   const [chatMenuOpen, setChatMenuOpen] = useState(false);
@@ -550,6 +554,7 @@ function App() {
       : contactLabel(peerId, chatState.contacts);
   const activeChat = chats.find((chat) => chat.peerId === activePeer);
   const activeMessages = activeChat?.messages ?? [];
+  const displayMessages = collapseDeletedMessages(activeMessages);
   useEffect(() => {
     if (screen !== "home") return;
     const onPopState = (event: PopStateEvent) => {
@@ -575,7 +580,7 @@ function App() {
   useEffect(() => {
     if (!activePeer) {
       setChatMenuOpen(false);
-      setShowDeleteConfirmation(false);
+      setChatConfirmation(null);
     }
   }, [activePeer]);
   useEffect(() => {
@@ -841,17 +846,29 @@ function App() {
             : t.sending;
   }
 
-  async function confirmDeleteChat() {
-    if (!activePeer) return;
-    const deleted = await controllerRef.current?.deleteChat(activePeer);
-    if (deleted) {
-      setShowDeleteConfirmation(false);
+  async function confirmChatAction() {
+    if (!activePeer || !chatConfirmation) return;
+    const action = chatConfirmation;
+    const succeeded =
+      action === "clear"
+        ? await controllerRef.current?.clearChat(activePeer)
+        : await controllerRef.current?.deleteChat(activePeer);
+    if (succeeded) {
+      setChatConfirmation(null);
       setChatMenuOpen(false);
       setEditingName(false);
       setDraft("");
       setChatError("");
     } else {
-      setChatError(t.deleteChatFailed);
+      setChatError(
+        action === "clear"
+          ? isSavedChat
+            ? t.savedClearChatFailed
+            : t.clearChatFailed
+          : isSavedChat
+            ? t.savedEraseChatFailed
+            : t.eraseChatFailed,
+      );
     }
   }
   if (screen === "loading") return <main className="session-loading" />;
@@ -1537,12 +1554,24 @@ function App() {
                           <div className="conversation-menu-panel">
                             <button
                               type="button"
+                              className="secondary"
+                              data-testid="clear-chat"
+                              onClick={() => {
+                                setChatMenuOpen(false);
+                                setChatError("");
+                                setChatConfirmation("clear");
+                              }}
+                            >
+                              {t.clearChatMenu}
+                            </button>
+                            <button
+                              type="button"
                               className="danger"
                               data-testid="delete-chat"
                               onClick={() => {
                                 setChatMenuOpen(false);
                                 setChatError("");
-                                setShowDeleteConfirmation(true);
+                                setChatConfirmation("erase");
                               }}
                             >
                               {t.deleteChatMenu}
@@ -1609,7 +1638,7 @@ function App() {
                             {t.savedHint}
                           </p>
                         )}
-                      {activeMessages.map((message) => (
+                      {displayMessages.map(({ message, deletedCount }) => (
                         <div
                           className={`message-row ${message.direction}${
                             activeEditId === message.id ? " active" : ""
@@ -1643,11 +1672,19 @@ function App() {
                             <div className="message-text">
                               {message.deleted ? (
                                 <DeletedMessageText
-                                  label={
-                                    message.direction === "out"
-                                      ? t.deletedOwnMessage
-                                      : t.deletedPeerMessage
-                                  }
+                                  label={deletedMessageLabel(
+                                    message.direction,
+                                    deletedCount,
+                                    isSavedChat,
+                                    {
+                                      own: t.deletedOwnMessage,
+                                      ownPlural: t.deletedOwnMessages,
+                                      peer: t.deletedPeerMessage,
+                                      peerPlural: t.deletedPeerMessages,
+                                      saved: t.savedDeletedMessage,
+                                      savedPlural: t.savedDeletedMessages,
+                                    },
+                                  )}
                                 />
                               ) : message.decryptFailed ? (
                                 t.decryptFailed
@@ -1709,7 +1746,9 @@ function App() {
                     )}
                     {deleteConfirmId && !editState && (
                       <DeleteConfirmBar
-                        text={t.deleteConfirm}
+                        text={
+                          isSavedChat ? t.savedDeleteConfirm : t.deleteConfirm
+                        }
                         sendLabel={t.delete}
                         cancelLabel={t.cancel}
                         onSend={() => void confirmDeleteMessage()}
@@ -1841,27 +1880,49 @@ function App() {
                 </button>
               </div>
             )}
-            {showDeleteConfirmation && (
+            {chatConfirmation && (
               <div
                 className="confirm-panel confirm-stack"
                 role="alertdialog"
                 aria-labelledby="delete-chat-message"
                 aria-describedby="delete-chat-description"
               >
-                <h2 id="delete-chat-message">{t.deleteChatMenu}</h2>
-                <p id="delete-chat-description">{t.confirmDeleteChat}</p>
-                {chatError && <p className="error">{chatError}</p>}
+                <h2 id="delete-chat-message">
+                  {chatConfirmation === "clear"
+                    ? t.clearChatMenu
+                    : t.deleteChatMenu}
+                </h2>
+                <p id="delete-chat-description">
+                  {chatConfirmation === "clear"
+                    ? isSavedChat
+                      ? t.savedClearChatConfirmation
+                      : t.clearChatConfirmation
+                    : isSavedChat
+                      ? t.savedEraseChatConfirmation
+                      : t.eraseChatConfirmation}
+                </p>
+                {chatError && (
+                  <p className="error" role="alert" data-testid="chat-error">
+                    {chatError}
+                  </p>
+                )}
                 <button
-                  data-testid="confirm-delete-chat"
-                  className="danger"
-                  onClick={() => void confirmDeleteChat()}
+                  data-testid={
+                    chatConfirmation === "clear"
+                      ? "confirm-clear-chat"
+                      : "confirm-delete-chat"
+                  }
+                  className={
+                    chatConfirmation === "clear" ? "primary" : "danger"
+                  }
+                  onClick={() => void confirmChatAction()}
                 >
-                  {t.delete}
+                  {chatConfirmation === "clear" ? t.clear : t.delete}
                 </button>
                 <button
                   className="secondary"
                   onClick={() => {
-                    setShowDeleteConfirmation(false);
+                    setChatConfirmation(null);
                     setChatError("");
                   }}
                 >

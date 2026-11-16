@@ -464,6 +464,48 @@ describe("websocket chat connection", () => {
     connection.stop();
   });
 
+  it("drops malformed messages-erased frames", async () => {
+    const socket = new FakeSocket();
+    const socketFactory = vi.fn(() => socket as never);
+    const keys = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    const onFrame = vi.fn();
+    const connection = new ChatConnection(
+      keys,
+      {
+        token: "a".repeat(43),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+      },
+      { onState: vi.fn(), onFrame },
+      { socketFactory },
+    );
+    connection.start();
+    await waitFor(() => socketFactory.mock.calls.length === 1);
+    socket.open();
+    socket.frame({ type: "auth_ok" });
+    await waitFor(() => onFrame.mock.calls.length === 0);
+    socket.frame({
+      type: "messages_erased",
+      from: "1".repeat(64),
+      to: "2".repeat(64),
+      upToSeq: 5,
+      changeSeq: "10",
+    });
+    const valid = {
+      type: "messages_erased",
+      from: "1".repeat(64),
+      to: "2".repeat(64),
+      upToSeq: "5",
+      changeSeq: "10",
+    };
+    socket.frame(valid);
+    await waitFor(() => onFrame.mock.calls.length === 1);
+    expect(onFrame).toHaveBeenCalledWith(valid);
+    connection.stop();
+  });
+
   it("splits acknowledgement batches at 200 IDs", async () => {
     const socket = new FakeSocket();
     const socketFactory = vi.fn(() => socket as never);

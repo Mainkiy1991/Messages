@@ -53,12 +53,26 @@ export const strings = {
     logoutSkipConfirm: "Всё равно выйти",
     confirm: "Выйти",
     cancel: "Отмена",
+    clearChatMenu: "Очистить чат",
     deleteChatMenu: "Удалить чат",
     chatActions: "Действия чата",
-    confirmDeleteChat:
-      "Переписка будет удалена только у вас, на всех ваших устройствах. У собеседника она останется. Неотправленные сообщения этого чата тоже будут удалены. Это нельзя отменить.",
-    deleteChatFailed:
-      "Не удалось удалить переписку. Проверьте соединение и попробуйте ещё раз.",
+    clear: "Очистить",
+    clearChatConfirmation:
+      "Переписка очистится только у вас, на всех ваших устройствах. Сообщения останутся на сервере и у собеседника. Неотправленные сообщения этого чата тоже будут удалены.",
+    savedClearChatConfirmation:
+      "Заметки очистятся только у вас, на всех ваших устройствах. Сообщения останутся на сервере. Неотправленные заметки тоже будут удалены.",
+    eraseChatConfirmation:
+      "Чат очистится у вас на всех устройствах, а на сервере будут стёрты все ваши сообщения. Сообщения собеседника не затрагиваются; у него останется строка «Собеседник удалил сообщения». Гарантий нет: собеседник мог прочитать, скопировать или сфотографировать сообщения раньше; хостинг может ограниченное время хранить резервные копии; изменённый клиент мог сохранить текст. Метаданные переписки останутся. Неотправленные сообщения этого чата тоже будут удалены.",
+    savedEraseChatConfirmation:
+      "Заметки очистятся на всех ваших устройствах, а все ваши сообщения будут стёрты на сервере. Гарантий нет: текст могли прочитать, скопировать или сфотографировать раньше; хостинг может ограниченное время хранить резервные копии; изменённый клиент мог сохранить текст. Метаданные останутся. Неотправленные заметки тоже будут удалены.",
+    clearChatFailed:
+      "Не удалось очистить чат. Проверьте соединение и попробуйте ещё раз.",
+    savedClearChatFailed:
+      "Не удалось очистить заметки. Проверьте соединение и попробуйте ещё раз.",
+    eraseChatFailed:
+      "Не удалось удалить чат. Проверьте соединение и попробуйте ещё раз.",
+    savedEraseChatFailed:
+      "Не удалось удалить заметки. Проверьте соединение и попробуйте ещё раз.",
     outboxClearFailed:
       "Чат скрыт, но не удалось очистить очередь сообщений. Перезагрузите страницу и попробуйте снова.",
     delete: "Удалить",
@@ -91,10 +105,16 @@ export const strings = {
     deleteMessage: "Удалить сообщение",
     deleteConfirm:
       "Удалить это сообщение? Его текст будет стёрт на сервере и у собеседника. Гарантий нет: собеседник мог уже прочитать или сохранить сообщение.",
+    savedDeleteConfirm:
+      "Удалить эту заметку? Её текст будет стёрт на сервере. Гарантий нет: текст могли прочитать, скопировать или сфотографировать раньше; хостинг может ограниченное время хранить резервные копии; изменённый клиент мог сохранить текст.",
     deletePending: "Подождите: удаление уже идёт",
     deleteNotDeletable: "Это сообщение нельзя удалить",
     deletedOwnMessage: "Вы удалили сообщение",
+    deletedOwnMessages: "Вы удалили сообщения",
     deletedPeerMessage: "Собеседник удалил сообщение",
+    deletedPeerMessages: "Собеседник удалил сообщения",
+    savedDeletedMessage: "Вы удалили сообщение",
+    savedDeletedMessages: "Вы удалили сообщения",
     messageDeleted: "Сообщение удалено",
     sending: "отправляется",
     sent: "отправлено",
@@ -187,12 +207,26 @@ export const strings = {
     logoutSkipConfirm: "Sign out anyway",
     confirm: "Sign out",
     cancel: "Cancel",
+    clearChatMenu: "Clear chat",
     deleteChatMenu: "Delete chat",
     chatActions: "Chat actions",
-    confirmDeleteChat:
-      "The conversation will be deleted only for you, on all your devices. It will remain with the other person. Unsent messages in this chat will also be deleted. This cannot be undone.",
-    deleteChatFailed:
-      "Could not delete the conversation. Check your connection and try again.",
+    clear: "Clear",
+    clearChatConfirmation:
+      "The conversation will be cleared only for you, on all your devices. Messages will remain on the server and with the other person. Unsent messages in this chat will also be deleted.",
+    savedClearChatConfirmation:
+      "Your notes will be cleared only for you, on all your devices. Messages will remain on the server. Unsent notes will also be deleted.",
+    eraseChatConfirmation:
+      "The chat will be cleared on all your devices, and all your messages in it will be erased from the server. The other person's messages are not affected; they will see “The other person deleted these messages” in their place. Nothing is guaranteed: they may have read, copied, or photographed messages earlier; the host may keep backups for a limited time; a modified client may have saved the text. Conversation metadata remains. Unsent messages in this chat will also be deleted.",
+    savedEraseChatConfirmation:
+      "Your notes will be cleared on all your devices, and all your messages in this chat will be erased from the server. Nothing is guaranteed: the text may have been read, copied, or photographed earlier; the host may keep backups for a limited time; a modified client may have saved the text. Metadata remains. Unsent notes will also be deleted.",
+    clearChatFailed:
+      "Could not clear the chat. Check your connection and try again.",
+    savedClearChatFailed:
+      "Could not clear your notes. Check your connection and try again.",
+    eraseChatFailed:
+      "Could not delete the chat. Check your connection and try again.",
+    savedEraseChatFailed:
+      "Could not delete your notes. Check your connection and try again.",
     outboxClearFailed:
       "The chat was hidden, but its queued messages could not be cleared. Reload the page and try again.",
     delete: "Delete",
@@ -226,10 +260,16 @@ export const strings = {
     deleteMessage: "Delete message",
     deleteConfirm:
       "Delete this message? Its text will be erased on the server and for the other person. Nothing is guaranteed: they may have already read or saved the message.",
+    savedDeleteConfirm:
+      "Delete this note? Its text will be erased on the server. Nothing is guaranteed: the text may have been read, copied, or photographed earlier; the host may keep backups for a limited time; a modified client may have saved it.",
     deletePending: "Wait: the deletion is already in progress",
     deleteNotDeletable: "This message cannot be deleted",
     deletedOwnMessage: "You deleted this message",
+    deletedOwnMessages: "You deleted these messages",
     deletedPeerMessage: "The other person deleted this message",
+    deletedPeerMessages: "The other person deleted these messages",
+    savedDeletedMessage: "You deleted this message",
+    savedDeletedMessages: "You deleted these messages",
     messageDeleted: "Message deleted",
     sending: "sending",
     sent: "sent",
@@ -321,12 +361,26 @@ export const strings = {
     logoutSkipConfirm: "Усе одно вийти",
     confirm: "Вийти",
     cancel: "Скасувати",
+    clearChatMenu: "Очистити чат",
     deleteChatMenu: "Видалити чат",
     chatActions: "Дії чату",
-    confirmDeleteChat:
-      "Переписку буде видалено лише у вас, на всіх ваших пристроях. У співрозмовника вона залишиться. Ненадіслані повідомлення цього чату також буде видалено. Цю дію не можна скасувати.",
-    deleteChatFailed:
-      "Не вдалося видалити переписку. Перевірте з’єднання та спробуйте ще раз.",
+    clear: "Очистити",
+    clearChatConfirmation:
+      "Переписку буде очищено лише у вас, на всіх ваших пристроях. Повідомлення залишаться на сервері та у співрозмовника. Ненадіслані повідомлення цього чату також буде видалено.",
+    savedClearChatConfirmation:
+      "Нотатки буде очищено лише у вас, на всіх ваших пристроях. Повідомлення залишаться на сервері. Ненадіслані нотатки також буде видалено.",
+    eraseChatConfirmation:
+      "Чат буде очищено на всіх ваших пристроях, а всі ваші повідомлення в ньому буде стерто із сервера. Повідомлення співрозмовника не зачіпаються; на їхньому місці він побачить «Співрозмовник видалив повідомлення». Гарантій немає: співрозмовник міг прочитати, скопіювати або сфотографувати повідомлення раніше; хостинг може обмежений час зберігати резервні копії; змінений клієнт міг зберегти текст. Метадані листування залишаться. Ненадіслані повідомлення цього чату також буде видалено.",
+    savedEraseChatConfirmation:
+      "Нотатки буде очищено на всіх ваших пристроях, а всі ваші повідомлення в цьому чаті буде стерто із сервера. Гарантій немає: текст могли прочитати, скопіювати або сфотографувати раніше; хостинг може обмежений час зберігати резервні копії; змінений клієнт міг зберегти текст. Метадані залишаться. Ненадіслані нотатки також буде видалено.",
+    clearChatFailed:
+      "Не вдалося очистити чат. Перевірте з’єднання та спробуйте ще раз.",
+    savedClearChatFailed:
+      "Не вдалося очистити нотатки. Перевірте з’єднання та спробуйте ще раз.",
+    eraseChatFailed:
+      "Не вдалося видалити чат. Перевірте з’єднання та спробуйте ще раз.",
+    savedEraseChatFailed:
+      "Не вдалося видалити нотатки. Перевірте з’єднання та спробуйте ще раз.",
     outboxClearFailed:
       "Чат приховано, але не вдалося очистити чергу повідомлень. Перезавантажте сторінку та спробуйте ще раз.",
     delete: "Видалити",
@@ -360,10 +414,16 @@ export const strings = {
     deleteMessage: "Видалити повідомлення",
     deleteConfirm:
       "Видалити це повідомлення? Його текст буде стерто на сервері та у співрозмовника. Гарантій немає: співрозмовник міг уже прочитати або зберегти повідомлення.",
+    savedDeleteConfirm:
+      "Видалити цю нотатку? Її текст буде стерто на сервері. Гарантій немає: текст могли прочитати, скопіювати або сфотографувати раніше; хостинг може обмежений час зберігати резервні копії; змінений клієнт міг зберегти текст.",
     deletePending: "Зачекайте: видалення вже виконується",
     deleteNotDeletable: "Це повідомлення не можна видалити",
     deletedOwnMessage: "Ви видалили повідомлення",
+    deletedOwnMessages: "Ви видалили кілька повідомлень",
     deletedPeerMessage: "Співрозмовник видалив повідомлення",
+    deletedPeerMessages: "Співрозмовник видалив кілька повідомлень",
+    savedDeletedMessage: "Ви видалили повідомлення",
+    savedDeletedMessages: "Ви видалили кілька повідомлень",
     messageDeleted: "Повідомлення видалено",
     sending: "надсилається",
     sent: "надіслано",

@@ -3,6 +3,8 @@ import type { ChatMessage } from "./chat-controller.js";
 import {
   canDeleteMessage,
   chatPreviewAfterDeletion,
+  collapseDeletedMessages,
+  deletedMessageLabel,
 } from "./message-delete.js";
 import { canEditMessage, toggleEditAction } from "./message-edit.js";
 
@@ -120,6 +122,58 @@ describe("chat preview of an erased message", () => {
         "Message deleted",
       ),
     ).toBe("Message deleted");
+  });
+
+  describe("consecutive deleted message display", () => {
+    it("keeps a single stub singular and collapses same-author runs", () => {
+      const single = chatMessage({ id: "one", deleted: true });
+      expect(collapseDeletedMessages([single])).toEqual([
+        { message: single, deletedCount: 1 },
+      ]);
+
+      const run = [
+        chatMessage({ id: "one", deleted: true }),
+        chatMessage({ id: "two", deleted: true }),
+        chatMessage({ id: "three", deleted: true }),
+      ];
+      expect(collapseDeletedMessages(run)).toEqual([
+        { message: run[0], deletedCount: 3 },
+      ]);
+      const labels = {
+        own: "You deleted this message",
+        ownPlural: "You deleted these messages",
+        peer: "The other person deleted this message",
+        peerPlural: "The other person deleted these messages",
+        saved: "You deleted this message",
+        savedPlural: "You deleted these messages",
+      };
+      expect(deletedMessageLabel("out", 1, false, labels)).toBe(labels.own);
+      expect(deletedMessageLabel("out", 3, false, labels)).toBe(
+        labels.ownPlural,
+      );
+      expect(deletedMessageLabel("in", 1, false, labels)).toBe(labels.peer);
+      expect(deletedMessageLabel("in", 3, false, labels)).toBe(
+        labels.peerPlural,
+      );
+      expect(deletedMessageLabel("in", 3, true, labels)).toBe(
+        labels.savedPlural,
+      );
+    });
+
+    it("keeps different authors and ordinary messages as run boundaries", () => {
+      const own = chatMessage({ id: "own", deleted: true, direction: "out" });
+      const peer = chatMessage({ id: "peer", deleted: true, direction: "in" });
+      const text = chatMessage({ id: "text", deleted: false });
+      expect(collapseDeletedMessages([own, peer, peer])).toEqual([
+        { message: own, deletedCount: 1 },
+        { message: peer, deletedCount: 2 },
+      ]);
+      expect(collapseDeletedMessages([own, text, own])).toEqual([
+        { message: own, deletedCount: 1 },
+        { message: text, deletedCount: 1 },
+        { message: own, deletedCount: 1 },
+      ]);
+    });
   });
 
   it("keeps the ordinary preview in every other case", () => {

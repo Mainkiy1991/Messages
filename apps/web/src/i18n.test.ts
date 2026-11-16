@@ -70,7 +70,6 @@ describe("localization", () => {
     expect(strings.uk.pinUnlockTitle).toBe("Введіть PIN, щоб розблокувати");
     expect(strings.uk.pinIncorrect).toBe("Невірний PIN");
     expect(strings.uk.invalid).toContain("Невірна сід-фраза");
-    expect(strings.uk.confirmDeleteChat).toContain("Ненадіслані повідомлення");
     expect(strings.uk.pinQueueConfirm(1)).toContain("ненадіслане повідомлення");
     expect(strings.uk.pinQueueConfirm(2)).toContain("ненадіслані повідомлення");
     expect(strings.uk.pinQueueConfirm(5)).toContain("ненадісланих повідомлень");
@@ -93,13 +92,40 @@ describe("localization", () => {
     expect(strings.ru.deleteChatMenu).toBe("Удалить чат");
     expect(strings.ru.delete).toBe("Удалить");
     expect(strings.ru.cancel).toBe("Отмена");
-    expect(strings.ru.confirmDeleteChat).toContain(
-      "Неотправленные сообщения этого чата тоже будут удалены.",
+    expect(strings.ru.clearChatConfirmation).toContain(
+      "Сообщения останутся на сервере и у собеседника.",
     );
-    expect(strings.en.confirmDeleteChat).toContain(
-      "Unsent messages in this chat will also be deleted.",
+    expect(strings.en.clearChatConfirmation).toContain(
+      "Messages will remain on the server and with the other person.",
     );
-    expect(strings.en.deleteChatFailed).toContain("try again");
+    expect(strings.en.eraseChatFailed).toContain("try again");
+  });
+  it("provides all chat deletion strings in every language without peers in Saved messages", () => {
+    const savedKeys = [
+      "savedClearChatConfirmation",
+      "savedEraseChatConfirmation",
+      "savedClearChatFailed",
+      "savedEraseChatFailed",
+      "savedDeleteConfirm",
+      "savedDeletedMessage",
+      "savedDeletedMessages",
+    ] as const;
+    for (const language of ["ru", "en", "uk"] as const) {
+      for (const key of savedKeys) expect(strings[language][key]).toBeTruthy();
+      const savedText = savedKeys
+        .map((key) => strings[language][key])
+        .join(" ");
+      expect(savedText).not.toMatch(
+        language === "ru"
+          ? /собеседник|peer/iu
+          : language === "uk"
+            ? /співрозмовник|peer/iu
+            : /peer/iu,
+      );
+    }
+    expect(strings.ru.savedDeleteConfirm).toContain("Удалить эту заметку?");
+    expect(strings.en.savedDeleteConfirm).toContain("Delete this note?");
+    expect(strings.uk.savedDeleteConfirm).toContain("Видалити цю нотатку?");
   });
   it("uses Ukrainian plural forms, including 11–14 exceptions", () => {
     expect(ukrainianPlural(1, "one", "few", "many")).toBe("one");
