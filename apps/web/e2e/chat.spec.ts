@@ -464,6 +464,72 @@ test.describe("real browser chat", () => {
     ).toHaveAttribute("data-status", "read");
   });
 
+  test("chat controls and long message fit a 360px viewport", async ({
+    browser,
+  }) => {
+    const user = await openUser(browser);
+    const { page } = user;
+    await createAccount(page);
+    const bob = await createAccount((await openUser(browser)).page);
+    await page.setViewportSize({ width: 360, height: 780 });
+    await openChat(page, bob.id);
+
+    const backButton = page.getByTestId("mobile-back");
+    await expect(backButton).toBeVisible();
+    await expect(backButton).toHaveAccessibleName("Back");
+    await expect(backButton).toHaveAttribute("title", "Back");
+    await expect(backButton).toHaveText("");
+    const backBox = await backButton.boundingBox();
+    expect(backBox).not.toBeNull();
+    expect(backBox!.width).toBeGreaterThanOrEqual(44);
+    expect(backBox!.height).toBeGreaterThanOrEqual(44);
+
+    await page.getByTestId("chat-menu").click();
+    const menu = page.locator(".conversation-menu-panel");
+    const clearButton = page.getByTestId("clear-chat");
+    const deleteButton = page.getByTestId("delete-chat");
+    await expect(clearButton).toBeVisible();
+    await expect(deleteButton).toBeVisible();
+    expect(
+      await menu.evaluate((element) => getComputedStyle(element).display),
+    ).toBe("grid");
+    const menuBox = await menu.boundingBox();
+    const clearBox = await clearButton.boundingBox();
+    const deleteBox = await deleteButton.boundingBox();
+    expect(menuBox).not.toBeNull();
+    expect(clearBox).not.toBeNull();
+    expect(deleteBox).not.toBeNull();
+    expect(deleteBox!.y).toBeGreaterThan(clearBox!.y);
+    expect(Math.abs(deleteBox!.x - clearBox!.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(deleteBox!.width - clearBox!.width)).toBeLessThanOrEqual(1);
+    expect(menuBox!.x).toBeGreaterThanOrEqual(0);
+    expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(360);
+    await page.getByTestId("chat-menu").click();
+
+    const text = Array.from({ length: 34 }, () => "ordinary").join(" ");
+    await send(page, text);
+    const message = page.locator(
+      '[data-testid="message"][data-direction="out"]',
+    );
+    await expect(message).toContainText(text);
+    const listBox = await page.locator(".message-list").boundingBox();
+    const messageBox = await message.boundingBox();
+    expect(listBox).not.toBeNull();
+    expect(messageBox).not.toBeNull();
+    const widthRatio = messageBox!.width / listBox!.width;
+    expect(widthRatio).toBeGreaterThan(0.6);
+    expect(widthRatio).toBeLessThanOrEqual(0.9);
+    expect(
+      await message.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { overflowWrap: style.overflowWrap, wordBreak: style.wordBreak };
+      }),
+    ).toEqual({ overflowWrap: "anywhere", wordBreak: "normal" });
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBeLessThanOrEqual(360);
+  });
+
   test("clears a chat only for Alice, keeps it cleared after reload, and shows Bob's new message", async ({
     browser,
   }) => {

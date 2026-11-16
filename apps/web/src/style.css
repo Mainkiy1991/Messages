@@ -649,6 +649,9 @@ select {
   top: 42px;
   right: 0;
   width: max-content;
+  max-width: calc(100vw - 16px);
+  display: grid;
+  gap: 4px;
   padding: 6px;
   border: 1px solid #e4e6ee;
   border-radius: 8px;
@@ -656,6 +659,7 @@ select {
   box-shadow: 0 8px 24px #252a4020;
 }
 .conversation-menu-panel button {
+  width: 100%;
   min-height: 38px;
 }
 .message-list {
@@ -699,7 +703,7 @@ select {
 }
 .message-row.out {
   align-self: flex-end;
-  max-width: calc(75% - 72px);
+  max-width: 75%;
 }
 .message-row .message {
   align-self: center;
@@ -932,7 +936,12 @@ button.primary.pin-action-incorrect:disabled {
   .mobile-back {
     display: inline-flex;
     align-items: center;
-    min-height: 40px;
+    justify-content: center;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    padding: 0;
   }
   .conversation-head {
     padding-left: 8px;
@@ -997,7 +1006,7 @@ button.primary.pin-action-incorrect:disabled {
     max-width: 88%;
   }
   .message-row.out {
-    max-width: calc(88% - 72px);
+    max-width: 88%;
   }
   .composer textarea {
     padding: 8px;
