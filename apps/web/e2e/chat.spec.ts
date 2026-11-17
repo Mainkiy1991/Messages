@@ -630,7 +630,10 @@ test.describe("real browser chat", () => {
     const user = await openUser(browser);
     const alice = await createAccount(user.page);
     await user.context.grantPermissions(["clipboard-read", "clipboard-write"]);
-    await openChat(user.page, alice.id);
+    await user.page.getByRole("button", { name: /New chat/u }).click();
+    await user.page.getByTestId("peer-id-input").fill(alice.id);
+    await user.page.getByTestId("new-chat").click();
+    await expect(user.page.getByTestId("saved-chat-title")).toBeVisible();
 
     await user.page.getByTestId("chat-menu").click();
     await expect(user.page.getByTestId("copy-peer-id")).toHaveCount(0);
