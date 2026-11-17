@@ -40,6 +40,10 @@ export const strings = {
     userId: "ID пользователя",
     copy: "Копировать",
     copied: "Скопировано",
+    copyPeerId: "Скопировать ID",
+    idCopied: "ID скопирован",
+    idCopyFailed:
+      "Не удалось скопировать автоматически. Выделите и скопируйте ID вручную:",
     logout: "Выйти",
     logoutCheckTitle: "Перед выходом проверим сид-фразу",
     logoutCheckHint:
@@ -196,6 +200,10 @@ export const strings = {
     userId: "User ID",
     copy: "Copy",
     copied: "Copied",
+    copyPeerId: "Copy ID",
+    idCopied: "ID copied",
+    idCopyFailed:
+      "Could not copy automatically. Select and copy the ID manually:",
     logout: "Sign out",
     logoutCheckTitle: "Check your seed phrase before signing out",
     logoutCheckHint:
@@ -352,6 +360,10 @@ export const strings = {
     userId: "ID користувача",
     copy: "Копіювати",
     copied: "Скопійовано",
+    copyPeerId: "Скопіювати ID",
+    idCopied: "ID скопійовано",
+    idCopyFailed:
+      "Не вдалося скопіювати автоматично. Виділіть і скопіюйте ID вручну:",
     logout: "Вийти",
     logoutCheckTitle: "Перед виходом перевіримо сід-фразу",
     logoutCheckHint:

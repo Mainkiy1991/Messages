@@ -29,6 +29,7 @@ import {
   disablePin,
 } from "./session.js";
 import { indexedDbOutbox } from "./lib/outbox.js";
+import { copyText } from "./lib/clipboard.js";
 import { phraseMatchesAccount } from "./lib/seed-check.js";
 import {
   ChatController,
@@ -113,6 +114,11 @@ function App() {
   const [answers, setAnswers] = useState<string[]>(["", "", ""]);
   const [hasError, setHasError] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [profileCopyFailed, setProfileCopyFailed] = useState(false);
+  const [idCopyStatus, setIdCopyStatus] = useState<"" | "copied" | "failed">(
+    "",
+  );
+  const [idCopyPeer, setIdCopyPeer] = useState("");
   const [showLogoutConfirmation, setShowLogoutConfirmation] = useState(false);
   const [showLogoutSkipWarning, setShowLogoutSkipWarning] = useState(false);
   const [logoutPhrase, setLogoutPhrase] = useState("");
@@ -156,6 +162,9 @@ function App() {
   const [presenceClock, setPresenceClock] = useState(Date.now());
   const profileRef = useRef<HTMLDivElement | null>(null);
   const pinErrorTimerRef = useRef<number | null>(null);
+  const profileCopyTimerRef = useRef<number | null>(null);
+  const idCopyTimerRef = useRef<number | null>(null);
+  const idCopyRequestRef = useRef(0);
   const pinInputRef = useRef<HTMLInputElement | null>(null);
   const controllerRef = useRef<ChatController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
@@ -187,6 +196,10 @@ function App() {
     () => () => {
       if (pinErrorTimerRef.current !== null)
         window.clearTimeout(pinErrorTimerRef.current);
+      if (profileCopyTimerRef.current !== null)
+        window.clearTimeout(profileCopyTimerRef.current);
+      if (idCopyTimerRef.current !== null)
+        window.clearTimeout(idCopyTimerRef.current);
     },
     [],
   );
@@ -636,6 +649,15 @@ function App() {
     }
   }, [activePeer]);
   useEffect(() => {
+    idCopyRequestRef.current += 1;
+    if (idCopyTimerRef.current !== null) {
+      window.clearTimeout(idCopyTimerRef.current);
+      idCopyTimerRef.current = null;
+    }
+    setIdCopyStatus("");
+    setIdCopyPeer("");
+  }, [activePeer]);
+  useEffect(() => {
     if (
       chatConfirmation &&
       !chats.some((chat) => chat.peerId === chatConfirmation.peerId)
@@ -719,6 +741,25 @@ function App() {
                           : code === "delete_pending"
                             ? t.deletePending
                             : t.badPeerKey;
+  async function copyPeerId() {
+    const peerId = activePeer;
+    const request = ++idCopyRequestRef.current;
+    if (idCopyTimerRef.current !== null) {
+      window.clearTimeout(idCopyTimerRef.current);
+      idCopyTimerRef.current = null;
+    }
+    setIdCopyStatus("");
+    setIdCopyPeer(peerId);
+    const success = await copyText(peerId);
+    if (request !== idCopyRequestRef.current) return;
+    setIdCopyStatus(success ? "copied" : "failed");
+    if (success) {
+      idCopyTimerRef.current = window.setTimeout(() => {
+        if (request === idCopyRequestRef.current) setIdCopyStatus("");
+        idCopyTimerRef.current = null;
+      }, 2500);
+    }
+  }
   useEffect(() => {
     if (!keys || screen !== "home") return;
     let cancelled = false;
@@ -1199,17 +1240,38 @@ function App() {
                       <code data-testid="user-id">{userId}</code>
                       <button
                         className="secondary copy-button"
-                        onClick={() => {
-                          void navigator.clipboard
-                            .writeText(userId)
-                            .then(() => {
-                              setCopied(true);
-                              setTimeout(() => setCopied(false), 1600);
-                            });
+                        onClick={async () => {
+                          if (profileCopyTimerRef.current !== null) {
+                            window.clearTimeout(profileCopyTimerRef.current);
+                            profileCopyTimerRef.current = null;
+                          }
+                          setCopied(false);
+                          setProfileCopyFailed(false);
+                          if (await copyText(userId)) {
+                            setCopied(true);
+                            profileCopyTimerRef.current = window.setTimeout(
+                              () => {
+                                setCopied(false);
+                                profileCopyTimerRef.current = null;
+                              },
+                              1600,
+                            );
+                          } else {
+                            setProfileCopyFailed(true);
+                          }
                         }}
                       >
                         {copied ? t.copied : t.copy}
                       </button>
+                      {profileCopyFailed && (
+                        <p
+                          className="error profile-copy-error"
+                          role="alert"
+                          data-testid="profile-id-copy-failed"
+                        >
+                          {t.idCopyFailed}
+                        </p>
+                      )}
                     </div>
                   )}
                   <button
@@ -1707,6 +1769,19 @@ function App() {
                         </button>
                         {chatMenuOpen && (
                           <div className="conversation-menu-panel">
+                            {!isSavedChat && (
+                              <button
+                                type="button"
+                                className="secondary"
+                                data-testid="copy-peer-id"
+                                onClick={() => {
+                                  setChatMenuOpen(false);
+                                  void copyPeerId();
+                                }}
+                              >
+                                {t.copyPeerId}
+                              </button>
+                            )}
                             <button
                               type="button"
                               className="secondary"
@@ -1750,6 +1825,25 @@ function App() {
                         role="alert"
                       >
                         {contactNameError}
+                      </p>
+                    )}
+                    {idCopyPeer === activePeer && idCopyStatus === "copied" && (
+                      <p
+                        className="id-copy-status"
+                        role="status"
+                        data-testid="id-copy-status"
+                      >
+                        {t.idCopied}
+                      </p>
+                    )}
+                    {idCopyPeer === activePeer && idCopyStatus === "failed" && (
+                      <p
+                        className="error id-copy-failure"
+                        role="alert"
+                        data-testid="id-copy-failed"
+                      >
+                        {t.idCopyFailed}
+                        <code data-testid="id-copy-fallback">{activePeer}</code>
                       </p>
                     )}
                     <div
