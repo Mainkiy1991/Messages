@@ -30,6 +30,8 @@ Messages is an open-source non-commercial messenger without email or phone. Sign
 3. To start a chat, tap **Create chat**, enter the **Contact ID** (64 lowercase hex characters) and tap **New chat**.
 4. If you have not set a contact name, the last 10 characters of their ID are shown instead of a name in the chat list. To set a name, open the chat, choose **Contact name (optional)**, enter a name and tap **Save name**.
 
+You can copy the contact's full ID from **“⋯” → “Copy ID”** and share it with people you want to add. This item is not available in Saved messages; copy your own ID from Profile.
+
 ## Saved messages
 
 Saved messages is a chat with yourself: notes, links, anything you do not want to lose.

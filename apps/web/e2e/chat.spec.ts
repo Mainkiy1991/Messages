@@ -568,6 +568,162 @@ test.describe("real browser chat", () => {
     ).toBeLessThanOrEqual(360);
   });
 
+  test("copies the full peer ID from the chat menu", async ({ browser }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await a.context.grantPermissions(["clipboard-read", "clipboard-write"]);
+
+    await openChat(a.page, bob.id);
+    await a.page.getByTestId("chat-menu").click();
+    await a.page.getByTestId("copy-peer-id").click();
+
+    await expect(a.page.getByTestId("id-copy-status")).toHaveText(
+      /^ID copied/u,
+    );
+    expect(await a.page.evaluate(() => navigator.clipboard.readText())).toBe(
+      bob.id,
+    );
+    await expect(a.page.locator(".contact-name-trigger small")).toHaveText(
+      bob.id.slice(-10),
+    );
+  });
+
+  test("shows the full peer ID manually when clipboard copying fails on mobile", async ({
+    browser,
+  }) => {
+    const user = await openUser(browser);
+    await createAccount(user.page);
+    const bob = await createAccount((await openUser(browser)).page);
+    await user.page.setViewportSize({ width: 360, height: 780 });
+    await openChat(user.page, bob.id);
+    await user.page.evaluate(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: () => Promise.reject(new Error("blocked")) },
+      });
+      document.execCommand = () => false;
+    });
+
+    await user.page.getByTestId("chat-menu").click();
+    await user.page.getByTestId("copy-peer-id").click();
+
+    const failure = user.page.getByTestId("id-copy-failed");
+    const fallback = user.page.getByTestId("id-copy-fallback");
+    await expect(failure).toContainText(
+      /^Could not copy automatically\. Select and copy the ID manually:/u,
+    );
+    await expect(fallback).toHaveText(bob.id);
+    const box = await failure.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(360);
+    expect(
+      await user.page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBeLessThanOrEqual(360);
+  });
+
+  test("hides peer ID copying in Saved messages and keeps profile copying", async ({
+    browser,
+  }) => {
+    const user = await openUser(browser);
+    const alice = await createAccount(user.page);
+    await user.context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await user.page.getByRole("button", { name: /New chat/u }).click();
+    await user.page.getByTestId("peer-id-input").fill(alice.id);
+    await user.page.getByTestId("new-chat").click();
+    await expect(user.page.getByTestId("saved-chat-title")).toBeVisible();
+
+    await user.page.getByTestId("chat-menu").click();
+    await expect(user.page.getByTestId("copy-peer-id")).toHaveCount(0);
+    await user.page.getByTestId("chat-menu").click();
+    await user.page.getByTestId("profile").click();
+    await user.page.getByRole("button", { name: "User ID" }).click();
+    await user.page.locator(".copy-button").click();
+
+    await expect(user.page.locator(".copy-button")).toHaveText(/^Copied/u);
+    expect(await user.page.evaluate(() => navigator.clipboard.readText())).toBe(
+      alice.id,
+    );
+  });
+
+  test("copies an ID from a conversation initiated by the other account", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await a.context.grantPermissions(["clipboard-read", "clipboard-write"]);
+
+    await openChat(b.page, alice.id);
+    await send(b.page, "Started by Bob");
+    const aliceChat = chatWith(a.page, bob.id);
+    await expect(aliceChat).toBeVisible();
+    await aliceChat.click();
+    await a.page.getByTestId("chat-menu").click();
+    await a.page.getByTestId("copy-peer-id").click();
+
+    await expect(a.page.getByTestId("id-copy-status")).toHaveText(
+      /^ID copied/u,
+    );
+    expect(await a.page.evaluate(() => navigator.clipboard.readText())).toBe(
+      bob.id,
+    );
+  });
+
+  test("resets copy feedback when switching to another chat", async ({
+    browser,
+  }) => {
+    const user = await openUser(browser);
+    await createAccount(user.page);
+    const bob = await createAccount((await openUser(browser)).page);
+    const carol = await createAccount((await openUser(browser)).page);
+    await user.context.grantPermissions(["clipboard-read", "clipboard-write"]);
+
+    await openChat(user.page, bob.id);
+    await user.page.getByTestId("chat-menu").click();
+    await user.page.getByTestId("copy-peer-id").click();
+    await expect(user.page.getByTestId("id-copy-status")).toHaveText(
+      /^ID copied/u,
+    );
+    await openChat(user.page, carol.id);
+    await expect(user.page.getByTestId("id-copy-status")).toHaveCount(0);
+
+    await user.page.getByTestId("chat-menu").click();
+    await user.page.getByTestId("copy-peer-id").click();
+    await expect(user.page.getByTestId("id-copy-status")).toHaveText(
+      /^ID copied/u,
+    );
+    expect(await user.page.evaluate(() => navigator.clipboard.readText())).toBe(
+      carol.id,
+    );
+  });
+
+  test("shows a visible profile copy error when automatic copying fails", async ({
+    browser,
+  }) => {
+    const user = await openUser(browser);
+    const alice = await createAccount(user.page);
+    await user.page.evaluate(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: { writeText: () => Promise.reject(new Error("blocked")) },
+      });
+      document.execCommand = () => false;
+    });
+
+    await user.page.getByTestId("profile").click();
+    await user.page.getByRole("button", { name: "User ID" }).click();
+    await user.page.locator(".copy-button").click();
+
+    await expect(user.page.getByTestId("profile-id-copy-failed")).toContainText(
+      /^Could not copy automatically\. Select and copy the ID manually:/u,
+    );
+    await expect(user.page.getByTestId("user-id")).toHaveText(alice.id);
+  });
+
   test("keeps a cleared chat in the interface after reload and shows Bob's new message", async ({
     browser,
   }) => {

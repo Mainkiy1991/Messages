@@ -189,6 +189,10 @@ header {
 .profile-id {
   padding: 6px 8px;
 }
+.profile-copy-error {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
 .profile-section {
   padding: 4px 8px 8px;
 }
@@ -697,6 +701,20 @@ select {
 .conversation-menu-panel button {
   width: 100%;
   min-height: 38px;
+}
+.id-copy-status,
+.id-copy-failure {
+  max-width: 100%;
+  margin: 8px 12px;
+  overflow-wrap: anywhere;
+}
+.id-copy-failure code {
+  display: block;
+  max-width: 100%;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  user-select: text;
 }
 .message-list {
   padding: 14px;
