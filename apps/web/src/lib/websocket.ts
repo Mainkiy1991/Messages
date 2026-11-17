@@ -19,7 +19,10 @@ export type OutgoingFrame = {
   ciphertext: string;
   senderCopy: string;
 };
-export type IncomingFrame = Record<string, unknown> & { type: string };
+export type IncomingFrame = Record<string, unknown> & {
+  type: string;
+  hidden?: boolean;
+};
 export const HEARTBEAT_IDLE_MS = 25_000;
 export const HEARTBEAT_TIMEOUT_MS = 10_000;
 export const HEARTBEAT_MIN_INTERVAL_MS = 5_000;

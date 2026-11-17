@@ -21,10 +21,12 @@ export type ConversationSummary = {
   lastCreatedAt: string;
   /** Highest change number of the chat; absent means the server sent none. */
   lastChangeSeq?: string;
+  cleared?: boolean;
 };
 export type ConversationClear = {
   peerId: string;
   clearedBeforeSeq: string;
+  hidden?: boolean;
 };
 export type ConversationErase = {
   erased: number;
