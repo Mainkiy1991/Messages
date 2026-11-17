@@ -78,7 +78,7 @@ In Saved messages, the confirmation says **“Delete this note?”** and does no
 
 - **Clear chat** clears the history only for you, on all your devices. The empty chat stays in the list with the **“Chat cleared”** preview, and **“You cleared this chat”** appears inside it. Messages remain on the server and with the other person.
 - **Delete chat** also clears the history on all your devices, erases all your messages in that conversation from the server, and removes the chat from your list. The other person's messages are not affected; one collapsed **“The other person deleted these messages”** note remains where your messages were. If they message you again, the chat returns to the list.
-- You can also choose “Delete chat” with the basket in the chat list: hover over a row on a computer or press and hold it for about half a second on a phone. This works for Saved messages too.
+- You can also choose “Delete chat” with the basket in the chat list: leave the mouse over a chat row for about a second on a computer or press and hold it for about half a second on a phone. This works for Saved messages too.
 - **Saved messages** stays in the list after both clearing and deleting; these actions only affect your notes. Its confirmations and stubs say **“You deleted this message”** or **“You deleted these messages.”**
 
 Nothing is guaranteed when deleting a chat.
