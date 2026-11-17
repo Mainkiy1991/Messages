@@ -67,6 +67,7 @@ export const conversationClearedSchema = z
     type: z.literal("conversation_cleared"),
     peerId: userIdSchema,
     clearedBeforeSeq: sequenceValueSchema,
+    hidden: z.boolean().default(false),
   })
   .strict();
 export const messageDeletedSchema = z

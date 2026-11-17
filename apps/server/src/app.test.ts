@@ -120,6 +120,17 @@ suite("server authentication (PostgreSQL)", () => {
         "utf8",
       ),
     );
+    await pool!.query(
+      await readFile(
+        join(
+          import.meta.dirname,
+          "..",
+          "migrations",
+          "009_conversation_clears_hidden.sql",
+        ),
+        "utf8",
+      ),
+    );
     app = await buildApp({
       databaseUrl: databaseUrl!,
       now: () => clock,
@@ -632,6 +643,70 @@ suite("server authentication (PostgreSQL)", () => {
     }
   });
 
+  it("marks legacy conversation clears hidden in migration 009", async () => {
+    const schema = `hidden_upgrade_${randomBytes(5).toString("hex")}`;
+    const client = await pool!.connect();
+    try {
+      await client.query(`CREATE SCHEMA ${schema}`);
+      await client.query(`SET search_path TO ${schema}`);
+      for (const name of [
+        "001_initial.sql",
+        "002_messages.sql",
+        "003_message_sequence.sql",
+        "004_history_contacts.sql",
+        "005_read_markers.sql",
+        "006_presence.sql",
+        "007_conversation_clears.sql",
+        "008_message_changes.sql",
+      ]) {
+        await client.query(
+          await readFile(
+            join(import.meta.dirname, "..", "migrations", name),
+            "utf8",
+          ),
+        );
+      }
+      const userId = randomBytes(32).toString("hex");
+      await client.query(
+        `INSERT INTO users(id,encryption_public_key,key_binding_signature)
+         VALUES($1,$1,$1)`,
+        [userId],
+      );
+      await client.query(
+        `INSERT INTO conversation_clears(user_id,peer_id,cleared_before_seq)
+         VALUES($1,$2,123)`,
+        [userId, randomBytes(32).toString("hex")],
+      );
+      await client.query(
+        await readFile(
+          join(
+            import.meta.dirname,
+            "..",
+            "migrations",
+            "009_conversation_clears_hidden.sql",
+          ),
+          "utf8",
+        ),
+      );
+
+      const migrated = await client.query<{ hidden: boolean }>(
+        "SELECT hidden FROM conversation_clears WHERE user_id=$1",
+        [userId],
+      );
+      const defaultValue = await client.query<{ column_default: string }>(
+        `SELECT column_default FROM information_schema.columns
+         WHERE table_schema=$1 AND table_name='conversation_clears' AND column_name='hidden'`,
+        [schema],
+      );
+      expect(migrated.rows[0]!.hidden).toBe(true);
+      expect(defaultValue.rows[0]!.column_default).toContain("false");
+    } finally {
+      await client.query("SET search_path TO public");
+      await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      client.release();
+    }
+  });
+
   it("tracks presence across multiple authenticated sockets and persists last seen", async () => {
     const a = await createAccount();
     const b = await createAccount();
@@ -999,6 +1074,7 @@ suite("server authentication (PostgreSQL)", () => {
           type: "conversation_cleared",
           peerId: bob.userId,
           clearedBeforeSeq: response.json().clearedBeforeSeq,
+          hidden: false,
         },
       ]),
     );
@@ -1621,11 +1697,22 @@ suite("server authentication (PostgreSQL)", () => {
       url: "/conversations",
       headers: { authorization: `Bearer ${alice.token}` },
     });
-    expect(hiddenConversations.json().conversations).toEqual([]);
+    expect(hiddenConversations.json().conversations).toMatchObject([
+      {
+        peerId: bob.userId,
+        lastSeq: inserted.rows[2]!.seq,
+        lastChangeSeq: "0",
+        cleared: true,
+      },
+    ]);
+    expect(
+      hiddenConversations.json().conversations[0].lastCreatedAt,
+    ).not.toBeNull();
     expect(hiddenConversations.json().cleared).toEqual([
       {
         peerId: bob.userId,
         clearedBeforeSeq: inserted.rows[2]!.seq,
+        hidden: false,
       },
     ]);
 
@@ -1698,6 +1785,350 @@ suite("server authentication (PostgreSQL)", () => {
       headers: { authorization: `Bearer ${alice.token}` },
     });
     expect(repeated.json()).toEqual({ clearedBeforeSeq: "9999" });
+  });
+
+  it("keeps a cleared chat with an empty, non-null preview", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'payload','copy') RETURNING seq::text AS seq`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    await app.inject({
+      method: "DELETE",
+      url: `/conversations/${bob.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    const body = response.json();
+    expect(body.conversations).toEqual([
+      {
+        peerId: bob.userId,
+        lastSeq: inserted.rows[0]!.seq,
+        lastCreatedAt: expect.any(String),
+        lastChangeSeq: "0",
+        cleared: true,
+      },
+    ]);
+    expect(body.conversations[0].lastCreatedAt).not.toBe("");
+    expect(body.cleared).toEqual([
+      {
+        peerId: bob.userId,
+        clearedBeforeSeq: inserted.rows[0]!.seq,
+        hidden: false,
+      },
+    ]);
+    expect(JSON.stringify(body.conversations[0])).not.toContain("payload");
+    expect(JSON.stringify(body.conversations[0])).not.toContain("copy");
+  });
+
+  it("hides an erased chat only for its author and leaves peer stubs visible", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'author','author-copy'),($2,$1,$4,'peer','peer-copy')
+       RETURNING seq::text AS seq`,
+      [alice.userId, bob.userId, randomId(), randomId()],
+    );
+    await app.inject({
+      method: "POST",
+      url: `/conversations/${bob.userId}/erase`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: {},
+    });
+
+    const aliceList = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(aliceList.json().conversations).toEqual([]);
+    expect(aliceList.json().cleared).toMatchObject([
+      { peerId: bob.userId, hidden: true },
+    ]);
+
+    const bobList = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${bob.token}` },
+    });
+    expect(bobList.json().conversations).toMatchObject([
+      {
+        peerId: alice.userId,
+        lastSeq: inserted.rows[1]!.seq,
+        cleared: false,
+      },
+    ]);
+    const bobHistory = await app.inject({
+      method: "GET",
+      url: `/history/${alice.userId}`,
+      headers: { authorization: `Bearer ${bob.token}` },
+    });
+    expect(
+      bobHistory
+        .json()
+        .messages.map((entry: { deleted: boolean }) => entry.deleted),
+    ).toEqual([true, false]);
+  });
+
+  it("shows a hidden chat again when the peer sends a new message", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    await pool!.query(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'old','old-copy')`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    await app.inject({
+      method: "POST",
+      url: `/conversations/${bob.userId}/erase`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: {},
+    });
+    const incoming = await pool!.query<{ seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'new','new-copy') RETURNING seq::text AS seq`,
+      [bob.userId, alice.userId, randomId()],
+    );
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(response.json().conversations).toMatchObject([
+      { peerId: bob.userId, lastSeq: incoming.rows[0]!.seq, cleared: false },
+    ]);
+  });
+
+  it("shows a hidden chat again when the author sends a new message", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    await pool!.query(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'old','old-copy')`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    await app.inject({
+      method: "POST",
+      url: `/conversations/${bob.userId}/erase`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: {},
+    });
+    const outgoing = await pool!.query<{ seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'new','new-copy') RETURNING seq::text AS seq`,
+      [alice.userId, bob.userId, randomId()],
+    );
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(response.json().conversations).toMatchObject([
+      { peerId: bob.userId, lastSeq: outgoing.rows[0]!.seq, cleared: false },
+    ]);
+  });
+
+  it("restores the cleared preview when a hidden chat is cleared again", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'payload','copy') RETURNING seq::text AS seq`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    await app.inject({
+      method: "POST",
+      url: `/conversations/${bob.userId}/erase`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: {},
+    });
+    await app.inject({
+      method: "DELETE",
+      url: `/conversations/${bob.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    expect(response.json().conversations).toMatchObject([
+      {
+        peerId: bob.userId,
+        lastSeq: inserted.rows[0]!.seq,
+        lastCreatedAt: expect.any(String),
+        lastChangeSeq: "0",
+        cleared: true,
+      },
+    ]);
+    expect(response.json().cleared).toMatchObject([
+      { peerId: bob.userId, hidden: false },
+    ]);
+  });
+
+  it("broadcasts hidden=false when clearing to both of the user's sockets", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    await pool!.query(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'payload','copy')`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const url = await listen();
+    const first = (await connectAuth(alice.token, url)).socket;
+    const second = (await connectAuth(alice.token, url)).socket;
+    const firstClear = nextFrame(
+      first,
+      (frame) => frame.type === "conversation_cleared",
+    );
+    const secondClear = nextFrame(
+      second,
+      (frame) => frame.type === "conversation_cleared",
+    );
+
+    await app.inject({
+      method: "DELETE",
+      url: `/conversations/${bob.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+
+    const frames = await Promise.all([firstClear, secondClear]);
+    expect(frames[0]).toMatchObject({
+      type: "conversation_cleared",
+      peerId: bob.userId,
+      hidden: false,
+    });
+    expect(frames[1]).toEqual(frames[0]);
+    first.close();
+    second.close();
+  });
+
+  it("broadcasts hidden=true when erasing a chat", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    await pool!.query(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'payload','copy')`,
+      [alice.userId, bob.userId, randomId()],
+    );
+    const socket = (await connectAuth(alice.token, await listen())).socket;
+    const cleared = nextFrame(
+      socket,
+      (frame) => frame.type === "conversation_cleared",
+    );
+
+    await app.inject({
+      method: "POST",
+      url: `/conversations/${bob.userId}/erase`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: {},
+    });
+
+    expect(await cleared).toMatchObject({
+      type: "conversation_cleared",
+      peerId: bob.userId,
+      hidden: true,
+    });
+    socket.close();
+  });
+
+  it("does not change another user's conversation list or clear markers", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    await pool!.query(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$2,$3,'b','b-copy')`,
+      [bob.userId, alice.userId, randomId()],
+    );
+    const before = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${bob.token}` },
+    });
+    await app.inject({
+      method: "DELETE",
+      url: `/conversations/${bob.userId}`,
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    await app.inject({
+      method: "POST",
+      url: `/conversations/${bob.userId}/erase`,
+      headers: { authorization: `Bearer ${alice.token}` },
+      payload: {},
+    });
+    const after = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers: { authorization: `Bearer ${bob.token}` },
+    });
+
+    expect(before.json().conversations).toMatchObject([
+      { peerId: alice.userId, cleared: false },
+    ]);
+    expect(after.json()).toEqual(before.json());
+    expect(after.json().cleared).toEqual([]);
+  });
+
+  it("defaults directly inserted conversation clear rows to hidden=false", async () => {
+    const alice = await createAccount();
+    const bob = await createAccount();
+    const inserted = await pool!.query<{ hidden: boolean }>(
+      `INSERT INTO conversation_clears(user_id,peer_id,cleared_before_seq)
+       VALUES($1,$2,123) RETURNING hidden`,
+      [alice.userId, bob.userId],
+    );
+    expect(inserted.rows[0]!.hidden).toBe(false);
+  });
+
+  it("keeps Favorites after clearing and hides them after erasing", async () => {
+    const alice = await createAccount();
+    const inserted = await pool!.query<{ seq: string }>(
+      `INSERT INTO messages(sender_id,recipient_id,client_msg_id,ciphertext,sender_copy)
+       VALUES($1,$1,$2,'note','note-copy') RETURNING seq::text AS seq`,
+      [alice.userId, randomId()],
+    );
+    const headers = { authorization: `Bearer ${alice.token}` };
+    await app.inject({
+      method: "DELETE",
+      url: `/conversations/${alice.userId}`,
+      headers,
+    });
+    const cleared = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers,
+    });
+    expect(cleared.json().conversations).toMatchObject([
+      {
+        peerId: alice.userId,
+        lastSeq: inserted.rows[0]!.seq,
+        cleared: true,
+      },
+    ]);
+
+    await app.inject({
+      method: "POST",
+      url: `/conversations/${alice.userId}/erase`,
+      headers,
+      payload: {},
+    });
+    const erased = await app.inject({
+      method: "GET",
+      url: "/conversations",
+      headers,
+    });
+    expect(erased.json().conversations).toEqual([]);
   });
 
   it("clears numeric 99 and 999 boundaries without hiding sequence 100 or 1000", async () => {
@@ -2721,7 +3152,13 @@ suite("server authentication (PostgreSQL)", () => {
       url: "/conversations",
       headers: { authorization: `Bearer ${alice.token}` },
     });
-    expect(afterClear.json().conversations).toEqual([]);
+    expect(afterClear.json().conversations).toHaveLength(1);
+    expect(afterClear.json().conversations[0]).toMatchObject({
+      peerId: alice.userId,
+      cleared: true,
+      lastSeq: inserted.rows[1]!.seq,
+      lastChangeSeq: "0",
+    });
     const history = await app.inject({
       method: "GET",
       url: `/history/${alice.userId}`,
@@ -3380,6 +3817,7 @@ suite("server authentication (PostgreSQL)", () => {
       type: "conversation_cleared",
       peerId: bob.userId,
       clearedBeforeSeq: response.json().clearedBeforeSeq,
+      hidden: true,
     });
     expect(secondFrame).toEqual(firstFrame);
     expect(erasedFrame).toMatchObject({
@@ -3428,6 +3866,7 @@ suite("server authentication (PostgreSQL)", () => {
       type: "conversation_cleared",
       peerId: alice.userId,
       clearedBeforeSeq: response.json().clearedBeforeSeq,
+      hidden: true,
     });
     const canary = nextFrame(
       peer,

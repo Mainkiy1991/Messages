@@ -223,6 +223,30 @@ function chatWith(page: Page, peerId: string) {
   return page.locator(`[data-testid="chat-item"][data-peer-id="${peerId}"]`);
 }
 
+async function reloadAndExpectClearedConversation(page: Page, peerId: string) {
+  const conversationsResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname === "/conversations" && response.request().method() === "GET"
+    );
+  });
+  await page.reload();
+  await expect(page.getByTestId("connection-status")).toHaveAttribute(
+    "data-state",
+    "connected",
+  );
+  const response = await conversationsResponse;
+  expect(response.ok()).toBe(true);
+  const body = (await response.json()) as {
+    conversations: Array<{ peerId: string; cleared: boolean }>;
+  };
+  expect(body.conversations).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ peerId, cleared: true }),
+    ]),
+  );
+}
+
 test.describe("real browser chat", () => {
   test("seed phrase numbers and words fit their cells at mobile widths", async ({
     browser,
@@ -564,7 +588,7 @@ test.describe("real browser chat", () => {
     ).toBeLessThanOrEqual(360);
   });
 
-  test("clears a chat only for Alice, keeps it cleared after reload, and shows Bob's new message", async ({
+  test("lists a cleared chat in the server response for Alice and shows Bob's new message", async ({
     browser,
   }) => {
     const a = await openUser(browser);
@@ -595,19 +619,13 @@ test.describe("real browser chat", () => {
     await a.page.getByTestId("chat-menu").click();
     await a.page.getByTestId("clear-chat").click();
     await a.page.getByTestId("confirm-clear-chat").click();
-    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
     await expect(
       b.page
         .locator(".message-list .message-text")
         .filter({ hasText: /^Old conversation/u }),
     ).toBeVisible();
 
-    await a.page.reload();
-    await expect(a.page.getByTestId("connection-status")).toHaveAttribute(
-      "data-state",
-      "connected",
-    );
-    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
+    await reloadAndExpectClearedConversation(a.page, bob.id);
     await send(b.page, "A new conversation");
     await expect(chatWith(a.page, bob.id)).toBeVisible();
     await chatWith(a.page, bob.id).click();
@@ -651,7 +669,7 @@ test.describe("real browser chat", () => {
 
     await a.page.unroute("**/conversations/**", deleteRoute);
     await a.page.getByTestId("confirm-clear-chat").click();
-    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
   });
 
   test("erases Alice's messages for Bob as one stub and keeps Bob's own message", async ({
@@ -729,7 +747,7 @@ test.describe("real browser chat", () => {
     await a.context.setOffline(false);
   });
 
-  test("removes a cleared chat from another window without reloading at 360px", async ({
+  test("returns a cleared chat after refreshing another window at 360px", async ({
     browser,
   }) => {
     const a = await openUser(browser);
@@ -754,9 +772,8 @@ test.describe("real browser chat", () => {
     ).toBeLessThanOrEqual(360);
     await a.page.getByTestId("clear-chat").click();
     await a.page.getByTestId("confirm-clear-chat").click();
-    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
-    await expect(chatWith(secondWindow, bob.id)).toHaveCount(0);
-    await expect(a.page.locator(".messenger")).not.toHaveClass(/show-chat/u);
+    await reloadAndExpectClearedConversation(a.page, bob.id);
+    await reloadAndExpectClearedConversation(secondWindow, bob.id);
   });
 
   test("shows presence only after two-way chat and updates after reconnect", async ({

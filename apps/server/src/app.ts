@@ -107,10 +107,11 @@ const clearConversationSql = `WITH maximum AS (
    SELECT max(seq::bigint) AS seq FROM messages
    WHERE (sender_id=$1 AND recipient_id=$2) OR (sender_id=$2 AND recipient_id=$1)
  ), cleared AS (
-   INSERT INTO conversation_clears(user_id, peer_id, cleared_before_seq)
-   SELECT $1, $2, seq FROM maximum WHERE seq IS NOT NULL
+   INSERT INTO conversation_clears(user_id, peer_id, cleared_before_seq, hidden)
+   SELECT $1, $2, seq, $3 FROM maximum WHERE seq IS NOT NULL
    ON CONFLICT(user_id, peer_id) DO UPDATE
      SET cleared_before_seq=GREATEST(conversation_clears.cleared_before_seq, EXCLUDED.cleared_before_seq),
+         hidden=EXCLUDED.hidden,
          updated_at=now()
    RETURNING cleared_before_seq::text AS "clearedBeforeSeq"
  )
@@ -120,10 +121,11 @@ async function clearConversation(
   database: Pool | PoolClient,
   userId: string,
   peerId: string,
+  hidden: boolean,
 ): Promise<string> {
   const result = await database.query<{ clearedBeforeSeq: string }>(
     clearConversationSql,
-    [userId, peerId],
+    [userId, peerId, hidden],
   );
   return result.rows[0]!.clearedBeforeSeq;
 }
@@ -384,23 +386,44 @@ export async function buildApp(options: {
   });
   app.get("/conversations", { preHandler: authenticate }, async (request) => {
     const result = await pool.query(
-      `SELECT peer_id AS "peerId", last_seq::text AS "lastSeq", last_created_at AS "lastCreatedAt",
-              COALESCE(last_change_seq, 0)::text AS "lastChangeSeq"
-       FROM (
+      `WITH visible_conversations AS (
          SELECT CASE WHEN m.sender_id=$1 THEN m.recipient_id ELSE m.sender_id END AS peer_id,
-                max(m.seq::bigint) AS last_seq, (array_agg(m.created_at ORDER BY m.seq::bigint DESC))[1] AS last_created_at,
-                max(m.change_seq) AS last_change_seq
+                max(m.seq::bigint) AS last_seq,
+                (array_agg(m.created_at ORDER BY m.seq::bigint DESC))[1] AS last_created_at,
+                max(m.change_seq) AS last_change_seq,
+                false AS cleared
          FROM messages m
          LEFT JOIN conversation_clears c
            ON c.user_id=$1 AND c.peer_id=CASE WHEN m.sender_id=$1 THEN m.recipient_id ELSE m.sender_id END
          WHERE (m.sender_id=$1 OR m.recipient_id=$1)
            AND m.seq::bigint > COALESCE(c.cleared_before_seq, 0::bigint)
          GROUP BY CASE WHEN m.sender_id=$1 THEN m.recipient_id ELSE m.sender_id END
-       ) conversations ORDER BY last_seq::bigint DESC LIMIT $2`,
+       ), empty_cleared_conversations AS (
+         SELECT c.peer_id, c.cleared_before_seq AS last_seq, c.updated_at AS last_created_at,
+                0::bigint AS last_change_seq, true AS cleared
+         FROM conversation_clears c
+         WHERE c.user_id=$1 AND c.hidden=false
+           AND NOT EXISTS (
+             SELECT 1 FROM messages m
+             WHERE ((m.sender_id=$1 AND m.recipient_id=c.peer_id)
+                 OR (m.sender_id=c.peer_id AND m.recipient_id=$1))
+               AND m.seq::bigint > c.cleared_before_seq
+           )
+       ), conversations AS (
+         SELECT * FROM visible_conversations
+         UNION ALL
+         SELECT * FROM empty_cleared_conversations
+       )
+       SELECT peer_id AS "peerId", last_seq::text AS "lastSeq",
+              last_created_at AS "lastCreatedAt",
+              COALESCE(last_change_seq, 0)::text AS "lastChangeSeq", cleared
+       FROM conversations
+       ORDER BY last_seq DESC
+       LIMIT $2`,
       [request.userId, MAX_CONVERSATIONS],
     );
     const cleared = await pool.query(
-      `SELECT peer_id AS "peerId", cleared_before_seq::text AS "clearedBeforeSeq"
+      `SELECT peer_id AS "peerId", cleared_before_seq::text AS "clearedBeforeSeq", hidden
        FROM conversation_clears WHERE user_id=$1
        ORDER BY updated_at DESC LIMIT 500`,
       [request.userId],
@@ -422,11 +445,13 @@ export async function buildApp(options: {
         pool,
         request.userId!,
         request.params.peerId,
+        false,
       );
       const frame = conversationClearedSchema.parse({
         type: "conversation_cleared",
         peerId: request.params.peerId,
         clearedBeforeSeq,
+        hidden: false,
       });
       messageHub.sendToUser(request.userId!, frame);
       return { clearedBeforeSeq };
@@ -459,7 +484,12 @@ export async function buildApp(options: {
           [userId, peerId],
         );
         erasedRows = erased.rows;
-        clearedBeforeSeq = await clearConversation(client, userId, peerId);
+        clearedBeforeSeq = await clearConversation(
+          client,
+          userId,
+          peerId,
+          true,
+        );
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");
@@ -473,6 +503,7 @@ export async function buildApp(options: {
           type: "conversation_cleared",
           peerId,
           clearedBeforeSeq,
+          hidden: true,
         }),
       );
       if (peerId !== userId && erasedRows.length > 0) {
