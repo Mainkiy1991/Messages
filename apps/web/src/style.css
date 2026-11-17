@@ -510,6 +510,9 @@ select {
   flex: 1;
   min-height: 36px;
 }
+.chat-row {
+  position: relative;
+}
 .chat-list-item {
   position: relative;
   display: flex;
@@ -520,8 +523,10 @@ select {
   text-align: left;
   border: 0;
   background: transparent;
-  padding: 9px 8px;
+  padding: 9px 50px 9px 8px;
   margin-top: 2px;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 .chat-list-item.selected,
 .chat-list-item:hover {
@@ -560,7 +565,7 @@ select {
 }
 .unread-count {
   position: absolute;
-  right: 12px;
+  right: 50px;
   bottom: 8px;
   min-width: 20px;
   padding: 2px 6px;
@@ -569,6 +574,37 @@ select {
   color: white;
   font-size: 0.72rem;
   text-align: center;
+}
+.chat-row-delete {
+  position: absolute;
+  top: 50%;
+  right: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  transform: translateY(-50%);
+  border: 0;
+  background: none;
+  color: #5145cd;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+}
+.chat-row.reveal .chat-row-delete {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: hover) {
+  .chat-row:hover .chat-row-delete,
+  .chat-row:focus-within .chat-row-delete {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 .conversation {
   min-width: 0;
