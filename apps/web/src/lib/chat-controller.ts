@@ -75,6 +75,7 @@ export type Chat = {
   peerId: string;
   messages: ChatMessage[];
   unreadCount: number;
+  cleared?: boolean;
   hasMore?: boolean;
   loadingHistory?: boolean;
   historyLoadFailed?: boolean;
@@ -446,12 +447,17 @@ export class ChatController {
 
   private reconcileConversations(summaries: Chat[]): Chat[] {
     const serverPeers = new Set(summaries.map((chat) => chat.peerId));
+    const previousServerPeers = this.serverConversationPeers;
     const existingChats = this.state.chats.filter(
       (chat) =>
+        chat.peerId === this.userId ||
         serverPeers.has(chat.peerId) ||
         (this.sessionLocalPeers.has(chat.peerId) &&
           !this.serverConversationPeers.has(chat.peerId)),
     );
+    for (const peerId of previousServerPeers)
+      if (!serverPeers.has(peerId) && peerId !== this.userId)
+        this.forgetConversationState(peerId);
     this.serverConversationPeers = serverPeers;
     return sortChats(mergeChats(existingChats, summaries));
   }
@@ -467,6 +473,8 @@ export class ChatController {
         await this.applyConversationClear(
           cleared.peerId,
           cleared.clearedBeforeSeq,
+          cleared.hidden === true,
+          true,
         );
       }
       for (const item of result.conversations)
@@ -477,8 +485,17 @@ export class ChatController {
         unreadCount: 0,
         hasMore: true,
         lastCreatedAt: item.lastCreatedAt,
+        cleared: item.cleared === true,
       }));
-      this.update({ chats: this.reconcileConversations(chats) });
+      const reconciled = this.reconcileConversations(chats);
+      this.update({
+        chats: reconciled,
+        ...(this.state.activePeer &&
+        this.state.activePeer !== this.userId &&
+        !reconciled.some((chat) => chat.peerId === this.state.activePeer)
+          ? { activePeer: "" }
+          : {}),
+      });
       this.conversationsLoaded = true;
       this.accountDataFailuresAfterResponse.delete("conversations");
       this.resetAccountRetry("conversations");
@@ -487,7 +504,7 @@ export class ChatController {
       const activeChat = this.state.chats.find(
         (chat) => chat.peerId === activePeer,
       );
-      if (activeChat && !activeChat.historyLoaded)
+      if (activeChat && !activeChat.historyLoaded && !isClearedChat(activeChat))
         void this.loadHistory(activePeer, { silent: true });
     } catch (error) {
       this.recordAccountFailure("conversations");
@@ -505,6 +522,7 @@ export class ChatController {
           (chat) =>
             chat.peerId === peerId &&
             chat.messages.length === 0 &&
+            !isClearedChat(chat) &&
             chat.hasMore !== false &&
             peerId !== this.state.activePeer,
         ),
@@ -658,6 +676,7 @@ export class ChatController {
     const chat = this.state.chats.find((item) => item.peerId === peerId);
     if (
       !chat ||
+      isClearedChat(chat) ||
       chat.loadingHistory ||
       chat.hasMore === false ||
       this.historyRequests.has(peerId)
@@ -780,6 +799,8 @@ export class ChatController {
         await this.applyConversationClear(
           cleared.peerId,
           cleared.clearedBeforeSeq,
+          cleared.hidden === true,
+          true,
         );
       }
       const summaries = result.conversations.map((conversation) => ({
@@ -788,6 +809,7 @@ export class ChatController {
         unreadCount: 0,
         hasMore: true,
         lastCreatedAt: conversation.lastCreatedAt,
+        cleared: conversation.cleared === true,
       }));
       const mergedChats = this.reconcileConversations(summaries);
       const lastSeq = new Map(
@@ -811,6 +833,11 @@ export class ChatController {
           const server = lastSeq.get(chat.peerId) ?? "0";
           return { ...chat, historyStale: BigInt(server) > BigInt(known) };
         }),
+        ...(this.state.activePeer &&
+        this.state.activePeer !== this.userId &&
+        !mergedChats.some((chat) => chat.peerId === this.state.activePeer)
+          ? { activePeer: "" }
+          : {}),
       });
       this.connection.setSendingPaused(false);
       for (const chat of this.state.chats)
@@ -821,8 +848,13 @@ export class ChatController {
       const activeChat = this.state.chats.find(
         (chat) => chat.peerId === activePeer,
       );
-      if (activeChat?.historyStale) void this.loadMissedHistory(activePeer);
-      else if (activeChat && !activeChat.historyLoaded)
+      if (activeChat?.historyStale && !isClearedChat(activeChat))
+        void this.loadMissedHistory(activePeer);
+      else if (
+        activeChat &&
+        !activeChat.historyLoaded &&
+        !isClearedChat(activeChat)
+      )
         void this.loadHistory(activePeer, { silent: true });
     } catch {
       this.scheduleAccountRetry("conversations");
@@ -915,6 +947,10 @@ export class ChatController {
         });
       }
       const threshold = this.clearedBeforeSeqs.get(peerId);
+      const hasHiddenOlderRows =
+        !after &&
+        threshold !== undefined &&
+        page.messages.some((entry) => BigInt(entry.seq) <= BigInt(threshold));
       const visibleMessages = page.messages.filter(
         (entry) => !threshold || BigInt(entry.seq) > BigInt(threshold),
       );
@@ -1034,12 +1070,21 @@ export class ChatController {
                         item,
                         messages,
                       );
+                      const mergedMessages = mergeMessages(
+                        reconciled.messages,
+                        messages,
+                      );
                       return {
                         unreadCount: reconciled.unreadCount,
-                        messages: mergeMessages(reconciled.messages, messages),
+                        messages: mergedMessages,
+                        ...(mergedMessages.length ? { cleared: false } : {}),
                       };
                     })(),
-                    hasMore: after ? item.hasMore : page.hasMore,
+                    hasMore: after
+                      ? item.hasMore
+                      : hasHiddenOlderRows
+                        ? false
+                        : page.hasMore,
                     historyLoaded: true,
                     ...(after ? { historyAfterMore: page.hasMore } : {}),
                     loadingHistory: false,
@@ -1281,12 +1326,20 @@ export class ChatController {
     );
   }
 
+  private forgetConversationState(peerId: string): void {
+    this.serverConversationPeers.delete(peerId);
+    this.knownChangeSeqs.delete(peerId);
+    this.serverChangeSeqs.delete(peerId);
+    this.sentReadMarkers.delete(peerId);
+    this.peerReadMarkers.delete(peerId);
+  }
+
   closeActiveChat(): void {
     this.update({ activePeer: "" });
   }
 
   async clearChat(peerId: string): Promise<boolean> {
-    return this.applyConversationAction(peerId, (id, token) => {
+    return this.applyConversationAction(peerId, false, (id, token) => {
       const clear =
         this.deps.deleteConversation ??
         ((peerIdToClear: string, sessionToken: string) =>
@@ -1296,7 +1349,7 @@ export class ChatController {
   }
 
   async deleteChat(peerId: string): Promise<boolean> {
-    return this.applyConversationAction(peerId, (id, token) => {
+    return this.applyConversationAction(peerId, true, (id, token) => {
       const erase =
         this.deps.eraseConversation ??
         ((peerIdToErase: string, sessionToken: string) =>
@@ -1311,6 +1364,7 @@ export class ChatController {
 
   private async applyConversationAction(
     peerId: string,
+    hidden: boolean,
     request: (
       peerId: string,
       token: string,
@@ -1331,7 +1385,11 @@ export class ChatController {
       return false;
     }
     try {
-      await this.applyConversationClear(peerId, result.clearedBeforeSeq);
+      await this.applyConversationClear(
+        peerId,
+        result.clearedBeforeSeq,
+        hidden,
+      );
       this.update({ error: "" });
       return true;
     } catch {
@@ -1343,6 +1401,8 @@ export class ChatController {
   private async applyConversationClear(
     peerId: string,
     clearedBeforeSeq: string,
+    hidden = false,
+    fromList = false,
   ): Promise<void> {
     if (!/^\d{1,19}$/u.test(clearedBeforeSeq)) return;
     const previous = this.clearedBeforeSeqs.get(peerId) ?? "0";
@@ -1351,27 +1411,50 @@ export class ChatController {
     this.clearedBeforeSeqs.set(peerId, threshold);
     this.sessionLocalPeers.delete(peerId);
     this.connection.clearPeer(peerId);
+    const selfChat = peerId === this.userId;
+    let found = false;
     const chats = this.state.chats
-      .map((chat) =>
-        chat.peerId === peerId
-          ? {
-              ...chat,
-              unreadCount: 0,
-              messages: chat.messages.filter(
-                (message) =>
-                  !!message.seq && BigInt(message.seq) > BigInt(threshold),
-              ),
-            }
-          : chat,
-      )
-      .filter((chat) => chat.peerId !== peerId || chat.messages.length > 0);
-    this.update({
-      chats,
-      ...(this.state.activePeer === peerId &&
-      !chats.some((chat) => chat.peerId === peerId)
-        ? { activePeer: "" }
-        : {}),
-    });
+      .map((chat) => {
+        if (chat.peerId !== peerId) return chat;
+        found = true;
+        const messages = chat.messages.filter(
+          (message) => !!message.seq && BigInt(message.seq) > BigInt(threshold),
+        );
+        if (!fromList && hidden && !selfChat) return null;
+        return {
+          ...chat,
+          unreadCount: 0,
+          messages,
+          ...(!fromList && messages.length === 0
+            ? {
+                cleared: true,
+                lastCreatedAt: new Date(
+                  (this.deps.now ?? Date.now)(),
+                ).toISOString(),
+              }
+            : {}),
+        };
+      })
+      .filter((chat): chat is Chat => chat !== null);
+    if (!fromList && (!hidden || selfChat) && !found) {
+      chats.push({
+        peerId,
+        messages: [],
+        unreadCount: 0,
+        hasMore: true,
+        cleared: true,
+        lastCreatedAt: new Date((this.deps.now ?? Date.now)()).toISOString(),
+      });
+    }
+    if (!fromList && hidden && !selfChat) {
+      this.forgetConversationState(peerId);
+      this.update({
+        chats,
+        ...(this.state.activePeer === peerId ? { activePeer: "" } : {}),
+      });
+    } else {
+      this.update({ chats });
+    }
     const outbox = this.deps.outbox ?? indexedDbOutbox;
     try {
       if (outbox.removeForPeer) {
@@ -1858,7 +1941,11 @@ export class ChatController {
       typeof frame.peerId === "string" &&
       typeof frame.clearedBeforeSeq === "string"
     ) {
-      await this.applyConversationClear(frame.peerId, frame.clearedBeforeSeq);
+      await this.applyConversationClear(
+        frame.peerId,
+        frame.clearedBeforeSeq,
+        frame.hidden === true,
+      );
       return;
     }
     if (frame.type === "presence" && Array.isArray(frame.presences)) {
@@ -2267,6 +2354,7 @@ export class ChatController {
       ? {
           ...chat,
           unreadCount: unreadCount ?? chat.unreadCount,
+          cleared: false,
           messages: mergeMessages(chat.messages, [message]),
         }
       : {
@@ -2475,9 +2563,11 @@ export function chatPreview(
     loading: string;
     decryptFailed: string;
     noMessages: string;
+    cleared: string;
     you: string;
   },
 ): string {
+  if (isClearedChat(chat)) return labels.cleared;
   if (chat.loadingHistory) return labels.loading;
   const latest = chat.messages.at(-1);
   if (latest)
@@ -2485,6 +2575,10 @@ export function chatPreview(
       ? labels.decryptFailed
       : `${latest.direction === "out" ? `${labels.you}: ` : ""}${latest.text}`;
   return chat.hasMore === false ? labels.noMessages : "";
+}
+
+export function isClearedChat(chat: Chat | undefined): boolean {
+  return chat?.cleared === true && chat.messages.length === 0;
 }
 
 function sortChats(chats: Chat[]): Chat[] {
@@ -2531,8 +2625,11 @@ function mergeChats(existing: Chat[], incoming: Chat[]): Chat[] {
       result[index] = {
         ...chat,
         ...result[index]!,
+        cleared: chat.cleared,
         hasMore: result[index]!.hasMore ?? chat.hasMore,
-        lastCreatedAt: result[index]!.lastCreatedAt ?? chat.lastCreatedAt,
+        lastCreatedAt: chat.cleared
+          ? chat.lastCreatedAt
+          : (result[index]!.lastCreatedAt ?? chat.lastCreatedAt),
         messages: mergeMessages(chat.messages, result[index]!.messages),
       };
   }

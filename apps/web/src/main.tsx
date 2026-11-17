@@ -34,6 +34,7 @@ import {
   ChatController,
   chatPreview,
   contactLabel,
+  isClearedChat,
   type Chat,
   type ChatControllerState,
 } from "./lib/chat-controller.js";
@@ -1421,7 +1422,10 @@ function App() {
                         </strong>
                         <span>
                           {chatPreviewAfterDeletion(chat, t.messageDeleted) ??
-                            chatPreview(chat, t)}
+                            chatPreview(chat, {
+                              ...t,
+                              cleared: t.clearedChat,
+                            })}
                         </span>
                       </span>
                       {chat.unreadCount > 0 && (
@@ -1615,7 +1619,7 @@ function App() {
                           80;
                       }}
                     >
-                      {activeChat?.hasMore && (
+                      {activeChat?.hasMore && !isClearedChat(activeChat) && (
                         <button
                           className="secondary load-more"
                           disabled={activeChat.loadingHistory}
@@ -1652,6 +1656,14 @@ function App() {
                             {t.savedHint}
                           </p>
                         )}
+                      {isClearedChat(activeChat) && (
+                        <p
+                          className="muted chat-cleared-notice"
+                          data-testid="chat-cleared-notice"
+                        >
+                          {t.clearedChatNotice}
+                        </p>
+                      )}
                       {displayMessages.map(({ message, deletedCount }) => (
                         <div
                           className={`message-row ${message.direction}${

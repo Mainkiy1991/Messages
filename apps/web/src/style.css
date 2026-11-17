@@ -881,6 +881,13 @@ select {
   font-size: 0.9rem;
   line-height: 1.4;
 }
+.chat-cleared-notice {
+  max-width: 100%;
+  margin: auto;
+  padding: 0 12px;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
 .mobile-back {
   display: none;
   margin: 0;

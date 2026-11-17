@@ -58,13 +58,13 @@ export const strings = {
     chatActions: "Действия чата",
     clear: "Очистить",
     clearChatConfirmation:
-      "Переписка очистится только у вас, на всех ваших устройствах. Сообщения останутся на сервере и у собеседника. Неотправленные сообщения этого чата тоже будут удалены.",
+      "Переписка очистится только у вас, на всех ваших устройствах, а пустой чат останется в списке. Сообщения останутся на сервере и у собеседника. Неотправленные сообщения этого чата тоже будут удалены.",
     savedClearChatConfirmation:
-      "Заметки очистятся только у вас, на всех ваших устройствах. Сообщения останутся на сервере. Неотправленные заметки тоже будут удалены.",
+      "Заметки очистятся только у вас, на всех ваших устройствах, а «Избранное» останется в списке. Сообщения останутся на сервере. Неотправленные заметки тоже будут удалены.",
     eraseChatConfirmation:
-      "Чат очистится у вас на всех устройствах, а на сервере будут стёрты все ваши сообщения. Сообщения собеседника не затрагиваются; у него останется строка «Собеседник удалил сообщения». Гарантий нет: собеседник мог прочитать, скопировать или сфотографировать сообщения раньше; хостинг может ограниченное время хранить резервные копии; изменённый клиент мог сохранить текст. Метаданные переписки останутся. Неотправленные сообщения этого чата тоже будут удалены.",
+      "Чат будет убран из вашего списка на всех устройствах, а на сервере будут стёрты все ваши сообщения. Сообщения собеседника не затрагиваются; у него останется строка «Собеседник удалил сообщения». Гарантий нет: собеседник мог прочитать, скопировать или сфотографировать сообщения раньше; хостинг может ограниченное время хранить резервные копии; изменённый клиент мог сохранить текст. Метаданные переписки останутся. Неотправленные сообщения этого чата тоже будут удалены.",
     savedEraseChatConfirmation:
-      "Заметки очистятся на всех ваших устройствах, а все ваши сообщения будут стёрты на сервере. Гарантий нет: текст могли прочитать, скопировать или сфотографировать раньше; хостинг может ограниченное время хранить резервные копии; изменённый клиент мог сохранить текст. Метаданные останутся. Неотправленные заметки тоже будут удалены.",
+      "Заметки очистятся на всех ваших устройствах, а все ваши сообщения будут стёрты на сервере. «Избранное» останется в списке. Гарантий нет: текст могли прочитать, скопировать или сфотографировать раньше; хостинг может ограниченное время хранить резервные копии; изменённый клиент мог сохранить текст. Метаданные останутся. Неотправленные заметки тоже будут удалены.",
     clearChatFailed:
       "Не удалось очистить чат. Проверьте соединение и попробуйте ещё раз.",
     savedClearChatFailed:
@@ -125,6 +125,8 @@ export const strings = {
     send: "Отправить",
     messagePlaceholder: "Сообщение",
     noMessages: "Нет сообщений",
+    clearedChat: "Чат очищен",
+    clearedChatNotice: "Вы очистили чат",
     you: "Вы",
     selectChat: "Выберите чат или создайте новый.",
     contactName: "Имя контакта (необязательно)",
@@ -212,13 +214,13 @@ export const strings = {
     chatActions: "Chat actions",
     clear: "Clear",
     clearChatConfirmation:
-      "The conversation will be cleared only for you, on all your devices. Messages will remain on the server and with the other person. Unsent messages in this chat will also be deleted.",
+      "The conversation will be cleared only for you, on all your devices, and the empty chat will remain in your chat list. Messages will remain on the server and with the other person. Unsent messages in this chat will also be deleted.",
     savedClearChatConfirmation:
-      "Your notes will be cleared only for you, on all your devices. Messages will remain on the server. Unsent notes will also be deleted.",
+      "Your notes will be cleared only for you, on all your devices, and Saved messages will remain in your chat list. Messages will remain on the server. Unsent notes will also be deleted.",
     eraseChatConfirmation:
-      "The chat will be cleared on all your devices, and all your messages in it will be erased from the server. The other person's messages are not affected; they will see “The other person deleted these messages” in their place. Nothing is guaranteed: they may have read, copied, or photographed messages earlier; the host may keep backups for a limited time; a modified client may have saved the text. Conversation metadata remains. Unsent messages in this chat will also be deleted.",
+      "The chat will be removed from your chat list on all your devices, and all your messages in it will be erased from the server. The other person's messages are not affected; they will see “The other person deleted these messages” in their place. Nothing is guaranteed: they may have read, copied, or photographed messages earlier; the host may keep backups for a limited time; a modified client may have saved the text. Conversation metadata remains. Unsent messages in this chat will also be deleted.",
     savedEraseChatConfirmation:
-      "Your notes will be cleared on all your devices, and all your messages in this chat will be erased from the server. Nothing is guaranteed: the text may have been read, copied, or photographed earlier; the host may keep backups for a limited time; a modified client may have saved the text. Metadata remains. Unsent notes will also be deleted.",
+      "Your notes will be cleared on all your devices, and all your messages in this chat will be erased from the server. Saved messages will remain in your chat list. Nothing is guaranteed: the text may have been read, copied, or photographed earlier; the host may keep backups for a limited time; a modified client may have saved the text. Metadata remains. Unsent notes will also be deleted.",
     clearChatFailed:
       "Could not clear the chat. Check your connection and try again.",
     savedClearChatFailed:
@@ -280,6 +282,8 @@ export const strings = {
     send: "Send",
     messagePlaceholder: "Message",
     noMessages: "No messages",
+    clearedChat: "Chat cleared",
+    clearedChatNotice: "You cleared this chat",
     you: "You",
     selectChat: "Select a chat or start a new one.",
     contactName: "Contact name (optional)",
@@ -366,13 +370,13 @@ export const strings = {
     chatActions: "Дії чату",
     clear: "Очистити",
     clearChatConfirmation:
-      "Переписку буде очищено лише у вас, на всіх ваших пристроях. Повідомлення залишаться на сервері та у співрозмовника. Ненадіслані повідомлення цього чату також буде видалено.",
+      "Переписку буде очищено лише у вас, на всіх ваших пристроях, а порожній чат залишиться у списку. Повідомлення залишаться на сервері та у співрозмовника. Ненадіслані повідомлення цього чату також буде видалено.",
     savedClearChatConfirmation:
-      "Нотатки буде очищено лише у вас, на всіх ваших пристроях. Повідомлення залишаться на сервері. Ненадіслані нотатки також буде видалено.",
+      "Нотатки буде очищено лише у вас, на всіх ваших пристроях, а «Збережене» залишиться у списку. Повідомлення залишаться на сервері. Ненадіслані нотатки також буде видалено.",
     eraseChatConfirmation:
-      "Чат буде очищено на всіх ваших пристроях, а всі ваші повідомлення в ньому буде стерто із сервера. Повідомлення співрозмовника не зачіпаються; на їхньому місці він побачить «Співрозмовник видалив повідомлення». Гарантій немає: співрозмовник міг прочитати, скопіювати або сфотографувати повідомлення раніше; хостинг може обмежений час зберігати резервні копії; змінений клієнт міг зберегти текст. Метадані листування залишаться. Ненадіслані повідомлення цього чату також буде видалено.",
+      "Чат буде прибрано з вашого списку на всіх пристроях, а всі ваші повідомлення в ньому буде стерто із сервера. Повідомлення співрозмовника не зачіпаються; на їхньому місці він побачить «Співрозмовник видалив повідомлення». Гарантій немає: співрозмовник міг прочитати, скопіювати або сфотографувати повідомлення раніше; хостинг може обмежений час зберігати резервні копії; змінений клієнт міг зберегти текст. Метадані листування залишаться. Ненадіслані повідомлення цього чату також буде видалено.",
     savedEraseChatConfirmation:
-      "Нотатки буде очищено на всіх ваших пристроях, а всі ваші повідомлення в цьому чаті буде стерто із сервера. Гарантій немає: текст могли прочитати, скопіювати або сфотографувати раніше; хостинг може обмежений час зберігати резервні копії; змінений клієнт міг зберегти текст. Метадані залишаться. Ненадіслані нотатки також буде видалено.",
+      "Нотатки буде очищено на всіх ваших пристроях, а всі ваші повідомлення в цьому чаті буде стерто із сервера. «Збережене» залишиться у списку. Гарантій немає: текст могли прочитати, скопіювати або сфотографувати раніше; хостинг може обмежений час зберігати резервні копії; змінений клієнт міг зберегти текст. Метадані залишаться. Ненадіслані нотатки також буде видалено.",
     clearChatFailed:
       "Не вдалося очистити чат. Перевірте з’єднання та спробуйте ще раз.",
     savedClearChatFailed:
@@ -434,6 +438,8 @@ export const strings = {
     send: "Надіслати",
     messagePlaceholder: "Повідомлення",
     noMessages: "Повідомлень немає",
+    clearedChat: "Чат очищено",
+    clearedChatNotice: "Ви очистили чат",
     you: "Ви",
     selectChat: "Виберіть чат або створіть новий.",
     contactName: "Ім’я контакту (необов’язково)",

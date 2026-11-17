@@ -16,6 +16,7 @@ import {
   ChatController,
   chatPreview,
   contactLabel,
+  isClearedChat,
   mergeMessages,
   unreadAfterHistoryMerge,
   type ChatControllerDependencies,
@@ -144,6 +145,7 @@ function makeController(
     deleteMessage?: ChatControllerDependencies["deleteMessage"];
     outbox?: ChatControllerDependencies["outbox"];
     isVisible?: () => boolean;
+    now?: () => number;
   } = {},
 ) {
   const sockets: TestSocket[] = [];
@@ -188,6 +190,7 @@ function makeController(
       deleteMessage: options.deleteMessage,
       outbox: options.outbox,
       isVisible: options.isVisible,
+      now: options.now,
     },
   );
   return { controller, sockets, tokens, getLoginCount: () => loginCount };
@@ -411,7 +414,10 @@ describe("ChatController", () => {
       createdAt: new Date().toISOString(),
       seq: "12",
     });
-    expect(chatFor(f.controller, bobId)).toBeUndefined();
+    expect(chatFor(f.controller, bobId)).toMatchObject({
+      cleared: true,
+      messages: [],
+    });
   });
 
   it("silently skips a v2 sender copy encrypted with a different history key", async () => {
@@ -1672,10 +1678,7 @@ describe("ChatController", () => {
       peerId: bobId,
       clearedBeforeSeq: "100",
     });
-    await waitFor(
-      () =>
-        !f.controller.getSnapshot().chats.some((chat) => chat.peerId === bobId),
-    );
+    await waitFor(() => chatFor(f.controller, bobId)?.cleared === true);
     const oldCiphertext = encryptTextMessage({
       senderEncryptionPrivateKey: bob.encryption.privateKey,
       recipientEncryptionPublicKey: alice.encryption.publicKey,
@@ -1697,9 +1700,10 @@ describe("ChatController", () => {
       ciphertext: oldCiphertext,
       createdAt: new Date().toISOString(),
     });
-    expect(
-      f.controller.getSnapshot().chats.some((chat) => chat.peerId === bobId),
-    ).toBe(false);
+    expect(chatFor(f.controller, bobId)).toMatchObject({
+      cleared: true,
+      messages: [],
+    });
     const newCiphertext = encryptTextMessage({
       senderEncryptionPrivateKey: bob.encryption.privateKey,
       recipientEncryptionPublicKey: alice.encryption.publicKey,
@@ -1721,6 +1725,334 @@ describe("ChatController", () => {
         ?.messages[0]?.text,
     ).toBe("new after clear");
     f.controller.stop();
+  });
+
+  it("clearChat keeps the active chat cleared and timestamps the empty entry", async () => {
+    const now = Date.parse("2026-11-17T10:00:00.000Z");
+    const f = makeController({
+      initialSession: session("token-clear-action"),
+      deleteConversation: async () => ({ clearedBeforeSeq: "10" }),
+      getHistory: async () => ({ hasMore: false, messages: [] }),
+      now: () => now,
+      outbox: {
+        list: async () => [],
+        put: async () => undefined,
+        remove: async () => undefined,
+        clear: async () => undefined,
+      },
+    });
+    await f.controller.openChat(bobId);
+    expect(await f.controller.clearChat(bobId)).toBe(true);
+    expect(f.controller.getSnapshot().activePeer).toBe(bobId);
+    expect(chatFor(f.controller, bobId)).toMatchObject({
+      cleared: true,
+      messages: [],
+      unreadCount: 0,
+      lastCreatedAt: new Date(now).toISOString(),
+    });
+    f.controller.stop();
+  });
+
+  it("deleteChat removes a conversation and closes it when active", async () => {
+    const f = makeController({
+      initialSession: session("token-delete-action"),
+      eraseConversation: async () => ({
+        erased: 1,
+        clearedBeforeSeq: "10",
+      }),
+      getHistory: async () => ({ hasMore: false, messages: [] }),
+      outbox: {
+        list: async () => [],
+        put: async () => undefined,
+        remove: async () => undefined,
+        clear: async () => undefined,
+      },
+    });
+    await f.controller.openChat(bobId);
+    expect(await f.controller.deleteChat(bobId)).toBe(true);
+    expect(chatFor(f.controller, bobId)).toBeUndefined();
+    expect(f.controller.getSnapshot().activePeer).toBe("");
+    f.controller.stop();
+  });
+
+  it("keeps Saved messages after both clearChat and deleteChat", async () => {
+    const f = makeController({
+      initialSession: session("token-saved-clear"),
+      deleteConversation: async () => ({ clearedBeforeSeq: "1" }),
+      eraseConversation: async () => ({
+        erased: 1,
+        clearedBeforeSeq: "1",
+      }),
+      getHistory: async () => ({ hasMore: false, messages: [] }),
+      outbox: {
+        list: async () => [],
+        put: async () => undefined,
+        remove: async () => undefined,
+        clear: async () => undefined,
+      },
+    });
+    await f.controller.openChat(aliceId);
+    expect(await f.controller.clearChat(aliceId)).toBe(true);
+    expect(chatFor(f.controller, aliceId)).toMatchObject({
+      cleared: true,
+      messages: [],
+    });
+    expect(f.controller.getSnapshot().activePeer).toBe(aliceId);
+    expect(await f.controller.deleteChat(aliceId)).toBe(true);
+    expect(chatFor(f.controller, aliceId)).toMatchObject({
+      cleared: true,
+      messages: [],
+    });
+    expect(f.controller.getSnapshot().activePeer).toBe(aliceId);
+    f.controller.stop();
+  });
+
+  it("treats conversation_cleared without hidden as visible and removes hidden chats", async () => {
+    const f = makeController({
+      initialSession: session("token-ws-hidden"),
+      getHistory: async () => ({ hasMore: false, messages: [] }),
+      outbox: {
+        list: async () => [],
+        put: async () => undefined,
+        remove: async () => undefined,
+        clear: async () => undefined,
+      },
+    });
+    const internals = f.controller as unknown as {
+      serverConversationPeers: Set<string>;
+      knownChangeSeqs: Map<string, string>;
+      serverChangeSeqs: Map<string, string>;
+      sentReadMarkers: Map<string, string>;
+      peerReadMarkers: Map<string, string>;
+    };
+    await deliverFrame(f.controller, {
+      type: "conversation_cleared",
+      peerId: bobId,
+      clearedBeforeSeq: "5",
+      hidden: false,
+    });
+    internals.serverConversationPeers.add(bobId);
+    internals.knownChangeSeqs.set(bobId, "3");
+    internals.serverChangeSeqs.set(bobId, "4");
+    internals.sentReadMarkers.set(bobId, "5");
+    internals.peerReadMarkers.set(bobId, "6");
+    expect(chatFor(f.controller, bobId)).toMatchObject({
+      cleared: true,
+      messages: [],
+    });
+    f.controller.selectChat(bobId);
+    await deliverFrame(f.controller, {
+      type: "conversation_cleared",
+      peerId: bobId,
+      clearedBeforeSeq: "6",
+      hidden: true,
+    });
+    expect(chatFor(f.controller, bobId)).toBeUndefined();
+    expect(f.controller.getSnapshot().activePeer).toBe("");
+    expect(internals.serverConversationPeers.has(bobId)).toBe(false);
+    expect(internals.knownChangeSeqs.has(bobId)).toBe(false);
+    expect(internals.serverChangeSeqs.has(bobId)).toBe(false);
+    expect(internals.sentReadMarkers.has(bobId)).toBe(false);
+    expect(internals.peerReadMarkers.has(bobId)).toBe(false);
+    await deliverFrame(f.controller, {
+      type: "conversation_cleared",
+      peerId: bobId,
+      clearedBeforeSeq: "7",
+    });
+    expect(chatFor(f.controller, bobId)).toMatchObject({
+      cleared: true,
+      messages: [],
+    });
+    f.controller.stop();
+  });
+
+  it("loads cleared summaries but does not create chats from hidden clear records", async () => {
+    const f = makeController({
+      initialSession: session("token-cleared-summary"),
+      getConversations: async () => ({
+        conversations: [
+          {
+            peerId: bobId,
+            lastSeq: "10",
+            lastCreatedAt: "2026-11-17T10:00:00.000Z",
+            cleared: true,
+          },
+        ],
+        cleared: [],
+      }),
+      getHistory: async () => ({ hasMore: false, messages: [] }),
+    });
+    await (
+      f.controller as unknown as {
+        loadConversations(token: string): Promise<void>;
+      }
+    ).loadConversations("token-cleared-summary");
+    expect(chatFor(f.controller, bobId)).toMatchObject({
+      cleared: true,
+      messages: [],
+      lastCreatedAt: "2026-11-17T10:00:00.000Z",
+    });
+    f.controller.stop();
+
+    const hidden = makeController({
+      initialSession: session("token-hidden-summary"),
+      getConversations: async () => ({
+        conversations: [],
+        cleared: [{ peerId: bobId, clearedBeforeSeq: "10", hidden: true }],
+      }),
+    });
+    await (
+      hidden.controller as unknown as {
+        loadConversations(token: string): Promise<void>;
+      }
+    ).loadConversations("token-hidden-summary");
+    expect(chatFor(hidden.controller, bobId)).toBeUndefined();
+    hidden.controller.stop();
+  });
+
+  it("a new message makes a cleared chat non-cleared", async () => {
+    const f = makeController();
+    await deliverFrame(f.controller, {
+      type: "conversation_cleared",
+      peerId: bobId,
+      clearedBeforeSeq: "10",
+    });
+    const ciphertext = encryptTextMessage({
+      senderEncryptionPrivateKey: bob.encryption.privateKey,
+      recipientEncryptionPublicKey: alice.encryption.publicKey,
+      senderId: bobId,
+      recipientId: aliceId,
+      text: "new after clear",
+      sentAt: Date.now(),
+    });
+    await deliverFrame(f.controller, {
+      type: "message",
+      id: "message-after-clear",
+      from: bobId,
+      seq: "11",
+      ciphertext,
+      createdAt: new Date().toISOString(),
+    });
+    expect(isClearedChat(chatFor(f.controller, bobId))).toBe(false);
+    expect(chatFor(f.controller, bobId)?.cleared).toBe(false);
+    f.controller.stop();
+  });
+
+  it("refresh removes a missing active chat but preserves Saved messages", async () => {
+    let conversations = [
+      { peerId: bobId, lastSeq: "1", lastCreatedAt: future() },
+    ];
+    const f = makeController({
+      initialSession: session("token-refresh-delete"),
+      getConversations: async () => ({ conversations, cleared: [] }),
+      getHistory: async () => ({ hasMore: false, messages: [] }),
+    });
+    const refresh = () =>
+      (
+        f.controller as unknown as {
+          refreshHistoryHeads(): Promise<void>;
+        }
+      ).refreshHistoryHeads();
+    await (
+      f.controller as unknown as {
+        loadConversations(token: string): Promise<void>;
+      }
+    ).loadConversations("token-refresh-delete");
+    f.controller.selectChat(bobId);
+    conversations = [];
+    await refresh();
+    expect(chatFor(f.controller, bobId)).toBeUndefined();
+    expect(f.controller.getSnapshot().activePeer).toBe("");
+    await f.controller.openChat(aliceId);
+    await refresh();
+    expect(chatFor(f.controller, aliceId)).toBeDefined();
+    expect(f.controller.getSnapshot().activePeer).toBe(aliceId);
+    f.controller.stop();
+  });
+
+  it("stops before-history pagination when a fetched row reaches the clear threshold", async () => {
+    let historyCalls = 0;
+    const f = makeController({
+      initialSession: session("token-clear-pagination"),
+      getHistory: async () => {
+        historyCalls++;
+        if (historyCalls === 1) return { hasMore: true, messages: [] };
+        return {
+          hasMore: true,
+          messages: [
+            {
+              id: "old-row",
+              seq: "10",
+              direction: "out" as const,
+              clientMsgId: "11111111111111111111111111111111",
+              payload: "",
+              createdAt: future(),
+              deliveredAt: null,
+              deleted: true,
+            },
+          ],
+        };
+      },
+      outbox: {
+        list: async () => [],
+        put: async () => undefined,
+        remove: async () => undefined,
+        clear: async () => undefined,
+      },
+    });
+    await f.controller.openChat(bobId);
+    await waitFor(() => chatFor(f.controller, bobId)?.historyLoaded === true);
+    await (
+      f.controller as unknown as {
+        applyConversationClear(
+          peerId: string,
+          seq: string,
+          hidden: boolean,
+          fromList: boolean,
+        ): Promise<void>;
+      }
+    ).applyConversationClear(bobId, "10", false, true);
+    await f.controller.loadHistory(bobId);
+    expect(chatFor(f.controller, bobId)?.hasMore).toBe(false);
+    expect(chatFor(f.controller, bobId)?.messages).toEqual([]);
+    f.controller.stop();
+  });
+
+  it("chatPreview returns the cleared label before loading and no longer after a message", () => {
+    const labels = {
+      loading: "Loading…",
+      decryptFailed: "Could not decrypt",
+      noMessages: "No messages",
+      cleared: "Chat cleared",
+      you: "You",
+    };
+    const chat = {
+      peerId: bobId,
+      messages: [],
+      unreadCount: 0,
+      cleared: true,
+      loadingHistory: true,
+    };
+    expect(isClearedChat(chat)).toBe(true);
+    expect(chatPreview(chat, labels)).toBe("Chat cleared");
+    expect(
+      chatPreview(
+        {
+          ...chat,
+          loadingHistory: false,
+          messages: [
+            {
+              id: "message",
+              text: "New message",
+              direction: "in",
+              createdAt: future(),
+              arrivalOrder: 1,
+            },
+          ],
+        },
+        labels,
+      ),
+    ).toBe("New message");
   });
 
   it("keeps the chat unchanged when deleting it fails", async () => {
@@ -1864,6 +2196,7 @@ describe("ChatController", () => {
         loading: "Loading…",
         decryptFailed: "Could not decrypt",
         noMessages: "No messages",
+        cleared: "Chat cleared",
         you: "You",
       }),
     ).toBe("");
@@ -1879,6 +2212,7 @@ describe("ChatController", () => {
           loading: "Loading…",
           decryptFailed: "Could not decrypt",
           noMessages: "No messages",
+          cleared: "Chat cleared",
           you: "You",
         },
       ),
@@ -1895,6 +2229,7 @@ describe("ChatController", () => {
           loading: "Loading…",
           decryptFailed: "Could not decrypt",
           noMessages: "No messages",
+          cleared: "Chat cleared",
           you: "You",
         },
       ),
