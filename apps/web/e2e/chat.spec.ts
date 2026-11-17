@@ -3,6 +3,7 @@ import {
   test as base,
   type Browser,
   type BrowserContext,
+  type BrowserContextOptions,
   type Locator,
   type Page,
 } from "@playwright/test";
@@ -43,8 +44,11 @@ const test = base.extend<Fixtures>({
 });
 let activeUsers: User[] = [];
 
-async function openUser(browser: Browser): Promise<User> {
-  const context = await browser.newContext();
+async function openUser(
+  browser: Browser,
+  contextOptions?: BrowserContextOptions,
+): Promise<User> {
+  const context = await browser.newContext(contextOptions);
   await context.addInitScript(() => {
     if (localStorage.getItem("messages-lang") === null) {
       localStorage.setItem("messages-lang", "en");
@@ -749,6 +753,7 @@ test.describe("real browser chat", () => {
       "data-state",
       "connected",
     );
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
     await expect(chatWith(secondWindow, bob.id)).toBeVisible();
     await a.page.setViewportSize({ width: 360, height: 780 });
     await a.page.getByTestId("chat-menu").click();
@@ -795,6 +800,212 @@ test.describe("real browser chat", () => {
     await expect(chatWith(a.page, bob.id)).toHaveCount(0);
     await expect(chatWith(secondWindow, bob.id)).toHaveCount(0);
     await expect(a.page.locator(".messenger")).not.toHaveClass(/show-chat/u);
+  });
+
+  test("deletes a chat from the list with hover, keyboard focus, and confirmation", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(b.page, alice.id);
+    await send(b.page, "Delete from the list");
+
+    const secondWindow = await a.context.newPage();
+    await secondWindow.goto("/");
+    await expect(secondWindow.getByTestId("connection-status")).toHaveAttribute(
+      "data-state",
+      "connected",
+    );
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
+    await expect(chatWith(secondWindow, bob.id)).toBeVisible();
+    const row = a.page.locator(`.chat-row[data-peer-id="${bob.id}"]`);
+    const item = chatWith(a.page, bob.id);
+    const basket = row.getByTestId("chat-row-delete");
+    expect(await row.locator("button button").count()).toBe(0);
+    await expect
+      .poll(() =>
+        basket.evaluate((element) => getComputedStyle(element).opacity),
+      )
+      .toBe("0");
+    await row.hover();
+    await expect(basket).toHaveCSS("opacity", "1");
+    await item.focus();
+    await a.page.keyboard.press("Tab");
+    await expect(basket).toBeFocused();
+    await expect(basket).toHaveAttribute("aria-label", "Delete chat");
+
+    await basket.click();
+    const dialog = a.page.getByRole("alertdialog");
+    await expect(dialog).toContainText(
+      "all your messages in it will be erased from the server",
+    );
+    await expect(a.page.locator(".messenger")).not.toHaveClass(/show-chat/u);
+    await a.page.getByTestId("confirm-delete-chat").click();
+    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
+    await expect(chatWith(secondWindow, bob.id)).toHaveCount(0);
+  });
+
+  test("deleting an unopened list chat leaves the open chat selected", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const c = await openUser(browser);
+    await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    const charlie = await createAccount(c.page);
+    await openChat(a.page, bob.id);
+    await send(a.page, "Bob remains unopened");
+    await openChat(a.page, charlie.id);
+
+    const bobRow = a.page.locator(`.chat-row[data-peer-id="${bob.id}"]`);
+    await bobRow.hover();
+    await bobRow.getByTestId("chat-row-delete").click();
+    await a.page.getByTestId("confirm-delete-chat").click();
+
+    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
+    await expect(a.page.locator(".messenger")).toHaveClass(/show-chat/u);
+    await expect(a.page.locator(".chat-list-item.selected")).toHaveAttribute(
+      "data-peer-id",
+      charlie.id,
+    );
+  });
+
+  test("shows list deletion failure in the dialog and succeeds on retry", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(a.page, bob.id);
+    await send(a.page, "Keep this after list delete fails");
+
+    const deleteRoute = async (route: import("@playwright/test").Route) => {
+      if (
+        route.request().method() === "POST" &&
+        route.request().url().includes("/erase")
+      )
+        await route.abort();
+      else await route.continue();
+    };
+    await a.page.route("**/conversations/**", deleteRoute);
+    a.expectedDeleteFailure = true;
+    const row = a.page.locator(`.chat-row[data-peer-id="${bob.id}"]`);
+    await row.hover();
+    await row.getByTestId("chat-row-delete").click();
+    await a.page.getByTestId("confirm-delete-chat").click();
+    await expect(a.page.getByTestId("chat-error")).toHaveText(
+      "Could not delete the chat. Check your connection and try again.",
+    );
+    await expect(chatWith(a.page, bob.id)).toBeVisible();
+    await expect(
+      a.page
+        .locator(".message-list .message-text")
+        .filter({ hasText: /^Keep this after list delete fails/u }),
+    ).toBeVisible();
+    a.expectedDeleteFailure = false;
+
+    await a.page.unroute("**/conversations/**", deleteRoute);
+    await a.page.getByTestId("confirm-delete-chat").click();
+    await expect(chatWith(a.page, bob.id)).toHaveCount(0);
+  });
+
+  test("long press reveals the list basket on touch without opening the chat", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser, {
+      viewport: { width: 360, height: 780 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(a.page, bob.id);
+    await send(a.page, "Touch list basket");
+    await a.page.getByTestId("mobile-back").click();
+    await openChat(b.page, alice.id);
+    await send(b.page, "Unread mobile preview");
+
+    const row = a.page.locator(`.chat-row[data-peer-id="${bob.id}"]`);
+    const item = chatWith(a.page, bob.id);
+    const basket = row.getByTestId("chat-row-delete");
+    const unread = row.getByTestId("unread-count");
+    await expect(unread).toBeVisible();
+    const itemBox = await item.boundingBox();
+    expect(itemBox).not.toBeNull();
+    await item.dispatchEvent("pointerdown", {
+      pointerId: 7,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: itemBox!.x + 20,
+      clientY: itemBox!.y + 20,
+    });
+    await a.page.waitForTimeout(600);
+    await item.dispatchEvent("pointerup", {
+      pointerId: 7,
+      pointerType: "touch",
+      isPrimary: true,
+      clientX: itemBox!.x + 20,
+      clientY: itemBox!.y + 20,
+    });
+    await expect(basket).toHaveCSS("opacity", "1");
+    await expect(a.page.locator(".messenger")).not.toHaveClass(/show-chat/u);
+
+    await item.click();
+    await expect(a.page.locator(".messenger")).not.toHaveClass(/show-chat/u);
+    await expect(basket).toHaveCSS("opacity", "1");
+
+    const basketBox = await basket.boundingBox();
+    const timeBox = await row.locator("small").boundingBox();
+    const unreadBox = await unread.boundingBox();
+    expect(basketBox).not.toBeNull();
+    expect(timeBox).not.toBeNull();
+    expect(unreadBox).not.toBeNull();
+    expect(
+      basketBox!.x < timeBox!.x + timeBox!.width &&
+        basketBox!.x + basketBox!.width > timeBox!.x,
+    ).toBe(false);
+    expect(
+      basketBox!.x < unreadBox!.x + unreadBox!.width &&
+        basketBox!.x + basketBox!.width > unreadBox!.x &&
+        basketBox!.y < unreadBox!.y + unreadBox!.height &&
+        basketBox!.y + basketBox!.height > unreadBox!.y,
+    ).toBe(false);
+    expect(basketBox!.x).toBeGreaterThanOrEqual(0);
+    expect(basketBox!.x + basketBox!.width).toBeLessThanOrEqual(360);
+    expect(
+      await a.page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBeLessThanOrEqual(360);
+
+    await chatWith(a.page, alice.id).click();
+    await expect(basket).toHaveCSS("opacity", "0");
+    await a.page.getByTestId("mobile-back").click();
+    await expect(a.page.locator(".messenger")).not.toHaveClass(/show-chat/u);
+    await item.click();
+    await expect(a.page.locator(".messenger")).toHaveClass(/show-chat/u);
+  });
+
+  test("Saved messages has a list basket and remains after deletion", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const user = await createAccount(a.page);
+    const row = a.page.locator(`.chat-row[data-peer-id="${user.id}"]`);
+    await expect(row.getByTestId("chat-row-delete")).toHaveCount(1);
+    await row.hover();
+    await row.getByTestId("chat-row-delete").click();
+    const dialog = a.page.getByRole("alertdialog");
+    await expect(dialog).toContainText(
+      "Your notes will be cleared on all your devices",
+    );
+    await expect(dialog).not.toContainText("other person");
+    await a.page.getByTestId("confirm-delete-chat").click();
+    await expect(dialog).toHaveCount(0);
+    await expect(row).toHaveCount(1);
   });
 
   test("a new message restores a chat after deletion", async ({ browser }) => {

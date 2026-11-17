@@ -69,10 +69,19 @@ import {
   collapseDeletedMessages,
   deletedMessageLabel,
 } from "./lib/message-delete.js";
+import {
+  createLongPressHandlers,
+  type LongPressHandlers,
+} from "./lib/long-press.js";
 import "./style.css";
 
 type Screen =
   "loading" | "locked" | "welcome" | "create" | "verify" | "login" | "home";
+type ChatConfirmation = {
+  action: "clear" | "erase";
+  peerId: string;
+  origin: "menu" | "list";
+};
 function App() {
   const [language, setLanguage] = useState<Language>(() =>
     getInitialLanguage(
@@ -108,9 +117,9 @@ function App() {
   const [showLogoutSkipWarning, setShowLogoutSkipWarning] = useState(false);
   const [logoutPhrase, setLogoutPhrase] = useState("");
   const [logoutError, setLogoutError] = useState(false);
-  const [chatConfirmation, setChatConfirmation] = useState<
-    "clear" | "erase" | null
-  >(null);
+  const [chatConfirmation, setChatConfirmation] =
+    useState<ChatConfirmation | null>(null);
+  const [revealedPeerId, setRevealedPeerId] = useState("");
   const [showForgotPinConfirmation, setShowForgotPinConfirmation] =
     useState(false);
   const [chatMenuOpen, setChatMenuOpen] = useState(false);
@@ -155,6 +164,8 @@ function App() {
   const previousPeerRef = useRef("");
   const preserveScrollRef = useRef(false);
   const chatHistoryRef = useRef(false);
+  const longPressHandlersRef = useRef(new Map<string, LongPressHandlers>());
+  const chatPointerTypesRef = useRef(new Map<string, string>());
 
   useEffect(() => {
     const timer = window.setInterval(
@@ -556,6 +567,44 @@ function App() {
   const activeChat = chats.find((chat) => chat.peerId === activePeer);
   const activeMessages = activeChat?.messages ?? [];
   const displayMessages = collapseDeletedMessages(activeMessages);
+  const confirmationIsSavedChat = chatConfirmation?.peerId === userId;
+  function longPressHandlersFor(peerId: string): LongPressHandlers {
+    let handlers = longPressHandlersRef.current.get(peerId);
+    if (!handlers) {
+      handlers = createLongPressHandlers(() => setRevealedPeerId(peerId));
+      longPressHandlersRef.current.set(peerId, handlers);
+    }
+    return handlers;
+  }
+  useEffect(() => {
+    const peerIds = new Set(chats.map((chat) => chat.peerId));
+    for (const [peerId, handlers] of longPressHandlersRef.current) {
+      if (peerIds.has(peerId)) continue;
+      handlers.dispose();
+      longPressHandlersRef.current.delete(peerId);
+      chatPointerTypesRef.current.delete(peerId);
+    }
+  }, [chatState.chats, userId]);
+  useEffect(
+    () => () => {
+      for (const handlers of longPressHandlersRef.current.values())
+        handlers.dispose();
+    },
+    [],
+  );
+  useEffect(() => {
+    if (!revealedPeerId) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      const row =
+        target instanceof Element
+          ? target.closest<HTMLElement>(".chat-row")
+          : null;
+      if (row?.dataset.peerId !== revealedPeerId) setRevealedPeerId("");
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [revealedPeerId]);
   useEffect(() => {
     if (screen !== "home") return;
     const onPopState = (event: PopStateEvent) => {
@@ -581,8 +630,22 @@ function App() {
   useEffect(() => {
     if (!activePeer) {
       setChatMenuOpen(false);
-      setChatConfirmation(null);
+      setChatConfirmation((confirmation) =>
+        confirmation?.origin === "menu" ? null : confirmation,
+      );
     }
+  }, [activePeer]);
+  useEffect(() => {
+    if (
+      chatConfirmation &&
+      !chats.some((chat) => chat.peerId === chatConfirmation.peerId)
+    )
+      setChatConfirmation(null);
+    if (revealedPeerId && !chats.some((chat) => chat.peerId === revealedPeerId))
+      setRevealedPeerId("");
+  }, [chatConfirmation, chatState.chats, revealedPeerId, userId]);
+  useEffect(() => {
+    setRevealedPeerId("");
   }, [activePeer]);
   useEffect(() => {
     // The edit target belongs to one chat, so leaving the chat ends the mode.
@@ -848,25 +911,29 @@ function App() {
   }
 
   async function confirmChatAction() {
-    if (!activePeer || !chatConfirmation) return;
-    const action = chatConfirmation;
+    if (!chatConfirmation) return;
+    const { action, peerId, origin } = chatConfirmation;
     const succeeded =
       action === "clear"
-        ? await controllerRef.current?.clearChat(activePeer)
-        : await controllerRef.current?.deleteChat(activePeer);
+        ? await controllerRef.current?.clearChat(peerId)
+        : await controllerRef.current?.deleteChat(peerId);
     if (succeeded) {
       setChatConfirmation(null);
       setChatMenuOpen(false);
-      setEditingName(false);
-      setDraft("");
+      if (origin === "menu" || peerId === activePeer) {
+        setEditingName(false);
+        setDraft("");
+      }
       setChatError("");
+      setRevealedPeerId("");
     } else {
+      const isConfirmationSavedChat = peerId === userId;
       setChatError(
         action === "clear"
-          ? isSavedChat
+          ? isConfirmationSavedChat
             ? t.savedClearChatFailed
             : t.clearChatFailed
-          : isSavedChat
+          : isConfirmationSavedChat
             ? t.savedEraseChatFailed
             : t.eraseChatFailed,
       );
@@ -1396,57 +1463,127 @@ function App() {
                   </form>
                 )}
                 <div data-testid="chat-list">
-                  {chats.map((chat) => (
-                    <button
-                      data-testid="chat-item"
-                      data-peer-id={chat.peerId}
-                      className={`chat-list-item ${chat.peerId === activePeer ? "selected" : ""}`}
-                      key={chat.peerId}
-                      onClick={() => {
-                        controllerRef.current?.selectChat(chat.peerId);
-                        setContactNameDraft(
-                          chatState.contacts[chat.peerId] ?? "",
-                        );
-                      }}
-                    >
-                      <span className="chat-item-copy">
-                        <strong>
-                          {chatTitle(chat.peerId)}
-                          {chat.peerId !== userId && (
-                            <PresenceDot
-                              connectionState={socketState}
-                              presence={chatState.presence[chat.peerId]}
-                              onlineLabel={t.presenceOnline}
-                            />
+                  {chats.map((chat) => {
+                    const longPress = longPressHandlersFor(chat.peerId);
+                    return (
+                      <div
+                        className={`chat-row ${revealedPeerId === chat.peerId ? "reveal" : ""}`}
+                        data-peer-id={chat.peerId}
+                        key={chat.peerId}
+                      >
+                        <button
+                          data-testid="chat-item"
+                          data-peer-id={chat.peerId}
+                          className={`chat-list-item ${chat.peerId === activePeer ? "selected" : ""}`}
+                          onPointerDown={(event) => {
+                            chatPointerTypesRef.current.set(
+                              chat.peerId,
+                              event.pointerType,
+                            );
+                            longPress.onPointerDown(event);
+                          }}
+                          onPointerMove={longPress.onPointerMove}
+                          onPointerUp={longPress.onPointerUp}
+                          onPointerCancel={longPress.onPointerCancel}
+                          onContextMenu={(event) => {
+                            const pointerType = chatPointerTypesRef.current.get(
+                              chat.peerId,
+                            );
+                            if (
+                              pointerType === "touch" ||
+                              pointerType === "pen"
+                            )
+                              event.preventDefault();
+                          }}
+                          onClick={(event) => {
+                            if (longPress.consumeSuppressedClick()) {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              return;
+                            }
+                            setRevealedPeerId("");
+                            controllerRef.current?.selectChat(chat.peerId);
+                            setContactNameDraft(
+                              chatState.contacts[chat.peerId] ?? "",
+                            );
+                          }}
+                        >
+                          <span className="chat-item-copy">
+                            <strong>
+                              {chatTitle(chat.peerId)}
+                              {chat.peerId !== userId && (
+                                <PresenceDot
+                                  connectionState={socketState}
+                                  presence={chatState.presence[chat.peerId]}
+                                  onlineLabel={t.presenceOnline}
+                                />
+                              )}
+                            </strong>
+                            <span>
+                              {chatPreviewAfterDeletion(
+                                chat,
+                                t.messageDeleted,
+                              ) ??
+                                chatPreview(chat, {
+                                  ...t,
+                                  cleared: t.clearedChat,
+                                })}
+                            </span>
+                          </span>
+                          {chat.unreadCount > 0 && (
+                            <b
+                              className="unread-count"
+                              data-testid="unread-count"
+                            >
+                              {chat.unreadCount}
+                            </b>
                           )}
-                        </strong>
-                        <span>
-                          {chatPreviewAfterDeletion(chat, t.messageDeleted) ??
-                            chatPreview(chat, {
-                              ...t,
-                              cleared: t.clearedChat,
-                            })}
-                        </span>
-                      </span>
-                      {chat.unreadCount > 0 && (
-                        <b className="unread-count" data-testid="unread-count">
-                          {chat.unreadCount}
-                        </b>
-                      )}
-                      {(chat.messages.at(-1)?.createdAt ??
-                        chat.lastCreatedAt) && (
-                        <small>
-                          {new Date(
-                            chat.messages.at(-1)?.createdAt ??
-                              chat.lastCreatedAt!,
-                          ).toLocaleTimeString(getLanguageLocale(language), {
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })}
-                        </small>
-                      )}
-                    </button>
-                  ))}
+                          {(chat.messages.at(-1)?.createdAt ??
+                            chat.lastCreatedAt) && (
+                            <small>
+                              {new Date(
+                                chat.messages.at(-1)?.createdAt ??
+                                  chat.lastCreatedAt!,
+                              ).toLocaleTimeString(
+                                getLanguageLocale(language),
+                                {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                },
+                              )}
+                            </small>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          className="chat-row-delete"
+                          data-testid="chat-row-delete"
+                          aria-label={t.deleteChatMenu}
+                          title={t.deleteChatMenu}
+                          onClick={() => {
+                            setChatError("");
+                            setChatConfirmation({
+                              action: "erase",
+                              peerId: chat.peerId,
+                              origin: "list",
+                            });
+                          }}
+                        >
+                          <svg
+                            className="message-delete-icon"
+                            viewBox="0 0 16 16"
+                            aria-hidden="true"
+                            focusable="false"
+                          >
+                            <path
+                              d="M6.2 1h3.6l.5 1H13v1.5H3V2h2.7l.5-1ZM4.1 4.5h7.8l-.6 9.3a1.2 1.2 0 0 1-1.2 1.1H5.9a1.2 1.2 0 0 1-1.2-1.1l-.6-9.3Zm2.4 1.8v6.4h1.1V6.3H6.5Zm2.2 0v6.4h1.1V6.3H8.7Z"
+                              fill="currentColor"
+                            />
+                          </svg>
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               </aside>
               <section className="conversation">
@@ -1577,7 +1714,11 @@ function App() {
                               onClick={() => {
                                 setChatMenuOpen(false);
                                 setChatError("");
-                                setChatConfirmation("clear");
+                                setChatConfirmation({
+                                  action: "clear",
+                                  peerId: activePeer,
+                                  origin: "menu",
+                                });
                               }}
                             >
                               {t.clearChatMenu}
@@ -1589,7 +1730,11 @@ function App() {
                               onClick={() => {
                                 setChatMenuOpen(false);
                                 setChatError("");
-                                setChatConfirmation("erase");
+                                setChatConfirmation({
+                                  action: "erase",
+                                  peerId: activePeer,
+                                  origin: "menu",
+                                });
                               }}
                             >
                               {t.deleteChatMenu}
@@ -1914,16 +2059,16 @@ function App() {
                 aria-describedby="delete-chat-description"
               >
                 <h2 id="delete-chat-message">
-                  {chatConfirmation === "clear"
+                  {chatConfirmation.action === "clear"
                     ? t.clearChatMenu
                     : t.deleteChatMenu}
                 </h2>
                 <p id="delete-chat-description">
-                  {chatConfirmation === "clear"
-                    ? isSavedChat
+                  {chatConfirmation.action === "clear"
+                    ? confirmationIsSavedChat
                       ? t.savedClearChatConfirmation
                       : t.clearChatConfirmation
-                    : isSavedChat
+                    : confirmationIsSavedChat
                       ? t.savedEraseChatConfirmation
                       : t.eraseChatConfirmation}
                 </p>
@@ -1934,16 +2079,16 @@ function App() {
                 )}
                 <button
                   data-testid={
-                    chatConfirmation === "clear"
+                    chatConfirmation.action === "clear"
                       ? "confirm-clear-chat"
                       : "confirm-delete-chat"
                   }
                   className={
-                    chatConfirmation === "clear" ? "primary" : "danger"
+                    chatConfirmation.action === "clear" ? "primary" : "danger"
                   }
                   onClick={() => void confirmChatAction()}
                 >
-                  {chatConfirmation === "clear" ? t.clear : t.delete}
+                  {chatConfirmation.action === "clear" ? t.clear : t.delete}
                 </button>
                 <button
                   className="secondary"
