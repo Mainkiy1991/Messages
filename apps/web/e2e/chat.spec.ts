@@ -955,6 +955,10 @@ test.describe("real browser chat", () => {
     await expect(basket).toHaveCSS("opacity", "1");
     await expect(a.page.locator(".messenger")).not.toHaveClass(/show-chat/u);
 
+    await item.click();
+    await expect(a.page.locator(".messenger")).not.toHaveClass(/show-chat/u);
+    await expect(basket).toHaveCSS("opacity", "1");
+
     const basketBox = await basket.boundingBox();
     const timeBox = await row.locator("small").boundingBox();
     const unreadBox = await unread.boundingBox();
