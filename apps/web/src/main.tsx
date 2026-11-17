@@ -576,6 +576,7 @@ function App() {
   const pinActionDisabled = (operation: "enable" | "change" | "disable") =>
     Boolean(pinOperation || (operation !== "enable" && pinCountdown > 0));
   const chats = withSavedChat(chatState.chats, userId);
+  const chatListPeerIds = chats.map((chat) => chat.peerId).join(",");
   const activePeer = chatState.activePeer;
   const socketState = chatState.connectionState;
   const isSavedChat = activePeer !== "" && activePeer === userId;
@@ -682,12 +683,14 @@ function App() {
       setChatConfirmation(null);
     if (revealedPeerId && !chats.some((chat) => chat.peerId === revealedPeerId))
       setRevealedPeerId("");
+  }, [chatConfirmation, chatState.chats, revealedPeerId, userId]);
+  useEffect(() => {
     if (hoverRevealTimerRef.current !== null) {
       window.clearTimeout(hoverRevealTimerRef.current);
       hoverRevealTimerRef.current = null;
     }
     setHoverRevealPeerId("");
-  }, [chatConfirmation, chatState.chats, revealedPeerId, userId]);
+  }, [chatListPeerIds]);
   useEffect(() => {
     setRevealedPeerId("");
   }, [activePeer]);

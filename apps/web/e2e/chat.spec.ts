@@ -1018,6 +1018,7 @@ test.describe("real browser chat", () => {
     const alice = await createAccount(a.page);
     const bob = await createAccount(b.page);
     await openChat(b.page, alice.id);
+    await send(b.page, "Hover delay test");
 
     const row = a.page.locator(`.chat-row[data-peer-id="${bob.id}"]`);
     const basket = row.getByTestId("chat-row-delete");
