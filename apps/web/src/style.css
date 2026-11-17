@@ -598,17 +598,20 @@ select {
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
+  transition: opacity 150ms;
 }
-.chat-row.reveal .chat-row-delete {
+.chat-row.reveal .chat-row-delete,
+.chat-row.hover-reveal .chat-row-delete {
   opacity: 1;
   pointer-events: auto;
 }
-@media (hover: hover) {
-  .chat-row:hover .chat-row-delete,
-  .chat-row:focus-within .chat-row-delete {
-    opacity: 1;
-    pointer-events: auto;
-  }
+.chat-row-delete:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+.chat-row:has(.chat-list-item:focus-visible) .chat-row-delete {
+  opacity: 1;
+  pointer-events: auto;
 }
 .conversation {
   min-width: 0;
@@ -702,7 +705,6 @@ select {
   width: 100%;
   min-height: 38px;
 }
-.id-copy-status,
 .id-copy-failure {
   max-width: 100%;
   margin: 8px 12px;

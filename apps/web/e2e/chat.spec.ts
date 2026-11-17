@@ -577,17 +577,20 @@ test.describe("real browser chat", () => {
 
     await openChat(a.page, bob.id);
     await a.page.getByTestId("chat-menu").click();
-    await a.page.getByTestId("copy-peer-id").click();
+    const copyButton = a.page.getByTestId("copy-peer-id");
+    await copyButton.click();
 
-    await expect(a.page.getByTestId("id-copy-status")).toHaveText(
-      /^ID copied/u,
-    );
+    await expect(copyButton).toHaveText("ID copied");
+    await expect(a.page.locator(".conversation-menu-panel")).toBeVisible();
     expect(await a.page.evaluate(() => navigator.clipboard.readText())).toBe(
       bob.id,
     );
     await expect(a.page.locator(".contact-name-trigger small")).toHaveText(
       bob.id.slice(-10),
     );
+    await expect(a.page.locator(".conversation-menu-panel")).toHaveCount(0, {
+      timeout: 3000,
+    });
   });
 
   test("shows the full peer ID manually when clipboard copying fails on mobile", async ({
@@ -611,6 +614,7 @@ test.describe("real browser chat", () => {
 
     const failure = user.page.getByTestId("id-copy-failed");
     const fallback = user.page.getByTestId("id-copy-fallback");
+    await expect(user.page.locator(".conversation-menu-panel")).toHaveCount(0);
     await expect(failure).toContainText(
       /^Could not copy automatically\. Select and copy the ID manually:/u,
     );
@@ -663,14 +667,17 @@ test.describe("real browser chat", () => {
     await expect(aliceChat).toBeVisible();
     await aliceChat.click();
     await a.page.getByTestId("chat-menu").click();
-    await a.page.getByTestId("copy-peer-id").click();
+    const copyButton = a.page.getByTestId("copy-peer-id");
+    await copyButton.click();
 
-    await expect(a.page.getByTestId("id-copy-status")).toHaveText(
-      /^ID copied/u,
-    );
+    await expect(copyButton).toHaveText("ID copied");
+    await expect(a.page.locator(".conversation-menu-panel")).toBeVisible();
     expect(await a.page.evaluate(() => navigator.clipboard.readText())).toBe(
       bob.id,
     );
+    await expect(a.page.locator(".conversation-menu-panel")).toHaveCount(0, {
+      timeout: 3000,
+    });
   });
 
   test("resets copy feedback when switching to another chat", async ({
@@ -684,18 +691,14 @@ test.describe("real browser chat", () => {
 
     await openChat(user.page, bob.id);
     await user.page.getByTestId("chat-menu").click();
-    await user.page.getByTestId("copy-peer-id").click();
-    await expect(user.page.getByTestId("id-copy-status")).toHaveText(
-      /^ID copied/u,
-    );
+    const copyButton = user.page.getByTestId("copy-peer-id");
+    await copyButton.click();
+    await expect(copyButton).toHaveText("ID copied");
     await openChat(user.page, carol.id);
-    await expect(user.page.getByTestId("id-copy-status")).toHaveCount(0);
+    await expect(copyButton).toHaveText("Copy ID");
 
-    await user.page.getByTestId("chat-menu").click();
-    await user.page.getByTestId("copy-peer-id").click();
-    await expect(user.page.getByTestId("id-copy-status")).toHaveText(
-      /^ID copied/u,
-    );
+    await copyButton.click();
+    await expect(copyButton).toHaveText("ID copied");
     expect(await user.page.evaluate(() => navigator.clipboard.readText())).toBe(
       carol.id,
     );
@@ -966,6 +969,7 @@ test.describe("real browser chat", () => {
     const alice = await createAccount(a.page);
     const bob = await createAccount(b.page);
     await openChat(b.page, alice.id);
+    await send(b.page, "Hover delay test");
     await send(b.page, "Delete from the list");
 
     const secondWindow = await a.context.newPage();
@@ -986,10 +990,13 @@ test.describe("real browser chat", () => {
       )
       .toBe("0");
     await row.hover();
-    await expect(basket).toHaveCSS("opacity", "1");
+    const opacity = () =>
+      basket.evaluate((element) => getComputedStyle(element).opacity);
+    await expect.poll(opacity).toBe("1");
     await item.focus();
     await a.page.keyboard.press("Tab");
     await expect(basket).toBeFocused();
+    expect(await opacity()).toBe("1");
     await expect(basket).toHaveAttribute("aria-label", "Delete chat");
 
     await basket.click();
@@ -1001,6 +1008,53 @@ test.describe("real browser chat", () => {
     await a.page.getByTestId("confirm-delete-chat").click();
     await expect(chatWith(a.page, bob.id)).toHaveCount(0);
     await expect(chatWith(secondWindow, bob.id)).toHaveCount(0);
+  });
+
+  test("chat row basket appears only after a delayed mouse hover", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(b.page, alice.id);
+
+    const row = a.page.locator(`.chat-row[data-peer-id="${bob.id}"]`);
+    const basket = row.getByTestId("chat-row-delete");
+    const opacity = () =>
+      basket.evaluate((element) => getComputedStyle(element).opacity);
+    await expect(row).toBeVisible();
+    await row.hover();
+    expect(await opacity()).toBe("0");
+    await a.page.waitForTimeout(300);
+    expect(await opacity()).toBe("0");
+    await expect.poll(opacity, { timeout: 3000 }).toBe("1");
+
+    await a.page.mouse.move(0, 0);
+    await expect.poll(opacity).toBe("0");
+  });
+
+  test("selected chat basket hides after the mouse leaves its row", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const b = await openUser(browser);
+    const alice = await createAccount(a.page);
+    const bob = await createAccount(b.page);
+    await openChat(b.page, alice.id);
+    await send(b.page, "Selected chat hover");
+
+    const row = a.page.locator(`.chat-row[data-peer-id="${bob.id}"]`);
+    const item = row.getByTestId("chat-item");
+    const basket = row.getByTestId("chat-row-delete");
+    const opacity = () =>
+      basket.evaluate((element) => getComputedStyle(element).opacity);
+    await expect(item).toBeVisible();
+    await item.click();
+    await expect(item).toHaveClass(/selected/u);
+    await a.page.getByTestId("message-input").hover();
+    await a.page.waitForTimeout(1500);
+    await expect.poll(opacity).toBe("0");
   });
 
   test("deleting an unopened list chat leaves the open chat selected", async ({
@@ -1018,7 +1072,13 @@ test.describe("real browser chat", () => {
 
     const bobRow = a.page.locator(`.chat-row[data-peer-id="${bob.id}"]`);
     await bobRow.hover();
-    await bobRow.getByTestId("chat-row-delete").click();
+    const basket = bobRow.getByTestId("chat-row-delete");
+    await expect
+      .poll(() =>
+        basket.evaluate((element) => getComputedStyle(element).opacity),
+      )
+      .toBe("1");
+    await basket.click();
     await a.page.getByTestId("confirm-delete-chat").click();
 
     await expect(chatWith(a.page, bob.id)).toHaveCount(0);
@@ -1051,7 +1111,13 @@ test.describe("real browser chat", () => {
     a.expectedDeleteFailure = true;
     const row = a.page.locator(`.chat-row[data-peer-id="${bob.id}"]`);
     await row.hover();
-    await row.getByTestId("chat-row-delete").click();
+    const basket = row.getByTestId("chat-row-delete");
+    await expect
+      .poll(() =>
+        basket.evaluate((element) => getComputedStyle(element).opacity),
+      )
+      .toBe("1");
+    await basket.click();
     await a.page.getByTestId("confirm-delete-chat").click();
     await expect(a.page.getByTestId("chat-error")).toHaveText(
       "Could not delete the chat. Check your connection and try again.",
@@ -1153,7 +1219,13 @@ test.describe("real browser chat", () => {
     const row = a.page.locator(`.chat-row[data-peer-id="${user.id}"]`);
     await expect(row.getByTestId("chat-row-delete")).toHaveCount(1);
     await row.hover();
-    await row.getByTestId("chat-row-delete").click();
+    const basket = row.getByTestId("chat-row-delete");
+    await expect
+      .poll(() =>
+        basket.evaluate((element) => getComputedStyle(element).opacity),
+      )
+      .toBe("1");
+    await basket.click();
     const dialog = a.page.getByRole("alertdialog");
     await expect(dialog).toContainText(
       "Your notes will be cleared on all your devices",

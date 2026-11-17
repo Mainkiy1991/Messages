@@ -83,6 +83,7 @@ type ChatConfirmation = {
   peerId: string;
   origin: "menu" | "list";
 };
+const CHAT_ROW_DELETE_HOVER_DELAY_MS = 1000;
 function App() {
   const [language, setLanguage] = useState<Language>(() =>
     getInitialLanguage(
@@ -126,6 +127,7 @@ function App() {
   const [chatConfirmation, setChatConfirmation] =
     useState<ChatConfirmation | null>(null);
   const [revealedPeerId, setRevealedPeerId] = useState("");
+  const [hoverRevealPeerId, setHoverRevealPeerId] = useState("");
   const [showForgotPinConfirmation, setShowForgotPinConfirmation] =
     useState(false);
   const [chatMenuOpen, setChatMenuOpen] = useState(false);
@@ -165,6 +167,8 @@ function App() {
   const profileCopyTimerRef = useRef<number | null>(null);
   const idCopyTimerRef = useRef<number | null>(null);
   const idCopyRequestRef = useRef(0);
+  const idCopyPendingRef = useRef(false);
+  const hoverRevealTimerRef = useRef<number | null>(null);
   const pinInputRef = useRef<HTMLInputElement | null>(null);
   const controllerRef = useRef<ChatController | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
@@ -200,6 +204,8 @@ function App() {
         window.clearTimeout(profileCopyTimerRef.current);
       if (idCopyTimerRef.current !== null)
         window.clearTimeout(idCopyTimerRef.current);
+      if (hoverRevealTimerRef.current !== null)
+        window.clearTimeout(hoverRevealTimerRef.current);
     },
     [],
   );
@@ -581,10 +587,20 @@ function App() {
   const activeMessages = activeChat?.messages ?? [];
   const displayMessages = collapseDeletedMessages(activeMessages);
   const confirmationIsSavedChat = chatConfirmation?.peerId === userId;
+  function clearHoverReveal() {
+    if (hoverRevealTimerRef.current !== null) {
+      window.clearTimeout(hoverRevealTimerRef.current);
+      hoverRevealTimerRef.current = null;
+    }
+    setHoverRevealPeerId("");
+  }
   function longPressHandlersFor(peerId: string): LongPressHandlers {
     let handlers = longPressHandlersRef.current.get(peerId);
     if (!handlers) {
-      handlers = createLongPressHandlers(() => setRevealedPeerId(peerId));
+      handlers = createLongPressHandlers(() => {
+        clearHoverReveal();
+        setRevealedPeerId(peerId);
+      });
       longPressHandlersRef.current.set(peerId, handlers);
     }
     return handlers;
@@ -650,6 +666,7 @@ function App() {
   }, [activePeer]);
   useEffect(() => {
     idCopyRequestRef.current += 1;
+    idCopyPendingRef.current = false;
     if (idCopyTimerRef.current !== null) {
       window.clearTimeout(idCopyTimerRef.current);
       idCopyTimerRef.current = null;
@@ -665,6 +682,11 @@ function App() {
       setChatConfirmation(null);
     if (revealedPeerId && !chats.some((chat) => chat.peerId === revealedPeerId))
       setRevealedPeerId("");
+    if (hoverRevealTimerRef.current !== null) {
+      window.clearTimeout(hoverRevealTimerRef.current);
+      hoverRevealTimerRef.current = null;
+    }
+    setHoverRevealPeerId("");
   }, [chatConfirmation, chatState.chats, revealedPeerId, userId]);
   useEffect(() => {
     setRevealedPeerId("");
@@ -742,7 +764,9 @@ function App() {
                             ? t.deletePending
                             : t.badPeerKey;
   async function copyPeerId() {
+    if (idCopyPendingRef.current) return;
     const peerId = activePeer;
+    idCopyPendingRef.current = true;
     const request = ++idCopyRequestRef.current;
     if (idCopyTimerRef.current !== null) {
       window.clearTimeout(idCopyTimerRef.current);
@@ -752,13 +776,19 @@ function App() {
     setIdCopyPeer(peerId);
     const success = await copyText(peerId);
     if (request !== idCopyRequestRef.current) return;
+    idCopyPendingRef.current = false;
     setIdCopyStatus(success ? "copied" : "failed");
-    if (success) {
-      idCopyTimerRef.current = window.setTimeout(() => {
-        if (request === idCopyRequestRef.current) setIdCopyStatus("");
-        idCopyTimerRef.current = null;
-      }, 2500);
+    if (!success) {
+      setChatMenuOpen(false);
+      return;
     }
+    idCopyTimerRef.current = window.setTimeout(() => {
+      if (request === idCopyRequestRef.current) {
+        setIdCopyStatus("");
+        setChatMenuOpen(false);
+      }
+      idCopyTimerRef.current = null;
+    }, 1600);
   }
   useEffect(() => {
     if (!keys || screen !== "home") return;
@@ -1529,9 +1559,30 @@ function App() {
                     const longPress = longPressHandlersFor(chat.peerId);
                     return (
                       <div
-                        className={`chat-row ${revealedPeerId === chat.peerId ? "reveal" : ""}`}
+                        className={`chat-row ${revealedPeerId === chat.peerId ? "reveal" : ""} ${hoverRevealPeerId === chat.peerId ? "hover-reveal" : ""}`}
                         data-peer-id={chat.peerId}
                         key={chat.peerId}
+                        onPointerEnter={(event) => {
+                          if (event.pointerType !== "mouse") return;
+                          if (hoverRevealTimerRef.current !== null)
+                            window.clearTimeout(hoverRevealTimerRef.current);
+                          hoverRevealTimerRef.current = window.setTimeout(
+                            () => {
+                              setHoverRevealPeerId(chat.peerId);
+                              hoverRevealTimerRef.current = null;
+                            },
+                            CHAT_ROW_DELETE_HOVER_DELAY_MS,
+                          );
+                        }}
+                        onPointerLeave={() => {
+                          if (hoverRevealTimerRef.current !== null) {
+                            window.clearTimeout(hoverRevealTimerRef.current);
+                            hoverRevealTimerRef.current = null;
+                          }
+                          setHoverRevealPeerId((current) =>
+                            current === chat.peerId ? "" : current,
+                          );
+                        }}
                       >
                         <button
                           data-testid="chat-item"
@@ -1624,6 +1675,7 @@ function App() {
                           title={t.deleteChatMenu}
                           onClick={() => {
                             setChatError("");
+                            clearHoverReveal();
                             setChatConfirmation({
                               action: "erase",
                               peerId: chat.peerId,
@@ -1774,12 +1826,12 @@ function App() {
                                 type="button"
                                 className="secondary"
                                 data-testid="copy-peer-id"
-                                onClick={() => {
-                                  setChatMenuOpen(false);
-                                  void copyPeerId();
-                                }}
+                                onClick={() => void copyPeerId()}
                               >
-                                {t.copyPeerId}
+                                {idCopyPeer === activePeer &&
+                                idCopyStatus === "copied"
+                                  ? t.idCopied
+                                  : t.copyPeerId}
                               </button>
                             )}
                             <button
@@ -1825,15 +1877,6 @@ function App() {
                         role="alert"
                       >
                         {contactNameError}
-                      </p>
-                    )}
-                    {idCopyPeer === activePeer && idCopyStatus === "copied" && (
-                      <p
-                        className="id-copy-status"
-                        role="status"
-                        data-testid="id-copy-status"
-                      >
-                        {t.idCopied}
                       </p>
                     )}
                     {idCopyPeer === activePeer && idCopyStatus === "failed" && (
