@@ -4931,7 +4931,7 @@ suite("server authentication (PostgreSQL)", () => {
 
   it("revokes other devices and legacy sessions while preserving the current session", async () => {
     const legacy = await createAccount();
-    const first = await registerDevice(legacy.keys);
+    await registerDevice(legacy.keys);
     const second = await registerDevice(legacy.keys);
     const revoke = await app.inject({
       method: "POST",
