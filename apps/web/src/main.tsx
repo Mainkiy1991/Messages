@@ -1957,18 +1957,22 @@ function App() {
                           data-testid="message-row"
                           key={message.id}
                         >
-                          <EditMessageButton
-                            message={message}
-                            userId={userId}
-                            label={t.edit}
-                            onEdit={beginEdit}
-                          />
-                          <DeleteMessageButton
-                            message={message}
-                            label={t.deleteMessage}
-                            editing={Boolean(editState)}
-                            onDelete={beginDeleteMessage}
-                          />
+                          {message.direction === "out" && (
+                            <div className="message-actions">
+                              <EditMessageButton
+                                message={message}
+                                userId={userId}
+                                label={t.edit}
+                                onEdit={beginEdit}
+                              />
+                              <DeleteMessageButton
+                                message={message}
+                                label={t.deleteMessage}
+                                editing={Boolean(editState)}
+                                onDelete={beginDeleteMessage}
+                              />
+                            </div>
+                          )}
                           <article
                             data-testid="message"
                             data-status={message.status}
