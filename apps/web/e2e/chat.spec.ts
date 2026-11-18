@@ -555,8 +555,11 @@ test.describe("real browser chat", () => {
     expect(listBox).not.toBeNull();
     expect(messageBox).not.toBeNull();
     const widthRatio = messageBox!.width / listBox!.width;
-    expect(widthRatio).toBeGreaterThan(0.6);
+    expect(widthRatio).toBeGreaterThan(0.78);
     expect(widthRatio).toBeLessThanOrEqual(0.9);
+    const rowBox = await message.locator("xpath=..").boundingBox();
+    expect(rowBox).not.toBeNull();
+    expect(Math.abs(rowBox!.width - messageBox!.width)).toBeLessThanOrEqual(1);
     expect(
       await message.evaluate((element) => {
         const style = getComputedStyle(element);
@@ -2208,7 +2211,7 @@ test.describe("real browser chat", () => {
     await expect(firstBubble).toHaveAttribute("data-status", "read");
     await expect(widthBubble).toHaveAttribute("data-status", "read");
 
-    // The pencil lives in the row next to the bubble, not inside it.
+    // The pencil overlays the bubble's top edge.
     const pencil = firstRow.getByTestId("edit-message");
     const opacity = () =>
       pencil.evaluate((element) => getComputedStyle(element).opacity);
@@ -2329,7 +2332,7 @@ test.describe("real browser chat", () => {
     const plainBox = (await plainBubble.boundingBox())!;
     expect(editedBox.width).toBeLessThanOrEqual(plainBox.width + 1);
 
-    // Narrow screen: the pencil stays left of the bubble and nothing overflows.
+    // Narrow screen: the pencil overlays the bubble's top edge without overflow.
     await a.page.setViewportSize({ width: 360, height: 640 });
     await editedBubble.hover();
     const editedPencil = editedRow.getByTestId("edit-message");
@@ -2341,24 +2344,25 @@ test.describe("real browser chat", () => {
     const narrowPencil = (await editedPencil.boundingBox())!;
     const narrowBubble = (await editedBubble.boundingBox())!;
     const conversation = (await a.page.locator(".conversation").boundingBox())!;
-    expect(narrowPencil.x).toBeGreaterThanOrEqual(conversation.x - 1);
-    expect(narrowBubble.x).toBeGreaterThanOrEqual(
-      narrowPencil.x + narrowPencil.width - 1,
+    const messageList = a.page.locator(".message-list");
+    const messageListBox = (await messageList.boundingBox())!;
+    expect(narrowPencil.x).toBeGreaterThanOrEqual(conversation.x);
+    expect(narrowPencil.x + narrowPencil.width).toBeLessThanOrEqual(
+      conversation.x + conversation.width,
     );
-    expect(narrowBubble.x + narrowBubble.width).toBeLessThanOrEqual(
-      conversation.x + conversation.width + 1,
+    const pencilCenterX = narrowPencil.x + narrowPencil.width / 2;
+    expect(pencilCenterX).toBeGreaterThanOrEqual(narrowBubble.x);
+    expect(pencilCenterX).toBeLessThanOrEqual(
+      narrowBubble.x + narrowBubble.width,
     );
+    expect(narrowPencil.y).toBeLessThan(narrowBubble.y);
+    expect(narrowPencil.y + narrowPencil.height).toBeGreaterThan(
+      narrowBubble.y,
+    );
+    expect(narrowPencil.y).toBeGreaterThanOrEqual(messageListBox.y);
+    expect(narrowBubble.width / messageListBox.width).toBeGreaterThan(0.78);
     expect(
-      Math.abs(
-        narrowPencil.y +
-          narrowPencil.height / 2 -
-          (narrowBubble.y + narrowBubble.height / 2),
-      ),
-    ).toBeLessThanOrEqual(1);
-    expect(
-      await a.page
-        .locator(".message-list")
-        .evaluate((list) => list.scrollWidth - list.clientWidth),
+      await messageList.evaluate((list) => list.scrollWidth - list.clientWidth),
     ).toBeLessThanOrEqual(0);
 
     await editedPencil.click();
