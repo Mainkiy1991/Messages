@@ -719,7 +719,7 @@ select {
   user-select: text;
 }
 .message-list {
-  padding: 14px;
+  padding: 26px 14px 14px;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -757,7 +757,7 @@ select {
 }
 .message-actions {
   position: absolute;
-  top: -12px;
+  top: -24px;
   right: 6px;
   z-index: 2;
   display: flex;
