@@ -2359,6 +2359,9 @@ test.describe("real browser chat", () => {
     expect(narrowPencil.y + narrowPencil.height).toBeGreaterThan(
       narrowBubble.y,
     );
+    expect(narrowPencil.y + narrowPencil.height).toBeLessThanOrEqual(
+      narrowBubble.y + 10,
+    );
     expect(narrowPencil.y).toBeGreaterThanOrEqual(messageListBox.y);
     expect(narrowBubble.width / messageListBox.width).toBeLessThan(0.75);
     expect(
