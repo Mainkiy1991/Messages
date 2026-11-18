@@ -85,12 +85,26 @@ export function deriveKeys(mnemonic: string): DerivedKeys {
   };
 }
 
+export function generateDeviceKeys(): {
+  privateKey: Uint8Array;
+  publicKey: Uint8Array;
+} {
+  const privateKey = randomBytes(32);
+  return { privateKey, publicKey: ed25519.getPublicKey(privateKey) };
+}
+
 export function userIdFromPublicKey(publicKey: Uint8Array): string {
   if (publicKey.length !== 32)
     throw new RangeError("Public key must be 32 bytes");
   return Array.from(publicKey, (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
+}
+
+export function deviceIdFromPublicKey(publicKey: Uint8Array): string {
+  if (!(publicKey instanceof Uint8Array) || publicKey.length !== 32)
+    throw new RangeError("Public key must be 32 bytes");
+  return bytesToHex(publicKey);
 }
 
 export function shortId(userId: string): string {
@@ -272,9 +286,11 @@ export async function unwrapSecrets(
 const MESSAGE_INFO = encoder.encode("messages/v1/message");
 const HISTORY_INFO = encoder.encode("messages/v1/history-entry");
 const CONTACTS_INFO = encoder.encode("messages/v1/contacts");
+const DEVICE_LABEL_INFO = "messages/v1/device-label";
 const VERSION = 1;
 const MESSAGE_VERSION_V2 = 2;
 const NONCE_LENGTH = 24;
+const MAX_DEVICE_LABEL_BLOB_LENGTH = 512;
 const MAX_TEXT_CHARS = 4000;
 const MAX_TEXT_BYTES = 16 * 1024;
 
@@ -703,6 +719,95 @@ export function decryptContactBook(input: {
   }
 }
 
+export function encryptDeviceLabel(input: {
+  historyKey: Uint8Array;
+  deviceId: string;
+  browser: string;
+  os: string;
+}): string {
+  checkKey(input.historyKey);
+  checkId(input.deviceId, 64, /^[0-9a-f]{64}$/u);
+  validateDeviceLabelField(input.browser);
+  validateDeviceLabelField(input.os);
+  const key = hkdf(
+    sha256,
+    input.historyKey,
+    HKDF_SALT,
+    encoder.encode(DEVICE_LABEL_INFO),
+    32,
+  );
+  const nonce = randomBytes(NONCE_LENGTH);
+  const aad = encoder.encode(`${DEVICE_LABEL_INFO}\n${input.deviceId}`);
+  const plaintext = encoder.encode(
+    JSON.stringify({
+      v: VERSION,
+      browser: input.browser,
+      os: input.os,
+    }),
+  );
+  const blob = bytesToBase64(
+    concat(
+      Uint8Array.of(VERSION),
+      nonce,
+      xchacha20poly1305(key, nonce, aad).encrypt(plaintext),
+    ),
+  );
+  if (blob.length > MAX_DEVICE_LABEL_BLOB_LENGTH)
+    throw new TypeError("Device label is too large");
+  return blob;
+}
+
+export function decryptDeviceLabel(input: {
+  historyKey: Uint8Array;
+  deviceId: string;
+  blob: string;
+}): { browser: string; os: string } {
+  try {
+    checkKey(input.historyKey);
+    checkId(input.deviceId, 64, /^[0-9a-f]{64}$/u);
+    if (input.blob.length > MAX_DEVICE_LABEL_BLOB_LENGTH)
+      throw new Error("Device label is too large");
+    const packed = base64ToBytes(input.blob);
+    const decoded = decodeEnvelope(packed);
+    const key = hkdf(
+      sha256,
+      input.historyKey,
+      HKDF_SALT,
+      encoder.encode(DEVICE_LABEL_INFO),
+      32,
+    );
+    const aad = encoder.encode(`${DEVICE_LABEL_INFO}\n${input.deviceId}`);
+    const value = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(
+        xchacha20poly1305(key, decoded.nonce, aad).decrypt(decoded.body),
+      ),
+    ) as Record<string, unknown>;
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      Object.keys(value).length !== 3 ||
+      value.v !== VERSION
+    )
+      throw new Error("Invalid device label");
+    validateDeviceLabelField(value.browser);
+    validateDeviceLabelField(value.os);
+    return { browser: value.browser, os: value.os };
+  } catch {
+    throw new DecryptError();
+  }
+}
+
+function validateDeviceLabelField(value: unknown): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    Array.from(value).length > 32 ||
+    /\p{Cc}/u.test(value)
+  )
+    throw new TypeError("Invalid device label");
+}
+
 function validateContacts(contacts: Record<string, string>): void {
   if (
     !contacts ||
@@ -827,6 +932,68 @@ export function signAuth(
     `messages/v1/auth\n${challengeId}\n${challengeHex}`,
   );
   return ed25519.sign(message, identityPrivateKey);
+}
+
+export function signDeviceRegistration(
+  identityPrivateKey: Uint8Array,
+  challengeId: string,
+  challengeHex: string,
+  devicePublicKey: Uint8Array,
+): Uint8Array {
+  const message = encoder.encode(
+    `messages/v1/device-register\n${challengeId}\n${challengeHex}\n${deviceIdFromPublicKey(devicePublicKey)}`,
+  );
+  return ed25519.sign(message, identityPrivateKey);
+}
+
+export function verifyDeviceRegistration(
+  identityPublicKey: Uint8Array,
+  challengeId: string,
+  challengeHex: string,
+  devicePublicKey: Uint8Array,
+  signature: Uint8Array,
+): boolean {
+  try {
+    return ed25519.verify(
+      signature,
+      encoder.encode(
+        `messages/v1/device-register\n${challengeId}\n${challengeHex}\n${deviceIdFromPublicKey(devicePublicKey)}`,
+      ),
+      identityPublicKey,
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function signDeviceAuth(
+  devicePrivateKey: Uint8Array,
+  challengeId: string,
+  challengeHex: string,
+): Uint8Array {
+  const message = encoder.encode(
+    `messages/v1/device-auth\n${challengeId}\n${challengeHex}`,
+  );
+  return ed25519.sign(message, devicePrivateKey);
+}
+
+export function verifyDeviceAuth(
+  devicePublicKey: Uint8Array,
+  challengeId: string,
+  challengeHex: string,
+  signature: Uint8Array,
+): boolean {
+  try {
+    return ed25519.verify(
+      signature,
+      encoder.encode(
+        `messages/v1/device-auth\n${challengeId}\n${challengeHex}`,
+      ),
+      devicePublicKey,
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function verifyAuth(
