@@ -769,16 +769,12 @@ select {
 }
 .message-row.out {
   align-self: flex-end;
-  width: 100%;
   max-width: 75%;
 }
 .message-row .message {
   align-self: center;
   max-width: 100%;
   min-width: 0;
-}
-.message-row.out .message {
-  width: 100%;
 }
 .message small {
   display: block;
