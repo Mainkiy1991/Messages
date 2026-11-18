@@ -108,6 +108,7 @@ export const messageUpdatedSchema = z
 type Connection = {
   socket: WebSocket;
   userId: string;
+  deviceId: string | null;
   tokenHash: string;
   alive: boolean;
   peerIds: Set<string>;
@@ -307,6 +308,13 @@ export async function registerWebSocket(
     return result.rows[0]!.last_seen_at.toISOString();
   }
 
+  async function persistDeviceLastSeen(deviceId: string): Promise<void> {
+    await pool.query(
+      "UPDATE devices SET last_seen_at=now() WHERE device_id=$1",
+      [deviceId],
+    );
+  }
+
   function remove(connection: Connection) {
     connections.delete(connection);
     connection.peerIds.clear();
@@ -328,6 +336,16 @@ export async function registerWebSocket(
             "Presence update failed",
           ),
         );
+    }
+    if (connection.deviceId) {
+      void persistDeviceLastSeen(connection.deviceId).catch((error: unknown) =>
+        app.log.error(
+          {
+            errorType: error instanceof Error ? error.name : typeof error,
+          },
+          "Device last seen update failed",
+        ),
+      );
     }
     const tokenSockets = perToken.get(connection.tokenHash);
     tokenSockets?.delete(connection);
@@ -470,8 +488,11 @@ export async function registerWebSocket(
             }
             const token = (frame as { token: string }).token;
             const hash = tokenHash(token);
-            const result = await pool.query<{ user_id: string }>(
-              "SELECT user_id FROM sessions WHERE token_hash=$1 AND expires_at > now()",
+            const result = await pool.query<{
+              user_id: string;
+              device_id: string | null;
+            }>(
+              "SELECT user_id, device_id FROM sessions WHERE token_hash=$1 AND expires_at > now()",
               [hash],
             );
             if (closed || socket.readyState !== WebSocket.OPEN) return;
@@ -481,6 +502,7 @@ export async function registerWebSocket(
               return;
             }
             const userId = result.rows[0].user_id;
+            const deviceId = result.rows[0].device_id;
             const userConnections =
               perUser.get(userId) ?? new Set<Connection>();
             if (userConnections.size >= maxConnections) {
@@ -493,6 +515,7 @@ export async function registerWebSocket(
             connection = {
               socket,
               userId,
+              deviceId,
               tokenHash: hash,
               alive: true,
               peerIds: new Set(),
@@ -506,6 +529,17 @@ export async function registerWebSocket(
               perToken.get(hash) ?? new Set<Connection>();
             tokenConnections.add(connection);
             perToken.set(hash, tokenConnections);
+            if (deviceId) {
+              void persistDeviceLastSeen(deviceId).catch((error: unknown) =>
+                app.log.error(
+                  {
+                    errorType:
+                      error instanceof Error ? error.name : typeof error,
+                  },
+                  "Device last seen update failed",
+                ),
+              );
+            }
             if (!wasOnline) {
               await persistLastSeen(userId);
               try {
