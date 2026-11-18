@@ -2360,7 +2360,7 @@ test.describe("real browser chat", () => {
       narrowBubble.y,
     );
     expect(narrowPencil.y).toBeGreaterThanOrEqual(messageListBox.y);
-    expect(narrowBubble.width / messageListBox.width).toBeGreaterThan(0.78);
+    expect(narrowBubble.width / messageListBox.width).toBeLessThan(0.75);
     expect(
       await messageList.evaluate((list) => list.scrollWidth - list.clientWidth),
     ).toBeLessThanOrEqual(0);
