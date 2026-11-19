@@ -4904,6 +4904,8 @@ suite("server authentication (PostgreSQL)", () => {
 
   it("deletes a device, protects the current device and repeats as 204", async () => {
     const registered = await registerDevice();
+    const legacy = await login();
+    expect(legacy.response.statusCode).toBe(200);
     const current = await app.inject({
       method: "DELETE",
       url: `/devices/${registered.deviceId}`,
@@ -4914,7 +4916,7 @@ suite("server authentication (PostgreSQL)", () => {
     const deleted = await app.inject({
       method: "DELETE",
       url: `/devices/${registered.deviceId}`,
-      headers: { authorization: `Bearer ${login.response.json().token}` },
+      headers: { authorization: `Bearer ${legacy.response.json().token}` },
     });
     expect(deleted.statusCode).toBe(204);
     expect(
@@ -4929,7 +4931,7 @@ suite("server authentication (PostgreSQL)", () => {
     const repeated = await app.inject({
       method: "DELETE",
       url: `/devices/${registered.deviceId}`,
-      headers: { authorization: `Bearer ${registered.response.json().token}` },
+      headers: { authorization: `Bearer ${legacy.response.json().token}` },
     });
     expect(repeated.statusCode).toBe(204);
   });
