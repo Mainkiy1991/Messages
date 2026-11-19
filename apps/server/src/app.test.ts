@@ -4823,7 +4823,9 @@ suite("server authentication (PostgreSQL)", () => {
   });
 
   it("registers a device and exposes it as the current decrypted label", async () => {
-    const { deviceId, deviceLabel, response } = await registerDevice();
+    const accountKeys = deriveKeys(generateMnemonic(12));
+    const { deviceId, deviceLabel, response } =
+      await registerDevice(accountKeys);
     expect(response.statusCode).toBe(200);
     expect(response.json().deviceId).toBe(deviceId);
     const me = await app.inject({
@@ -4846,7 +4848,7 @@ suite("server authentication (PostgreSQL)", () => {
     });
     expect(
       decryptDeviceLabel({
-        historyKey: keys.historyKey,
+        historyKey: accountKeys.historyKey,
         deviceId,
         blob: devices.json().devices[0].labelCiphertext,
       }),
