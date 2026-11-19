@@ -402,6 +402,19 @@ suite("server authentication (PostgreSQL)", () => {
     return { socket, auth: await authFrame };
   }
 
+  async function waitForDeviceLastSeenAfter(deviceId: string, after: Date) {
+    const deadline = Date.now() + 1_000;
+    while (Date.now() < deadline) {
+      const result = await pool!.query<{ last_seen_at: Date }>(
+        "SELECT last_seen_at FROM devices WHERE device_id=$1",
+        [deviceId],
+      );
+      if (result.rows[0]!.last_seen_at.getTime() > after.getTime()) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error("Device last_seen_at was not updated");
+  }
+
   function sendFrame(socket: WebSocket, frame: Record<string, unknown>) {
     socket.send(JSON.stringify(frame));
   }
@@ -601,6 +614,109 @@ suite("server authentication (PostgreSQL)", () => {
     socket.close();
   });
 
+  it("closes only the revoked device WebSocket", async () => {
+    const account = await createAccount();
+    const deviceA = await registerDevice(account.keys);
+    const deviceB = await registerDevice(account.keys);
+    const url = await listen();
+    const socketA = (await connectAuth(deviceA.response.json().token, url))
+      .socket;
+    const socketB = (await connectAuth(deviceB.response.json().token, url))
+      .socket;
+    const closedA = new Promise<number>((resolve) =>
+      socketA.once("close", (code) => resolve(code)),
+    );
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/devices/${deviceA.deviceId}`,
+      headers: { authorization: `Bearer ${deviceB.response.json().token}` },
+    });
+    expect(deleted.statusCode).toBe(204);
+    expect(await closedA).toBe(4401);
+    expect(socketB.readyState).toBe(WebSocket.OPEN);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/me",
+          headers: { authorization: `Bearer ${deviceB.response.json().token}` },
+        })
+      ).statusCode,
+    ).toBe(200);
+    const closedB = new Promise<void>((resolve) =>
+      socketB.once("close", () => resolve()),
+    );
+    socketB.close();
+    await closedB;
+  });
+
+  it("closes other device WebSockets on revoke-others and preserves the current one", async () => {
+    const accountKeys = deriveKeys(generateMnemonic(12));
+    const deviceA = await registerDevice(accountKeys);
+    const deviceB = await registerDevice(accountKeys);
+    const deviceC = await registerDevice(accountKeys);
+    const url = await listen();
+    const socketA = (await connectAuth(deviceA.response.json().token, url))
+      .socket;
+    const socketB = (await connectAuth(deviceB.response.json().token, url))
+      .socket;
+    const socketC = (await connectAuth(deviceC.response.json().token, url))
+      .socket;
+    const closedA = new Promise<number>((resolve) =>
+      socketA.once("close", (code) => resolve(code)),
+    );
+    const closedB = new Promise<number>((resolve) =>
+      socketB.once("close", (code) => resolve(code)),
+    );
+
+    const revoked = await app.inject({
+      method: "POST",
+      url: "/devices/revoke-others",
+      headers: { authorization: `Bearer ${deviceC.response.json().token}` },
+      payload: {},
+    });
+    expect(revoked.statusCode).toBe(200);
+    expect(revoked.json()).toMatchObject({
+      revoked: 2,
+      endedLegacySessions: 0,
+    });
+    expect(await closedA).toBe(4401);
+    expect(await closedB).toBe(4401);
+    expect(socketC.readyState).toBe(WebSocket.OPEN);
+    const closedC = new Promise<void>((resolve) =>
+      socketC.once("close", () => resolve()),
+    );
+    socketC.close();
+    await closedC;
+  });
+
+  it("updates device last_seen_at on WebSocket authentication and close", async () => {
+    const device = await registerDevice();
+    const old = new Date("2000-01-01T00:00:00.000Z");
+    await pool!.query("UPDATE devices SET last_seen_at=$2 WHERE device_id=$1", [
+      device.deviceId,
+      old,
+    ]);
+
+    const { socket } = await connectAuth(
+      device.response.json().token,
+      await listen(),
+    );
+    await waitForDeviceLastSeenAfter(device.deviceId, old);
+
+    await pool!.query("UPDATE devices SET last_seen_at=$2 WHERE device_id=$1", [
+      device.deviceId,
+      old,
+    ]);
+    const closed = new Promise<void>((resolve) =>
+      socket.once("close", () => resolve()),
+    );
+    socket.close();
+    await closed;
+    await waitForDeviceLastSeenAfter(device.deviceId, old);
+  });
+
   it("applies migration 007 on a clean schema and after 006 without losing rows", async () => {
     const migrationFiles = [
       "001_initial.sql",
@@ -788,6 +904,78 @@ suite("server authentication (PostgreSQL)", () => {
       );
       expect(migrated.rows[0]!.hidden).toBe(true);
       expect(defaultValue.rows[0]!.column_default).toContain("false");
+    } finally {
+      await client.query("SET search_path TO public");
+      await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      client.release();
+    }
+  });
+
+  it("adds device sessions in migration 010 without invalidating legacy sessions", async () => {
+    const schema = `devices_upgrade_${randomBytes(5).toString("hex")}`;
+    const client = await pool!.connect();
+    try {
+      await client.query(`CREATE SCHEMA ${schema}`);
+      await client.query(`SET search_path TO ${schema}`);
+      for (const name of [
+        "001_initial.sql",
+        "002_messages.sql",
+        "003_message_sequence.sql",
+        "004_history_contacts.sql",
+        "005_read_markers.sql",
+        "006_presence.sql",
+        "007_conversation_clears.sql",
+        "008_message_changes.sql",
+        "009_conversation_clears_hidden.sql",
+      ]) {
+        await client.query(
+          await readFile(
+            join(import.meta.dirname, "..", "migrations", name),
+            "utf8",
+          ),
+        );
+      }
+
+      const userId = randomBytes(32).toString("hex");
+      const legacyTokenHash = randomBytes(32).toString("hex");
+      await client.query(
+        `INSERT INTO users(id,encryption_public_key,key_binding_signature)
+         VALUES($1,$1,$1)`,
+        [userId],
+      );
+      await client.query(
+        "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '1 day')",
+        [legacyTokenHash, userId],
+      );
+      await client.query(
+        await readFile(
+          join(import.meta.dirname, "..", "migrations", "010_devices.sql"),
+          "utf8",
+        ),
+      );
+
+      const legacy = await client.query<{ device_id: string | null }>(
+        "SELECT device_id FROM sessions WHERE token_hash=$1",
+        [legacyTokenHash],
+      );
+      expect(legacy.rows).toEqual([{ device_id: null }]);
+
+      const deviceId = randomBytes(32).toString("hex");
+      const deviceTokenHash = randomBytes(32).toString("hex");
+      await client.query(
+        "INSERT INTO devices(device_id,user_id,label_ciphertext) VALUES($1,$2,'YQ==')",
+        [deviceId, userId],
+      );
+      await client.query(
+        "INSERT INTO sessions(token_hash,user_id,device_id,expires_at) VALUES($1,$2,$3,now()+interval '1 day')",
+        [deviceTokenHash, userId, deviceId],
+      );
+      await client.query("DELETE FROM devices WHERE device_id=$1", [deviceId]);
+      const cascaded = await client.query(
+        "SELECT 1 FROM sessions WHERE token_hash=$1",
+        [deviceTokenHash],
+      );
+      expect(cascaded.rowCount).toBe(0);
     } finally {
       await client.query("SET search_path TO public");
       await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
@@ -4768,11 +4956,6 @@ suite("server authentication (PostgreSQL)", () => {
 
   it("hides revoked status behind valid device signatures", async () => {
     const registered = await registerDevice();
-    const deleteResponse = await app.inject({
-      method: "DELETE",
-      url: "/devices/revoke-self-never-used",
-    });
-    expect(deleteResponse.statusCode).toBeGreaterThanOrEqual(400);
     await pool!.query(
       "UPDATE devices SET revoked_at=now() WHERE device_id=$1",
       [registered.deviceId],
@@ -4880,26 +5063,73 @@ suite("server authentication (PostgreSQL)", () => {
     ).toBe("1");
   });
 
-  it("returns revoked devices and wrong-user devices from device listing correctly", async () => {
-    const active = await registerDevice();
-    await pool!.query(
-      "UPDATE devices SET revoked_at=now() WHERE device_id=$1",
-      [active.deviceId],
-    );
-    const other = await createAccount();
-    const devices = await app.inject({
-      method: "GET",
-      url: "/devices",
-      headers: { authorization: `Bearer ${active.response.json().token}` },
-    });
-    expect(devices.statusCode).toBe(200);
-    expect(devices.json().devices).not.toContainEqual(
-      expect.objectContaining({ deviceId: active.deviceId }),
-    );
+  it("lists only the user's active devices with correct current flags", async () => {
+    const accountA = await createAccount();
+    const deviceA = await registerDevice(accountA.keys);
+    const deviceB = await registerDevice(accountA.keys);
     expect(
       (await app.inject({ method: "GET", url: "/devices" })).statusCode,
     ).toBe(401);
-    expect(other.token).toBeTruthy();
+    const listed = await app.inject({
+      method: "GET",
+      url: "/devices",
+      headers: { authorization: `Bearer ${deviceA.response.json().token}` },
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json().devices).toHaveLength(2);
+    expect(listed.json().devices).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          deviceId: deviceA.deviceId,
+          current: true,
+        }),
+        expect.objectContaining({
+          deviceId: deviceB.deviceId,
+          current: false,
+        }),
+      ]),
+    );
+
+    const accountB = await createAccount();
+    const foreignDevice = await registerDevice(accountB.keys);
+    const listedAfterOtherAccount = await app.inject({
+      method: "GET",
+      url: "/devices",
+      headers: { authorization: `Bearer ${deviceA.response.json().token}` },
+    });
+    expect(listedAfterOtherAccount.json().devices).not.toContainEqual(
+      expect.objectContaining({ deviceId: foreignDevice.deviceId }),
+    );
+    const foreignDelete = await app.inject({
+      method: "DELETE",
+      url: `/devices/${deviceA.deviceId}`,
+      headers: {
+        authorization: `Bearer ${foreignDevice.response.json().token}`,
+      },
+    });
+    expect(foreignDelete.statusCode).toBe(404);
+    expect(
+      (
+        await pool!.query<{ revoked_at: Date | null }>(
+          "SELECT revoked_at FROM devices WHERE device_id=$1",
+          [deviceA.deviceId],
+        )
+      ).rows[0]!.revoked_at,
+    ).toBeNull();
+
+    const ownDelete = await app.inject({
+      method: "DELETE",
+      url: `/devices/${deviceA.deviceId}`,
+      headers: { authorization: `Bearer ${deviceB.response.json().token}` },
+    });
+    expect(ownDelete.statusCode).toBe(204);
+    const afterDelete = await app.inject({
+      method: "GET",
+      url: "/devices",
+      headers: { authorization: `Bearer ${deviceB.response.json().token}` },
+    });
+    expect(afterDelete.json().devices).toHaveLength(1);
+    expect(afterDelete.json().devices[0].deviceId).toBe(deviceB.deviceId);
   });
 
   it("deletes a device, protects the current device and repeats as 204", async () => {
@@ -4952,27 +5182,62 @@ suite("server authentication (PostgreSQL)", () => {
       headers: { authorization: `Bearer ${account.token}` },
     });
     expect(unknown.statusCode).toBe(404);
+    const uppercase = await app.inject({
+      method: "DELETE",
+      url: `/devices/${"A".repeat(64)}`,
+      headers: { authorization: `Bearer ${account.token}` },
+    });
+    expect(uppercase.statusCode).toBe(400);
   });
 
   it("revokes other devices and legacy sessions while preserving the current session", async () => {
-    const legacy = await createAccount();
-    await registerDevice(legacy.keys);
-    const second = await registerDevice(legacy.keys);
+    const account1 = await createAccount();
+    const deviceA = await registerDevice(account1.keys);
+    const deviceB = await registerDevice(account1.keys);
+    const deviceC = await registerDevice(account1.keys);
+    const account2 = await createAccount();
+    const deviceD = await registerDevice(account2.keys);
     const revoke = await app.inject({
       method: "POST",
       url: "/devices/revoke-others",
-      headers: { authorization: `Bearer ${second.response.json().token}` },
+      headers: { authorization: `Bearer ${deviceC.response.json().token}` },
       payload: {},
     });
     expect(revoke.statusCode).toBe(200);
-    expect(revoke.json().revoked).toBeGreaterThanOrEqual(1);
-    expect(revoke.json().endedLegacySessions).toBeGreaterThanOrEqual(1);
+    expect(revoke.json()).toEqual({ revoked: 2, endedLegacySessions: 1 });
+
+    for (const token of [
+      deviceA.response.json().token,
+      deviceB.response.json().token,
+      account1.token,
+    ]) {
+      expect(
+        (
+          await app.inject({
+            method: "GET",
+            url: "/me",
+            headers: { authorization: `Bearer ${token}` },
+          })
+        ).statusCode,
+      ).toBe(401);
+    }
     expect(
       (
         await app.inject({
           method: "GET",
           url: "/me",
-          headers: { authorization: `Bearer ${second.response.json().token}` },
+          headers: { authorization: `Bearer ${deviceC.response.json().token}` },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect((await loginDevice(deviceA.device)).response.statusCode).toBe(403);
+
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/me",
+          headers: { authorization: `Bearer ${deviceD.response.json().token}` },
         })
       ).statusCode,
     ).toBe(200);
@@ -4981,10 +5246,18 @@ suite("server authentication (PostgreSQL)", () => {
         await app.inject({
           method: "GET",
           url: "/me",
-          headers: { authorization: `Bearer ${legacy.token}` },
+          headers: { authorization: `Bearer ${account2.token}` },
         })
       ).statusCode,
-    ).toBe(401);
+    ).toBe(200);
+    const account2Devices = await app.inject({
+      method: "GET",
+      url: "/devices",
+      headers: { authorization: `Bearer ${deviceD.response.json().token}` },
+    });
+    expect(account2Devices.json().devices).toEqual([
+      expect.objectContaining({ deviceId: deviceD.deviceId }),
+    ]);
   });
 
   it("rejects revoke-others bodies that are not empty", async () => {
@@ -5000,48 +5273,76 @@ suite("server authentication (PostgreSQL)", () => {
 
   it("limits a user to twenty active devices and revokes the oldest", async () => {
     const account = await createAccount();
-    let oldest: Awaited<ReturnType<typeof registerDevice>> | undefined;
+    const registeredDevices: Awaited<ReturnType<typeof registerDevice>>[] = [];
     for (let index = 0; index < 21; index++) {
-      clock += 1_000;
       const registered = await registerDevice(account.keys);
+      registeredDevices.push(registered);
       await pool!.query(
         "UPDATE devices SET last_seen_at=$2 WHERE device_id=$1",
-        [registered.deviceId, new Date(clock)],
+        [registered.deviceId, new Date(Date.UTC(2020, 0, 1) + index * 1000)],
       );
-      if (index === 0) oldest = registered;
     }
-    expect(oldest).toBeTruthy();
-    const oldestDevice = oldest!;
-    const status = await pool!.query<{ revoked_at: Date | null }>(
-      "SELECT revoked_at FROM devices WHERE device_id=$1",
-      [oldestDevice.deviceId],
+    const statuses = await pool!.query<{
+      device_id: string;
+      revoked_at: Date | null;
+    }>("SELECT device_id, revoked_at FROM devices WHERE user_id=$1", [
+      account.userId,
+    ]);
+    expect(statuses.rows).toHaveLength(21);
+    expect(statuses.rows.filter((row) => row.revoked_at)).toEqual([
+      expect.objectContaining({
+        device_id: registeredDevices[0]!.deviceId,
+      }),
+    ]);
+    expect(statuses.rows.filter((row) => row.revoked_at === null)).toHaveLength(
+      20,
     );
-    expect(status.rows[0]!.revoked_at).not.toBeNull();
+    expect(
+      statuses.rows.find(
+        (row) => row.device_id === registeredDevices[20]!.deviceId,
+      )!.revoked_at,
+    ).toBeNull();
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/me",
+          headers: {
+            authorization: `Bearer ${registeredDevices[0]!.response.json().token}`,
+          },
+        })
+      ).statusCode,
+    ).toBe(401);
+    expect(
+      (await loginDevice(registeredDevices[0]!.device)).response.statusCode,
+    ).toBe(403);
   });
 
-  it("keeps no more than 100 revoked device rows", async () => {
+  it("prunes the oldest revoked device after registration when over 100", async () => {
     const account = await createAccount();
+    let oldestDeviceId = "";
+    const revokedAtBase = Date.UTC(2020, 0, 1);
     for (let index = 0; index < 101; index++) {
+      const deviceId = (index + 1).toString(16).padStart(64, "0");
+      if (index === 0) oldestDeviceId = deviceId;
       await pool!.query(
         `INSERT INTO devices(device_id,user_id,label_ciphertext,revoked_at)
-         VALUES($1,$2,'dmFsaWQ=',now())`,
-        [`${index.toString(16).padStart(64, "0")}`, account.userId],
+         VALUES($1,$2,'dmFsaWQ=',$3)`,
+        [deviceId, account.userId, new Date(revokedAtBase + index * 1000)],
       );
     }
-    await pool!.query(
-      `DELETE FROM devices
-       WHERE device_id IN (
-         SELECT device_id FROM devices
-         WHERE user_id=$1 AND revoked_at IS NOT NULL
-         ORDER BY revoked_at DESC OFFSET 100
-       )`,
-      [account.userId],
-    );
+    const registered = await registerDevice(account.keys);
+    expect(registered.response.statusCode).toBe(200);
     const count = await pool!.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM devices WHERE user_id=$1 AND revoked_at IS NOT NULL",
       [account.userId],
     );
-    expect(Number(count.rows[0]!.count)).toBeLessThanOrEqual(100);
+    expect(Number(count.rows[0]!.count)).toBe(100);
+    const oldest = await pool!.query(
+      "SELECT 1 FROM devices WHERE user_id=$1 AND device_id=$2",
+      [account.userId, oldestDeviceId],
+    );
+    expect(oldest.rowCount).toBe(0);
   });
 
   it("keeps legacy login sessions compatible and marks them without a device", async () => {

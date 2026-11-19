@@ -659,7 +659,7 @@ export async function buildApp(options: {
       config: { rateLimit: { max: 20, timeWindow: "1 minute" } },
     },
     async (request, reply) => {
-      if (!/^[0-9a-f]{64}$/iu.test(request.params.deviceId)) {
+      if (!/^[0-9a-f]{64}$/u.test(request.params.deviceId)) {
         return reply.code(400).send({ error: "invalid_request" });
       }
       if (request.params.deviceId === request.deviceId) {
