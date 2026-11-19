@@ -162,13 +162,22 @@ suite("server authentication (PostgreSQL)", () => {
   });
 
   async function createChallenge(target = app, forwardedFor?: string) {
+    const requestIp =
+      forwardedFor ??
+      (() => {
+        const index = accountIp++;
+        return `198.18.${Math.floor(index / 250)}.${(index % 250) + 1}`;
+      })();
     const response = await target.inject({
       method: "POST",
       url: "/auth/challenge",
-      ...(forwardedFor ? { headers: { "x-forwarded-for": forwardedFor } } : {}),
+      headers: { "x-forwarded-for": requestIp },
       payload: {},
     });
-    return response.json() as { challengeId: string; challenge: string };
+    return {
+      ...(response.json() as { challengeId: string; challenge: string }),
+      forwardedFor: requestIp,
+    };
   }
 
   function loginPayload(
@@ -198,6 +207,7 @@ suite("server authentication (PostgreSQL)", () => {
     const response = await target.inject({
       method: "POST",
       url: "/auth/login",
+      headers: { "x-forwarded-for": challenge.forwardedFor },
       payload: loginPayload(challenge),
     });
     return { challenge, response };
@@ -255,6 +265,7 @@ suite("server authentication (PostgreSQL)", () => {
     const response = await app.inject({
       method: "POST",
       url: "/auth/device/register",
+      headers: { "x-forwarded-for": challenge.forwardedFor },
       payload: {
         challengeId: challenge.challengeId,
         identityPublicKey: bytesToHex(accountKeys.identity.publicKey),
@@ -289,6 +300,7 @@ suite("server authentication (PostgreSQL)", () => {
     const response = await app.inject({
       method: "POST",
       url: "/auth/device/login",
+      headers: { "x-forwarded-for": challenge.forwardedFor },
       payload: {
         challengeId: challenge.challengeId,
         deviceId,
@@ -4659,6 +4671,7 @@ suite("server authentication (PostgreSQL)", () => {
     const response = await app.inject({
       method: "POST",
       url: "/auth/device/register",
+      headers: { "x-forwarded-for": challenge.forwardedFor },
       payload: {
         challengeId: challenge.challengeId,
         identityPublicKey,
@@ -4688,6 +4701,7 @@ suite("server authentication (PostgreSQL)", () => {
     const repeated = await app.inject({
       method: "POST",
       url: "/auth/device/register",
+      headers: { "x-forwarded-for": first.challenge.forwardedFor },
       payload: {
         challengeId: first.challenge.challengeId,
         identityPublicKey,
@@ -4736,6 +4750,7 @@ suite("server authentication (PostgreSQL)", () => {
     const wrong = await app.inject({
       method: "POST",
       url: "/auth/device/login",
+      headers: { "x-forwarded-for": challenge.forwardedFor },
       payload: {
         challengeId: challenge.challengeId,
         deviceId: registered.deviceId,
@@ -4766,6 +4781,7 @@ suite("server authentication (PostgreSQL)", () => {
     const valid = await app.inject({
       method: "POST",
       url: "/auth/device/login",
+      headers: { "x-forwarded-for": validChallenge.forwardedFor },
       payload: {
         challengeId: validChallenge.challengeId,
         deviceId: registered.deviceId,
@@ -4784,6 +4800,7 @@ suite("server authentication (PostgreSQL)", () => {
     const invalid = await app.inject({
       method: "POST",
       url: "/auth/device/login",
+      headers: { "x-forwarded-for": invalidChallenge.forwardedFor },
       payload: {
         challengeId: invalidChallenge.challengeId,
         deviceId: registered.deviceId,
@@ -4795,6 +4812,9 @@ suite("server authentication (PostgreSQL)", () => {
     const repeatedRegistration = await app.inject({
       method: "POST",
       url: "/auth/device/register",
+      headers: {
+        "x-forwarded-for": repeatedRegistrationChallenge.forwardedFor,
+      },
       payload: {
         challengeId: repeatedRegistrationChallenge.challengeId,
         identityPublicKey,
@@ -4829,6 +4849,7 @@ suite("server authentication (PostgreSQL)", () => {
     const second = await app.inject({
       method: "POST",
       url: "/auth/device/register",
+      headers: { "x-forwarded-for": secondChallenge.forwardedFor },
       payload: {
         challengeId: secondChallenge.challengeId,
         identityPublicKey,

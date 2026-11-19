@@ -28,8 +28,11 @@ describe("WebSocket Origin policy", () => {
   it("closes ping floods with code 4429 before and after authentication", async () => {
     const pool = {
       async query(sql: string) {
-        if (sql.includes("SELECT user_id FROM sessions"))
-          return { rows: [{ user_id: "a".repeat(64) }], rowCount: 1 };
+        if (sql.includes("SELECT user_id, device_id FROM sessions"))
+          return {
+            rows: [{ user_id: "a".repeat(64), device_id: null }],
+            rowCount: 1,
+          };
         if (sql.includes("RETURNING last_seen_at"))
           return { rows: [{ last_seen_at: new Date() }], rowCount: 1 };
         return { rows: [], rowCount: 0 };
@@ -79,8 +82,11 @@ describe("WebSocket Origin policy", () => {
     const pool = {
       async query(sql: string) {
         queries.push(sql);
-        if (sql.includes("SELECT user_id FROM sessions"))
-          return { rows: [{ user_id: "a".repeat(64) }], rowCount: 1 };
+        if (sql.includes("SELECT user_id, device_id FROM sessions"))
+          return {
+            rows: [{ user_id: "a".repeat(64), device_id: null }],
+            rowCount: 1,
+          };
         if (sql.includes("RETURNING last_seen_at"))
           return { rows: [{ last_seen_at: new Date() }], rowCount: 1 };
         return { rows: [], rowCount: 0 };
