@@ -4912,7 +4912,7 @@ suite("server authentication (PostgreSQL)", () => {
       headers: { authorization: `Bearer ${registered.response.json().token}` },
     });
     expect(current.statusCode).toBe(409);
-    const login = await loginDevice(registered.device);
+    const deviceLogin = await loginDevice(registered.device);
     const deleted = await app.inject({
       method: "DELETE",
       url: `/devices/${registered.deviceId}`,
@@ -4924,7 +4924,9 @@ suite("server authentication (PostgreSQL)", () => {
         await app.inject({
           method: "GET",
           url: "/me",
-          headers: { authorization: `Bearer ${login.response.json().token}` },
+          headers: {
+            authorization: `Bearer ${deviceLogin.response.json().token}`,
+          },
         })
       ).statusCode,
     ).toBe(401);
