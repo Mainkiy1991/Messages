@@ -37,8 +37,14 @@ async function signIn(page: Page, phrase: string) {
 }
 
 async function openDevices(page: Page) {
-  await page.getByTestId("profile").click();
-  await page.getByTestId("profile-devices").click();
+  const panel = page.locator(".profile-panel");
+  if (!(await panel.isVisible())) {
+    await page.getByTestId("profile").click();
+  }
+  const devicesButton = page.getByTestId("profile-devices");
+  if ((await devicesButton.getAttribute("aria-expanded")) !== "true") {
+    await devicesButton.click();
+  }
   await expect(
     page.getByText("Devices where you are signed in", { exact: false }),
   ).toBeVisible();
@@ -133,9 +139,7 @@ test.describe.serial("devices", () => {
     await expect(third.page.getByTestId("device-revoked-notice")).toBeVisible();
   });
 
-  test("shows load error and retries after route is removed", async ({
-    browser,
-  }) => {
+  test("shows load error and retries after route is removed", async () => {
     if (!sharedContext) throw new Error("Devices setup did not run");
     const setup = sharedContext;
     await setup.page.route("**/devices", (route) =>
