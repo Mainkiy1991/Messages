@@ -2789,23 +2789,31 @@ describe("ChatController", () => {
   });
   it("handles device revocation once during account loading", async () => {
     vi.useFakeTimers();
+    vi.stubGlobal("window", {});
     const onDeviceRevoked = vi.fn();
-    const setTimer = vi.fn((callback: TimerHandler, ms?: number) =>
-      setTimeout(callback, ms),
-    );
     const f = makeController({
-      initialSession: null,
+      initialSession: session("initial-token"),
       login: async () => {
         throw new DeviceRevokedError();
       },
-      getConversations: async () => ({ conversations: [], cleared: [] }),
+      getConversations: async () => {
+        throw new DeviceRevokedError();
+      },
       getContacts: async () => ({ version: "0", blob: null }),
-      setTimer: setTimer as unknown as typeof setTimeout,
       onDeviceRevoked,
     });
     f.controller.start();
     await vi.advanceTimersByTimeAsync(0);
+    expect(f.controller.getSnapshot().error).not.toBe("server_unavailable");
+    f.sockets[0]!.open();
+    f.sockets[0]!.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    f.sockets[0]!.close(4401);
+    await vi.advanceTimersByTimeAsync(0);
     await Promise.resolve();
+    expect(onDeviceRevoked).toHaveBeenCalledTimes(1);
+    expect(f.getLoginCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(120_000);
     expect(onDeviceRevoked).toHaveBeenCalledTimes(1);
     expect(f.getLoginCount()).toBe(1);
     f.controller.stop();
