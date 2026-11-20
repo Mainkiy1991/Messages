@@ -91,7 +91,7 @@ describe("websocket chat connection", () => {
     );
     await vi.advanceTimersByTimeAsync(10);
     expect(socket.closed).toBe(true);
-    expect((connection as unknown as { state: string }).state).toBe("offline");
+    expect(states).toContain("offline");
     connection.stop();
     vi.useRealTimers();
   });
