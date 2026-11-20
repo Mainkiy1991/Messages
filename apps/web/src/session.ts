@@ -5,6 +5,7 @@ import {
   unwrapSecrets,
   wrapServerSession,
   wrapSecrets,
+  userIdFromPublicKey,
   type DerivedKeys,
   type KeyPair,
   type WrappedServerSession,
@@ -27,13 +28,9 @@ export function isDeviceKeys(keys: AccountKeys): keys is DeviceKeys {
 }
 export function accountUserId(keys: AccountKeys): string {
   if (isDeviceKeys(keys)) {
-    return Array.from(keys.identityPublicKey, (byte) =>
-      byte.toString(16).padStart(2, "0"),
-    ).join("");
+    return userIdFromPublicKey(keys.identityPublicKey);
   }
-  return Array.from(keys.identity.publicKey, (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
+  return userIdFromPublicKey(keys.identity.publicKey);
 }
 export function serverSessionWrapKey(keys: AccountKeys): Uint8Array {
   return isDeviceKeys(keys) ? keys.device.privateKey : keys.identity.privateKey;

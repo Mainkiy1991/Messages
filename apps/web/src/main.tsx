@@ -75,7 +75,7 @@ import {
   type LongPressHandlers,
 } from "./lib/long-press.js";
 import "./style.css";
-import { ApiError, registerDevice } from "./lib/api.js";
+import { registerDeviceWithRetry, type SignInError } from "./lib/sign-in.js";
 
 type Screen =
   "loading" | "locked" | "welcome" | "create" | "verify" | "login" | "home";
@@ -264,13 +264,18 @@ function App() {
         if (saved) {
           setKeys(saved);
           setScreen("home");
-        } else if (saved !== false) setScreen("welcome");
+        } else if (saved !== false) showAuthScreen("welcome");
       })
-      .catch(() => setScreen("welcome"));
+      .catch(() => showAuthScreen("welcome"));
   }, []);
   function changeLanguage(next: Language) {
     setLanguage(next);
     saveLanguagePreference(next);
+  }
+  function showAuthScreen(next: "welcome" | "create" | "verify" | "login") {
+    setRegistrationError(null);
+    setRegistrationWaking(false);
+    setScreen(next);
   }
 
   async function enter(mnemonic: string) {
@@ -283,42 +288,16 @@ function App() {
       setRegistrationWaking(true);
     }, 5_000);
     const derived = deriveKeys(normalizeMnemonic(mnemonic));
-    const deadline = Date.now() + 60_000;
-    let retried401 = false;
     try {
-      while (true) {
-        try {
-          const { session, deviceKeys } = await registerDevice(derived);
-          await saveDeviceAccount(deviceKeys, session);
-          derived.identity.privateKey.fill(0);
-          setKeys(deviceKeys);
-          break;
-        } catch (error) {
-          if (
-            error instanceof ApiError &&
-            error.status === 401 &&
-            !retried401
-          ) {
-            retried401 = true;
-            continue;
-          }
-          if (error instanceof ApiError && error.status === 429) {
-            setRegistrationError("other");
-            throw error;
-          }
-          const retryable =
-            error instanceof TypeError ||
-            (error instanceof ApiError &&
-              (error.status === 0 || error.status >= 500));
-          if (!retryable || Date.now() >= deadline) {
-            setRegistrationError(retryable ? "network" : "other");
-            throw error;
-          }
-          await new Promise<void>((resolve) => {
-            window.setTimeout(resolve, 5_000);
-          });
-        }
-      }
+      const { session, deviceKeys } = await registerDeviceWithRetry(derived);
+      await saveDeviceAccount(deviceKeys, session);
+      derived.identity.privateKey.fill(0);
+      setKeys(deviceKeys);
+    } catch (error) {
+      setRegistrationError(
+        (error as SignInError).kind === "network" ? "network" : "other",
+      );
+      throw error;
     } finally {
       window.clearTimeout(wakeTimer);
       registrationBusyRef.current = false;
@@ -502,7 +481,7 @@ function App() {
     setPinEnabled(false);
     setPin("");
     setShowForgotPinConfirmation(false);
-    setScreen("welcome");
+    showAuthScreen("welcome");
   }
 
   function beginCreate() {
@@ -512,7 +491,7 @@ function App() {
     setAnswers(["", "", ""]);
     setHasError(false);
     setDeviceRevokedNotice(false);
-    setScreen("verify");
+    showAuthScreen("verify");
   }
 
   async function handleLogin(event: React.FormEvent<HTMLFormElement>) {
@@ -598,7 +577,7 @@ function App() {
     setLogoutError(false);
     setShowLogoutSkipWarning(false);
     setShowLogoutConfirmation(false);
-    setScreen("welcome");
+    showAuthScreen("welcome");
   }
 
   const userId = keys ? accountUserId(keys) : "";
@@ -875,7 +854,7 @@ function App() {
               waking: false,
               presence: {},
             });
-            setScreen("welcome");
+            showAuthScreen("welcome");
             setDeviceRevokedNotice(true);
           }
         },
@@ -1097,7 +1076,7 @@ function App() {
       <header className={screen === "home" ? "app-header" : undefined}>
         <a
           className="brand"
-          onClick={() => screen === "welcome" && setScreen("welcome")}
+          onClick={() => screen === "welcome" && showAuthScreen("welcome")}
         >
           {t.title}
         </a>
@@ -1483,7 +1462,7 @@ function App() {
               className="primary"
               onClick={() => {
                 setDeviceRevokedNotice(false);
-                setScreen("create");
+                showAuthScreen("create");
               }}
             >
               {t.create}
@@ -1495,7 +1474,7 @@ function App() {
                 setPhrase("");
                 setHasError(false);
                 setDeviceRevokedNotice(false);
-                setScreen("login");
+                showAuthScreen("login");
               }}
             >
               {t.login}

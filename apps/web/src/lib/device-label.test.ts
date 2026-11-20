@@ -28,8 +28,16 @@ describe("detectDeviceLabel", () => {
       { browser: "Edge", os: "Windows" },
     ],
     [
-      "Mozilla/5.0 (X11; Linux x86_64) Opera/105.0",
-      { browser: "unknown", os: "Linux" },
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 OPR/115.0.0.0",
+      { browser: "unknown", os: "Windows" },
+    ],
+    [
+      "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 EdgA/131.0 Chrome/131.0 Mobile Safari/537.36",
+      { browser: "Edge", os: "Android" },
+    ],
+    [
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 EdgiOS/131.0 Mobile/15E148 Safari/604.1",
+      { browser: "Edge", os: "iOS" },
     ],
   ])("detects %s", (_ua, expected) => {
     expect(detectDeviceLabel(_ua)).toEqual(expected);

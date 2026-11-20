@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { deriveKeys, userIdFromPublicKey } from "@messages/crypto";
+import {
+  deriveKeys,
+  generateDeviceKeys,
+  userIdFromPublicKey,
+} from "@messages/crypto";
+import { DeviceRevokedError } from "./api.js";
 import {
   ChatConnection,
   resolveWebSocketUrl,
@@ -86,7 +91,7 @@ describe("websocket chat connection", () => {
     );
     await vi.advanceTimersByTimeAsync(10);
     expect(socket.closed).toBe(true);
-    expect(states).toContain("offline");
+    expect((connection as unknown as { state: string }).state).toBe("offline");
     connection.stop();
     vi.useRealTimers();
   });
@@ -416,6 +421,79 @@ describe("websocket chat connection", () => {
     ]);
     connection.stop();
     vi.useRealTimers();
+  });
+
+  it("handles device revocation once and does not schedule timers", async () => {
+    vi.useFakeTimers();
+    const derived = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    const device = generateDeviceKeys();
+    const deviceKeys = {
+      identityPublicKey: derived.identity.publicKey,
+      encryption: derived.encryption,
+      historyKey: derived.historyKey,
+      device,
+    };
+    const onRevoked = vi.fn();
+    const setTimer = vi.fn((callback: TimerHandler, _ms?: number) =>
+      setTimeout(callback, _ms),
+    );
+    const login = vi.fn().mockRejectedValue(new DeviceRevokedError());
+    const states: string[] = [];
+    const connection = new ChatConnection(
+      deviceKeys,
+      null,
+      {
+        onState: (state) => states.push(state),
+        onFrame: vi.fn(),
+        onRevoked,
+      },
+      {
+        login,
+        setTimer: setTimer as unknown as typeof setTimeout,
+        clearTimer: clearTimeout,
+      },
+    );
+    await expect(connection.refreshSession()).rejects.toBeInstanceOf(
+      DeviceRevokedError,
+    );
+    await expect(connection.refreshSession()).rejects.toBeInstanceOf(
+      DeviceRevokedError,
+    );
+    expect(onRevoked).toHaveBeenCalledTimes(1);
+    expect(login).toHaveBeenCalledTimes(1);
+    expect((connection as unknown as { state: string }).state).toBe("offline");
+    expect(setTimer).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("retries a network refresh as before", async () => {
+    const keys = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    let attempts = 0;
+    const connection = new ChatConnection(
+      keys,
+      null,
+      { onState: vi.fn(), onFrame: vi.fn() },
+      {
+        login: async () => {
+          attempts++;
+          if (attempts === 1) throw new TypeError("offline");
+          return {
+            token: "recovered",
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            userId: userIdFromPublicKey(keys.identity.publicKey),
+          };
+        },
+      },
+    );
+    await expect(connection.refreshSession()).rejects.toBeInstanceOf(TypeError);
+    await expect(connection.refreshSession()).resolves.toMatchObject({
+      token: "recovered",
+    });
+    expect(attempts).toBe(2);
   });
 
   it("acks duplicate inbound ids without rendering them twice", async () => {

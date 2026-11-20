@@ -145,6 +145,7 @@ export class ChatConnection {
   }
 
   async refreshSession(): Promise<ServerSession> {
+    if (this.revokedHandled) throw new DeviceRevokedError();
     if (this.sessionRequest) return this.sessionRequest;
     const login = this.deps.login ?? loginWithKeys;
     this.sessionRequest = login(this.keys, this.deps.fetcher)

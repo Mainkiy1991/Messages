@@ -10,10 +10,15 @@ import {
   enablePin,
   unlockWithPin,
   disablePin,
+  changePin,
   restoreServerSession,
   type DeviceKeys,
 } from "./session.js";
-import { generateDeviceKeys, bytesToHex } from "@messages/crypto";
+import {
+  generateDeviceKeys,
+  bytesToHex,
+  unwrapServerSession,
+} from "@messages/crypto";
 
 const sample = {
   identity: { privateKey: new Uint8Array([1]), publicKey: new Uint8Array([2]) },
@@ -79,5 +84,108 @@ describe("session storage", () => {
       "identity",
     );
     expect(unpackKeys(packed)).toEqual(keys);
+  });
+
+  it("changes PIN for device keys and removes the open device key", async () => {
+    const device = generateDeviceKeys();
+    const keys: DeviceKeys = {
+      identityPublicKey: new Uint8Array(32).fill(11),
+      encryption: {
+        privateKey: new Uint8Array(32).fill(12),
+        publicKey: new Uint8Array(32).fill(13),
+      },
+      historyKey: new Uint8Array(32).fill(14),
+      device,
+    };
+    const session = {
+      token: "device-token",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      userId: bytesToHex(keys.identityPublicKey),
+      deviceId: bytesToHex(device.publicKey),
+    };
+    await saveDeviceAccount(keys, session);
+    await enablePin(keys, "old-pin-123");
+
+    const rawDeviceKey = await new Promise<unknown>((resolve, reject) => {
+      const request = indexedDB.open("messages-session");
+      request.onsuccess = () => {
+        const db = request.result;
+        const get = db
+          .transaction("keys")
+          .objectStore("keys")
+          .get("deviceKeys");
+        get.onsuccess = () => {
+          resolve(get.result);
+          db.close();
+        };
+        get.onerror = () => reject(get.error);
+      };
+      request.onerror = () => reject(request.error);
+    });
+    expect(rawDeviceKey).toBeUndefined();
+
+    await changePin(keys, "old-pin-123", "new-pin-456");
+    await expect(unlockWithPin("old-pin-123")).rejects.toThrow();
+    await expect(unlockWithPin("new-pin-456")).resolves.toEqual(keys);
+
+    const otherKey = new Uint8Array(32).fill(99);
+    const storedSession = await new Promise<unknown>((resolve, reject) => {
+      const request = indexedDB.open("messages-session");
+      request.onsuccess = () => {
+        const db = request.result;
+        const get = db
+          .transaction("keys")
+          .objectStore("keys")
+          .get("serverSession");
+        get.onsuccess = () => {
+          resolve(get.result);
+          db.close();
+        };
+        get.onerror = () => reject(get.error);
+      };
+      request.onerror = () => reject(request.error);
+    });
+    expect(() =>
+      unwrapServerSession(
+        storedSession as Parameters<typeof unwrapServerSession>[0],
+        otherKey,
+      ),
+    ).toThrow();
+  });
+
+  it("does not store identity in the open device key object", async () => {
+    const device = generateDeviceKeys();
+    const keys: DeviceKeys = {
+      identityPublicKey: new Uint8Array(32).fill(21),
+      encryption: {
+        privateKey: new Uint8Array(32).fill(22),
+        publicKey: new Uint8Array(32).fill(23),
+      },
+      historyKey: new Uint8Array(32).fill(24),
+      device,
+    };
+    await saveDeviceAccount(keys, {
+      token: "token",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      userId: bytesToHex(keys.identityPublicKey),
+      deviceId: bytesToHex(device.publicKey),
+    });
+    const raw = await new Promise<unknown>((resolve, reject) => {
+      const request = indexedDB.open("messages-session");
+      request.onsuccess = () => {
+        const db = request.result;
+        const get = db
+          .transaction("keys")
+          .objectStore("keys")
+          .get("deviceKeys");
+        get.onsuccess = () => {
+          resolve(get.result);
+          db.close();
+        };
+        get.onerror = () => reject(get.error);
+      };
+      request.onerror = () => reject(request.error);
+    });
+    expect(raw).not.toHaveProperty("identity");
   });
 });

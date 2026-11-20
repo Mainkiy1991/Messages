@@ -2,12 +2,9 @@ export type DeviceLabel = { browser: string; os: string };
 
 export function detectDeviceLabel(userAgent: string): DeviceLabel {
   let browser = "unknown";
-  if (/Edg\//u.test(userAgent)) browser = "Edge";
-  else if (
-    /Chrome|Chromium|CriOS/u.test(userAgent) &&
-    !/OPR|Opera|OPiOS/u.test(userAgent)
-  )
-    browser = "Chrome";
+  if (/OPR|Opera|OPiOS/u.test(userAgent)) browser = "unknown";
+  else if (/Edg(?:e|A|iOS)?\//u.test(userAgent)) browser = "Edge";
+  else if (/Chrome|Chromium|CriOS/u.test(userAgent)) browser = "Chrome";
   else if (/Firefox|FxiOS/u.test(userAgent)) browser = "Firefox";
   else if (/Safari/u.test(userAgent)) browser = "Safari";
 
