@@ -59,6 +59,7 @@ test("PIN locks the page on reload and unlocks after a wrong attempt", async ({
     return JSON.stringify(values);
   });
   expect(stored).not.toContain("derivedKeys");
+  expect(stored).not.toContain("deviceKeys");
   expect(stored).not.toContain("historyKey");
   expect(stored).not.toContain(phrase);
   await page.reload();

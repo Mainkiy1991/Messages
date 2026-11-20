@@ -1,12 +1,16 @@
-import { userIdFromPublicKey, type DerivedKeys } from "@messages/crypto";
 import { MAX_CONVERSATIONS } from "@messages/shared";
 import {
   API_URL,
   type FetchLike,
-  loginToServer,
+  loginWithKeys,
+  DeviceRevokedError,
   resolveApiUrl,
 } from "./api.js";
-import type { ServerSession } from "../session.js";
+import {
+  accountUserId,
+  type AccountKeys,
+  type ServerSession,
+} from "../session.js";
 
 export type SocketState = "connected" | "connecting" | "offline";
 export function resolveWebSocketUrl(apiUrl = API_URL): string {
@@ -64,9 +68,10 @@ export class ChatConnection {
     | undefined;
   private readonly heartbeatWindow:
     Pick<Window, "addEventListener" | "removeEventListener"> | undefined;
+  private revokedHandled = false;
 
   constructor(
-    private readonly keys: DerivedKeys,
+    private readonly keys: AccountKeys,
     session: ServerSession | null,
     private readonly handlers: {
       onState(state: SocketState): void;
@@ -74,11 +79,12 @@ export class ChatConnection {
       onSend?(clientMsgId: string): void;
       onSent?(clientMsgId: string): void;
       onSendTimeout?(clientMsgId: string): void;
+      onRevoked?(): void | Promise<void>;
     },
     private readonly deps: {
       fetcher?: FetchLike;
       login?: (
-        keys: DerivedKeys,
+        keys: AccountKeys,
         fetcher?: FetchLike,
       ) => Promise<ServerSession>;
       socketFactory?: SocketFactory;
@@ -104,10 +110,7 @@ export class ChatConnection {
       deps.document ?? (typeof document === "undefined" ? undefined : document);
     this.heartbeatWindow =
       deps.window ?? (typeof window === "undefined" ? undefined : window);
-    this.session =
-      session?.userId === userIdFromPublicKey(keys.identity.publicKey)
-        ? session
-        : null;
+    this.session = session?.userId === accountUserId(keys) ? session : null;
   }
 
   start(): void {
@@ -143,11 +146,19 @@ export class ChatConnection {
 
   async refreshSession(): Promise<ServerSession> {
     if (this.sessionRequest) return this.sessionRequest;
-    const login = this.deps.login ?? loginToServer;
+    const login = this.deps.login ?? loginWithKeys;
     this.sessionRequest = login(this.keys, this.deps.fetcher)
       .then((session) => {
         this.session = session;
         return session;
+      })
+      .catch((error) => {
+        if (error instanceof DeviceRevokedError && !this.revokedHandled) {
+          this.revokedHandled = true;
+          this.stop();
+          void this.handlers.onRevoked?.();
+        }
+        throw error;
       })
       .finally(() => {
         this.sessionRequest = null;
