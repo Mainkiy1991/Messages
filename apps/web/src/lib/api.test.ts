@@ -26,8 +26,11 @@ import {
   deviceLogin,
   loginWithKeys,
   DeviceRevokedError,
+  getDevices,
+  revokeDevice,
+  revokeOtherDevices,
 } from "./api.js";
-import { resolveApiUrl } from "./api.js";
+import { ApiError, resolveApiUrl } from "./api.js";
 
 describe("API server address", () => {
   it("uses the configured API URL and keeps localhost as the development default", () => {
@@ -445,6 +448,44 @@ describe("delete own message API", () => {
     expect(headers.get("Authorization")).toBe("Bearer session-token");
     expect(requestInit?.body).toBeUndefined();
     expect(result).toBeUndefined();
+  });
+});
+
+describe("devices API", () => {
+  it("gets and revokes devices with bearer authentication", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      calls.push({ url: String(input), init });
+      if (String(input).endsWith("/devices/revoke-others"))
+        return Response.json({ revoked: 2, endedLegacySessions: 1 });
+      if (String(input).includes("/devices/device-a"))
+        return new Response(null, { status: 204 });
+      return Response.json({ devices: [] });
+    };
+    await getDevices("session-token", fetcher);
+    await revokeDevice("device-a", "session-token", fetcher);
+    await revokeOtherDevices("session-token", fetcher);
+    expect(calls[0]?.url).toBe("http://localhost:3000/devices");
+    expect(calls[0]?.init?.method).toBeUndefined();
+    expect(new Headers(calls[0]?.init?.headers).get("Authorization")).toBe(
+      "Bearer session-token",
+    );
+    expect(calls[1]?.url).toBe("http://localhost:3000/devices/device-a");
+    expect(calls[1]?.init?.method).toBe("DELETE");
+    expect(calls[2]?.init?.method).toBe("POST");
+  });
+
+  it("returns ApiError for 404 and 409 revoke responses", async () => {
+    await expect(
+      revokeDevice("missing", "token", async () =>
+        Response.json({ error: "not_found" }, { status: 404 }),
+      ),
+    ).rejects.toBeInstanceOf(ApiError);
+    await expect(
+      revokeDevice("self", "token", async () =>
+        Response.json({ error: "current_device" }, { status: 409 }),
+      ),
+    ).rejects.toMatchObject({ status: 409, code: "current_device" });
   });
 });
 

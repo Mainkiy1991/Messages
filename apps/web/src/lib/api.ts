@@ -58,6 +58,18 @@ export type HistoryMessage = {
   deleted?: boolean;
 };
 export type ContactBookResponse = { version: string; blob: string | null };
+export type DeviceRow = {
+  deviceId: string;
+  labelCiphertext: string;
+  createdAt: string;
+  lastSeenAt: string;
+  current: boolean;
+};
+export type DevicesResponse = { devices: DeviceRow[] };
+export type RevokeOthersResponse = {
+  revoked: number;
+  endedLegacySessions: number;
+};
 export function resolveApiUrl(
   value?: string,
   fallback = import.meta.env.DEV ? "http://localhost:3000" : "",
@@ -346,6 +358,38 @@ export async function logoutFromServer(
   fetcher: FetchLike = fetch,
 ): Promise<void> {
   await request<void>(fetcher, "/auth/logout", token, { method: "POST" });
+}
+
+export function getDevices(token: string, fetcher: FetchLike = fetch) {
+  return request<DevicesResponse>(fetcher, "/devices", token);
+}
+
+export function revokeDevice(
+  deviceId: string,
+  token: string,
+  fetcher: FetchLike = fetch,
+) {
+  return request<void>(
+    fetcher,
+    `/devices/${encodeURIComponent(deviceId)}`,
+    token,
+    {
+      method: "DELETE",
+    },
+  );
+}
+
+export function revokeOtherDevices(token: string, fetcher: FetchLike = fetch) {
+  return request<RevokeOthersResponse>(
+    fetcher,
+    "/devices/revoke-others",
+    token,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    },
+  );
 }
 
 export function getConversations(token: string, fetcher: FetchLike = fetch) {

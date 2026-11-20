@@ -54,6 +54,7 @@ import {
   DeleteMessageButton,
   DeletedMessageText,
 } from "./components/message-delete.js";
+import { DevicesPanel } from "./components/devices-panel.js";
 import {
   canEditMessage,
   canSubmitEdit,
@@ -161,7 +162,7 @@ function App() {
   const [chatError, setChatError] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileSection, setProfileSection] = useState<
-    "language" | "pin" | "id" | null
+    "language" | "pin" | "devices" | "id" | null
   >(null);
   const [pinForm, setPinForm] = useState<
     "enable" | "change" | "disable" | null
@@ -456,7 +457,9 @@ function App() {
       setPinOperation(null);
     }
   }
-  function toggleProfileSection(section: "language" | "pin" | "id") {
+  function toggleProfileSection(
+    section: "language" | "pin" | "devices" | "id",
+  ) {
     const closing = profileSection === section;
     setProfileSection(closing ? null : section);
     if (section !== "pin" || closing) setPinForm(null);
@@ -1315,6 +1318,25 @@ function App() {
                             </>
                           )}
                         </>
+                      )}
+                    </div>
+                  )}
+                  <button
+                    className="secondary profile-item"
+                    data-testid="profile-devices"
+                    aria-expanded={profileSection === "devices"}
+                    onClick={() => toggleProfileSection("devices")}
+                  >
+                    {t.devicesTitle}
+                  </button>
+                  {profileSection === "devices" && (
+                    <div className="profile-section">
+                      {controllerRef.current && (
+                        <DevicesPanel
+                          controller={controllerRef.current}
+                          language={language}
+                          strings={t}
+                        />
                       )}
                     </div>
                   )}
