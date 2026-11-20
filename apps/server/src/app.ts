@@ -8,9 +8,12 @@ import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { Pool, type PoolClient } from "pg";
 import {
+  deviceIdFromPublicKey,
   hexToBytes,
   userIdFromPublicKey,
   verifyAuth,
+  verifyDeviceAuth,
+  verifyDeviceRegistration,
   verifyKeyBinding,
 } from "@messages/crypto";
 import { z } from "zod";
@@ -29,6 +32,7 @@ import { MAX_CONVERSATIONS } from "@messages/shared";
 declare module "fastify" {
   interface FastifyRequest {
     userId: string | null;
+    deviceId: string | null;
   }
 }
 
@@ -43,6 +47,29 @@ const loginSchema = z.object({
   keyBindingSignature: z.string().regex(/^[0-9a-f]{128}$/u),
   signature: z.string().regex(/^[0-9a-f]{128}$/u),
 });
+const deviceRegisterSchema = z
+  .object({
+    challengeId: z.string().regex(/^[0-9a-f]{32}$/u),
+    identityPublicKey: z.string().regex(/^[0-9a-f]{64}$/u),
+    encryptionPublicKey: z.string().regex(/^[0-9a-f]{64}$/u),
+    keyBindingSignature: z.string().regex(/^[0-9a-f]{128}$/u),
+    devicePublicKey: z.string().regex(/^[0-9a-f]{64}$/u),
+    deviceLabel: z
+      .string()
+      .regex(
+        /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u,
+      )
+      .max(512),
+    signature: z.string().regex(/^[0-9a-f]{128}$/u),
+  })
+  .strict();
+const deviceLoginSchema = z
+  .object({
+    challengeId: z.string().regex(/^[0-9a-f]{32}$/u),
+    deviceId: z.string().regex(/^[0-9a-f]{64}$/u),
+    signature: z.string().regex(/^[0-9a-f]{128}$/u),
+  })
+  .strict();
 const historyQuerySchema = z
   .object({
     before: z
@@ -168,6 +195,7 @@ export async function buildApp(options: {
     },
   });
   app.decorateRequest("userId", null);
+  app.decorateRequest("deviceId", null);
   app.setErrorHandler((error, request, reply) => {
     const statusCode =
       error &&
@@ -226,15 +254,19 @@ export async function buildApp(options: {
       await reply.code(401).send({ error: "unauthorized" });
       return reply;
     }
-    const result = await pool.query(
-      "SELECT user_id FROM sessions WHERE token_hash=$1 AND expires_at > now()",
+    const result = await pool.query<{
+      user_id: string;
+      device_id: string | null;
+    }>(
+      "SELECT user_id, device_id FROM sessions WHERE token_hash=$1 AND expires_at > now()",
       [hashToken(token)],
     );
     if (!result.rowCount) {
       await reply.code(401).send({ error: "unauthorized" });
       return reply;
     }
-    request.userId = result.rows[0].user_id as string;
+    request.userId = result.rows[0]!.user_id;
+    request.deviceId = result.rows[0]!.device_id;
     await pool.query("UPDATE users SET last_seen_at=now() WHERE id=$1", [
       request.userId,
     ]);
@@ -362,6 +394,211 @@ export async function buildApp(options: {
   );
 
   app.post(
+    "/auth/device/register",
+    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const parsed = deviceRegisterSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(401).send({ error: "invalid_credentials" });
+      }
+      const input = parsed.data;
+      const pending = challenges.get(input.challengeId);
+      challenges.delete(input.challengeId);
+      if (!pending || pending.expiresAt <= now()) {
+        return reply.code(401).send({ error: "invalid_credentials" });
+      }
+
+      const identity = hexToBytes(input.identityPublicKey);
+      const encryption = hexToBytes(input.encryptionPublicKey);
+      const devicePublicKey = hexToBytes(input.devicePublicKey);
+      const signature = hexToBytes(input.signature);
+      const binding = hexToBytes(input.keyBindingSignature);
+      if (
+        !verifyDeviceRegistration(
+          identity,
+          input.challengeId,
+          pending.challenge,
+          devicePublicKey,
+          signature,
+        ) ||
+        !verifyKeyBinding(identity, encryption, binding)
+      ) {
+        return reply.code(401).send({ error: "invalid_credentials" });
+      }
+
+      const userId = userIdFromPublicKey(identity);
+      const deviceId = deviceIdFromPublicKey(devicePublicKey);
+      const expiresAt = new Date(now() + sessionTtl);
+      const token = randomBytes(32).toString("base64url");
+      const client = await pool.connect();
+      const closedHashes: string[] = [];
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          `INSERT INTO users(id, encryption_public_key, key_binding_signature, last_seen_at)
+           VALUES($1,$2,$3,now()) ON CONFLICT(id) DO UPDATE SET
+           encryption_public_key=EXCLUDED.encryption_public_key,
+           key_binding_signature=EXCLUDED.key_binding_signature,last_seen_at=now()`,
+          [userId, input.encryptionPublicKey, input.keyBindingSignature],
+        );
+
+        const existing = await client.query<{
+          user_id: string;
+          revoked_at: Date | null;
+        }>("SELECT user_id, revoked_at FROM devices WHERE device_id=$1", [
+          deviceId,
+        ]);
+        if (existing.rowCount) {
+          const row = existing.rows[0]!;
+          if (row.user_id !== userId) {
+            await client.query("ROLLBACK");
+            return reply.code(401).send({ error: "invalid_credentials" });
+          }
+          if (row.revoked_at) {
+            await client.query("ROLLBACK");
+            return reply.code(403).send({ error: "device_revoked" });
+          }
+          await client.query(
+            `UPDATE devices SET label_ciphertext=$2, last_seen_at=now()
+             WHERE device_id=$1`,
+            [deviceId, input.deviceLabel],
+          );
+        } else {
+          await client.query(
+            `INSERT INTO devices(device_id,user_id,label_ciphertext)
+             VALUES($1,$2,$3)`,
+            [deviceId, userId, input.deviceLabel],
+          );
+        }
+
+        const activeCount = await client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM devices WHERE user_id=$1 AND revoked_at IS NULL",
+          [userId],
+        );
+        const excess = Number(activeCount.rows[0]!.count) - 20;
+        if (excess > 0) {
+          const oldest = await client.query<{ device_id: string }>(
+            `SELECT device_id FROM devices
+             WHERE user_id=$1 AND revoked_at IS NULL AND device_id<>$2
+             ORDER BY last_seen_at ASC, created_at ASC
+             LIMIT $3`,
+            [userId, deviceId, excess],
+          );
+          for (const row of oldest.rows) {
+            const removed = await client.query<{ token_hash: string }>(
+              "DELETE FROM sessions WHERE device_id=$1 RETURNING token_hash",
+              [row.device_id],
+            );
+            for (const removedRow of removed.rows) {
+              if (removedRow.token_hash)
+                closedHashes.push(removedRow.token_hash);
+            }
+            await client.query(
+              "UPDATE devices SET revoked_at=now() WHERE device_id=$1",
+              [row.device_id],
+            );
+          }
+        }
+
+        await client.query(
+          `DELETE FROM devices
+           WHERE device_id IN (
+             SELECT device_id FROM devices
+             WHERE user_id=$1 AND revoked_at IS NOT NULL
+             ORDER BY revoked_at DESC
+             OFFSET 100
+           )`,
+          [userId],
+        );
+        await client.query(
+          "INSERT INTO sessions(token_hash,user_id,device_id,expires_at) VALUES($1,$2,$3,$4)",
+          [hashToken(token), userId, deviceId, expiresAt],
+        );
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      } finally {
+        client.release();
+      }
+      for (const tokenHash of closedHashes) {
+        closeWebSocketsForToken(app, tokenHash);
+      }
+      return { token, expiresAt: expiresAt.toISOString(), userId, deviceId };
+    },
+  );
+
+  app.post(
+    "/auth/device/login",
+    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const parsed = deviceLoginSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(401).send({ error: "invalid_credentials" });
+      }
+      const input = parsed.data;
+      const pending = challenges.get(input.challengeId);
+      challenges.delete(input.challengeId);
+      if (!pending || pending.expiresAt <= now()) {
+        return reply.code(401).send({ error: "invalid_credentials" });
+      }
+
+      const device = await pool.query<{
+        user_id: string;
+        revoked_at: Date | null;
+      }>("SELECT user_id, revoked_at FROM devices WHERE device_id=$1", [
+        input.deviceId,
+      ]);
+      if (!device.rowCount) {
+        return reply.code(401).send({ error: "invalid_credentials" });
+      }
+      const row = device.rows[0]!;
+      const valid = verifyDeviceAuth(
+        hexToBytes(input.deviceId),
+        input.challengeId,
+        pending.challenge,
+        hexToBytes(input.signature),
+      );
+      if (!valid) {
+        return reply.code(401).send({ error: "invalid_credentials" });
+      }
+      if (row.revoked_at) {
+        return reply.code(403).send({ error: "device_revoked" });
+      }
+
+      const expiresAt = new Date(now() + sessionTtl);
+      const token = randomBytes(32).toString("base64url");
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          "UPDATE devices SET last_seen_at=now() WHERE device_id=$1",
+          [input.deviceId],
+        );
+        await client.query("UPDATE users SET last_seen_at=now() WHERE id=$1", [
+          row.user_id,
+        ]);
+        await client.query(
+          "INSERT INTO sessions(token_hash,user_id,device_id,expires_at) VALUES($1,$2,$3,$4)",
+          [hashToken(token), row.user_id, input.deviceId, expiresAt],
+        );
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      } finally {
+        client.release();
+      }
+      return {
+        token,
+        expiresAt: expiresAt.toISOString(),
+        userId: row.user_id,
+        deviceId: input.deviceId,
+      };
+    },
+  );
+
+  app.post(
     "/auth/logout",
     {
       preHandler: authenticate,
@@ -384,6 +621,150 @@ export async function buildApp(options: {
     );
     return result.rows[0];
   });
+  app.get(
+    "/devices",
+    {
+      preHandler: authenticate,
+      config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
+    },
+    async (request) => {
+      const result = await pool.query<{
+        device_id: string;
+        label_ciphertext: string;
+        created_at: Date;
+        last_seen_at: Date;
+      }>(
+        `SELECT device_id, label_ciphertext, created_at, last_seen_at
+         FROM devices
+         WHERE user_id=$1 AND revoked_at IS NULL
+         ORDER BY last_seen_at DESC, created_at DESC`,
+        [request.userId],
+      );
+      return {
+        devices: result.rows.map((row) => ({
+          deviceId: row.device_id,
+          labelCiphertext: row.label_ciphertext,
+          createdAt: row.created_at.toISOString(),
+          lastSeenAt: row.last_seen_at.toISOString(),
+          current: row.device_id === request.deviceId,
+        })),
+      };
+    },
+  );
+
+  app.delete<{ Params: { deviceId: string } }>(
+    "/devices/:deviceId",
+    {
+      preHandler: authenticate,
+      config: { rateLimit: { max: 20, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      if (!/^[0-9a-f]{64}$/u.test(request.params.deviceId)) {
+        return reply.code(400).send({ error: "invalid_request" });
+      }
+      if (request.params.deviceId === request.deviceId) {
+        return reply.code(409).send({ error: "current_device" });
+      }
+      const existing = await pool.query<{
+        user_id: string;
+        revoked_at: Date | null;
+      }>("SELECT user_id, revoked_at FROM devices WHERE device_id=$1", [
+        request.params.deviceId,
+      ]);
+      if (!existing.rowCount || existing.rows[0]!.user_id !== request.userId) {
+        return reply.code(404).send({ error: "not_found" });
+      }
+      if (existing.rows[0]!.revoked_at) {
+        return reply.code(204).send();
+      }
+
+      const client = await pool.connect();
+      const closedHashes: string[] = [];
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          "UPDATE devices SET revoked_at=now() WHERE device_id=$1",
+          [request.params.deviceId],
+        );
+        const removed = await client.query<{ token_hash: string }>(
+          "DELETE FROM sessions WHERE device_id=$1 RETURNING token_hash",
+          [request.params.deviceId],
+        );
+        for (const row of removed.rows) closedHashes.push(row.token_hash);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      } finally {
+        client.release();
+      }
+      for (const tokenHash of closedHashes) {
+        closeWebSocketsForToken(app, tokenHash);
+      }
+      return reply.code(204).send();
+    },
+  );
+
+  app.post(
+    "/devices/revoke-others",
+    {
+      preHandler: authenticate,
+      config: { rateLimit: { max: 20, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      if (!emptyBodySchema.safeParse(request.body ?? {}).success) {
+        return reply.code(400).send({ error: "invalid_request" });
+      }
+      const currentToken = bearerToken(request);
+      const currentHash = currentToken ? hashToken(currentToken) : null;
+      const client = await pool.connect();
+      const closedHashes: string[] = [];
+      let revoked = 0;
+      let endedLegacySessions = 0;
+      try {
+        await client.query("BEGIN");
+        const devices = await client.query<{ device_id: string }>(
+          `SELECT device_id FROM devices
+           WHERE user_id=$1 AND revoked_at IS NULL
+             AND ($2::text IS NULL OR device_id<>$2)`,
+          [request.userId, request.deviceId],
+        );
+        for (const row of devices.rows) {
+          await client.query(
+            "UPDATE devices SET revoked_at=now() WHERE device_id=$1",
+            [row.device_id],
+          );
+          const removed = await client.query<{ token_hash: string }>(
+            "DELETE FROM sessions WHERE device_id=$1 RETURNING token_hash",
+            [row.device_id],
+          );
+          for (const removedRow of removed.rows) {
+            closedHashes.push(removedRow.token_hash);
+          }
+          revoked++;
+        }
+        const legacy = await client.query<{ token_hash: string }>(
+          `DELETE FROM sessions
+           WHERE user_id=$1 AND device_id IS NULL
+             AND ($2::text IS NULL OR token_hash<>$2)
+           RETURNING token_hash`,
+          [request.userId, currentHash],
+        );
+        endedLegacySessions = legacy.rowCount ?? 0;
+        for (const row of legacy.rows) closedHashes.push(row.token_hash);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      } finally {
+        client.release();
+      }
+      for (const tokenHash of closedHashes) {
+        closeWebSocketsForToken(app, tokenHash);
+      }
+      return { revoked, endedLegacySessions };
+    },
+  );
   app.get("/conversations", { preHandler: authenticate }, async (request) => {
     const result = await pool.query(
       `WITH visible_conversations AS (

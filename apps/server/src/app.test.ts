@@ -7,12 +7,18 @@ import WebSocket from "ws";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   bytesToHex,
+  deviceIdFromPublicKey,
   decryptHistoryEntry,
   decryptTextMessage,
+  decryptDeviceLabel,
   deriveKeys,
+  encryptDeviceLabel,
   encryptHistoryEntry,
   encryptTextMessage,
+  generateDeviceKeys,
   signAuth,
+  signDeviceAuth,
+  signDeviceRegistration,
   signKeyBinding,
   generateMnemonic,
   newReplayMessageId,
@@ -49,7 +55,7 @@ suite("server authentication (PostgreSQL)", () => {
 
   beforeAll(async () => {
     await pool!.query(
-      "DROP TABLE IF EXISTS conversation_clears, presence, read_markers, contact_books, messages, sessions, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS conversation_clears, presence, read_markers, contact_books, messages, devices, sessions, users, schema_migrations CASCADE",
     );
     await pool!.query("DROP SEQUENCE IF EXISTS messages_change_seq");
     await pool!.query(
@@ -131,6 +137,12 @@ suite("server authentication (PostgreSQL)", () => {
         "utf8",
       ),
     );
+    await pool!.query(
+      await readFile(
+        join(import.meta.dirname, "..", "migrations", "010_devices.sql"),
+        "utf8",
+      ),
+    );
     app = await buildApp({
       databaseUrl: databaseUrl!,
       now: () => clock,
@@ -150,13 +162,22 @@ suite("server authentication (PostgreSQL)", () => {
   });
 
   async function createChallenge(target = app, forwardedFor?: string) {
+    const requestIp =
+      forwardedFor ??
+      (() => {
+        const index = accountIp++;
+        return `198.18.${Math.floor(index / 250)}.${(index % 250) + 1}`;
+      })();
     const response = await target.inject({
       method: "POST",
       url: "/auth/challenge",
-      ...(forwardedFor ? { headers: { "x-forwarded-for": forwardedFor } } : {}),
+      headers: { "x-forwarded-for": requestIp },
       payload: {},
     });
-    return response.json() as { challengeId: string; challenge: string };
+    return {
+      ...(response.json() as { challengeId: string; challenge: string }),
+      forwardedFor: requestIp,
+    };
   }
 
   function loginPayload(
@@ -186,6 +207,7 @@ suite("server authentication (PostgreSQL)", () => {
     const response = await target.inject({
       method: "POST",
       url: "/auth/login",
+      headers: { "x-forwarded-for": challenge.forwardedFor },
       payload: loginPayload(challenge),
     });
     return { challenge, response };
@@ -226,6 +248,72 @@ suite("server authentication (PostgreSQL)", () => {
       token: response.json().token as string,
       keys: accountKeys,
     };
+  }
+
+  async function registerDevice(
+    accountKeys = keys,
+    label = { browser: "Test Browser", os: "Test OS" },
+  ) {
+    const challenge = await createChallenge();
+    const device = generateDeviceKeys();
+    const deviceId = deviceIdFromPublicKey(device.publicKey);
+    const deviceLabel = encryptDeviceLabel({
+      historyKey: accountKeys.historyKey,
+      deviceId,
+      ...label,
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/auth/device/register",
+      headers: { "x-forwarded-for": challenge.forwardedFor },
+      payload: {
+        challengeId: challenge.challengeId,
+        identityPublicKey: bytesToHex(accountKeys.identity.publicKey),
+        encryptionPublicKey: bytesToHex(accountKeys.encryption.publicKey),
+        keyBindingSignature: bytesToHex(
+          signKeyBinding(
+            accountKeys.identity.privateKey,
+            accountKeys.encryption.publicKey,
+          ),
+        ),
+        devicePublicKey: bytesToHex(device.publicKey),
+        deviceLabel,
+        signature: bytesToHex(
+          signDeviceRegistration(
+            accountKeys.identity.privateKey,
+            challenge.challengeId,
+            challenge.challenge,
+            device.publicKey,
+          ),
+        ),
+      },
+    });
+    return { challenge, device, deviceId, deviceLabel, response };
+  }
+
+  async function loginDevice(device: {
+    privateKey: Uint8Array;
+    publicKey: Uint8Array;
+  }) {
+    const challenge = await createChallenge();
+    const deviceId = deviceIdFromPublicKey(device.publicKey);
+    const response = await app.inject({
+      method: "POST",
+      url: "/auth/device/login",
+      headers: { "x-forwarded-for": challenge.forwardedFor },
+      payload: {
+        challengeId: challenge.challengeId,
+        deviceId,
+        signature: bytesToHex(
+          signDeviceAuth(
+            device.privateKey,
+            challenge.challengeId,
+            challenge.challenge,
+          ),
+        ),
+      },
+    });
+    return { challenge, deviceId, response };
   }
 
   async function listen() {
@@ -312,6 +400,19 @@ suite("server authentication (PostgreSQL)", () => {
     const authFrame = nextFrame(socket, (frame) => frame.type === "auth_ok");
     socket.send(JSON.stringify({ type: "auth", token }));
     return { socket, auth: await authFrame };
+  }
+
+  async function waitForDeviceLastSeenAfter(deviceId: string, after: Date) {
+    const deadline = Date.now() + 1_000;
+    while (Date.now() < deadline) {
+      const result = await pool!.query<{ last_seen_at: Date }>(
+        "SELECT last_seen_at FROM devices WHERE device_id=$1",
+        [deviceId],
+      );
+      if (result.rows[0]!.last_seen_at.getTime() > after.getTime()) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error("Device last_seen_at was not updated");
   }
 
   function sendFrame(socket: WebSocket, frame: Record<string, unknown>) {
@@ -513,6 +614,109 @@ suite("server authentication (PostgreSQL)", () => {
     socket.close();
   });
 
+  it("closes only the revoked device WebSocket", async () => {
+    const account = await createAccount();
+    const deviceA = await registerDevice(account.keys);
+    const deviceB = await registerDevice(account.keys);
+    const url = await listen();
+    const socketA = (await connectAuth(deviceA.response.json().token, url))
+      .socket;
+    const socketB = (await connectAuth(deviceB.response.json().token, url))
+      .socket;
+    const closedA = new Promise<number>((resolve) =>
+      socketA.once("close", (code) => resolve(code)),
+    );
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/devices/${deviceA.deviceId}`,
+      headers: { authorization: `Bearer ${deviceB.response.json().token}` },
+    });
+    expect(deleted.statusCode).toBe(204);
+    expect(await closedA).toBe(4401);
+    expect(socketB.readyState).toBe(WebSocket.OPEN);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/me",
+          headers: { authorization: `Bearer ${deviceB.response.json().token}` },
+        })
+      ).statusCode,
+    ).toBe(200);
+    const closedB = new Promise<void>((resolve) =>
+      socketB.once("close", () => resolve()),
+    );
+    socketB.close();
+    await closedB;
+  });
+
+  it("closes other device WebSockets on revoke-others and preserves the current one", async () => {
+    const accountKeys = deriveKeys(generateMnemonic(12));
+    const deviceA = await registerDevice(accountKeys);
+    const deviceB = await registerDevice(accountKeys);
+    const deviceC = await registerDevice(accountKeys);
+    const url = await listen();
+    const socketA = (await connectAuth(deviceA.response.json().token, url))
+      .socket;
+    const socketB = (await connectAuth(deviceB.response.json().token, url))
+      .socket;
+    const socketC = (await connectAuth(deviceC.response.json().token, url))
+      .socket;
+    const closedA = new Promise<number>((resolve) =>
+      socketA.once("close", (code) => resolve(code)),
+    );
+    const closedB = new Promise<number>((resolve) =>
+      socketB.once("close", (code) => resolve(code)),
+    );
+
+    const revoked = await app.inject({
+      method: "POST",
+      url: "/devices/revoke-others",
+      headers: { authorization: `Bearer ${deviceC.response.json().token}` },
+      payload: {},
+    });
+    expect(revoked.statusCode).toBe(200);
+    expect(revoked.json()).toMatchObject({
+      revoked: 2,
+      endedLegacySessions: 0,
+    });
+    expect(await closedA).toBe(4401);
+    expect(await closedB).toBe(4401);
+    expect(socketC.readyState).toBe(WebSocket.OPEN);
+    const closedC = new Promise<void>((resolve) =>
+      socketC.once("close", () => resolve()),
+    );
+    socketC.close();
+    await closedC;
+  });
+
+  it("updates device last_seen_at on WebSocket authentication and close", async () => {
+    const device = await registerDevice();
+    const old = new Date("2000-01-01T00:00:00.000Z");
+    await pool!.query("UPDATE devices SET last_seen_at=$2 WHERE device_id=$1", [
+      device.deviceId,
+      old,
+    ]);
+
+    const { socket } = await connectAuth(
+      device.response.json().token,
+      await listen(),
+    );
+    await waitForDeviceLastSeenAfter(device.deviceId, old);
+
+    await pool!.query("UPDATE devices SET last_seen_at=$2 WHERE device_id=$1", [
+      device.deviceId,
+      old,
+    ]);
+    const closed = new Promise<void>((resolve) =>
+      socket.once("close", () => resolve()),
+    );
+    socket.close();
+    await closed;
+    await waitForDeviceLastSeenAfter(device.deviceId, old);
+  });
+
   it("applies migration 007 on a clean schema and after 006 without losing rows", async () => {
     const migrationFiles = [
       "001_initial.sql",
@@ -700,6 +904,78 @@ suite("server authentication (PostgreSQL)", () => {
       );
       expect(migrated.rows[0]!.hidden).toBe(true);
       expect(defaultValue.rows[0]!.column_default).toContain("false");
+    } finally {
+      await client.query("SET search_path TO public");
+      await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      client.release();
+    }
+  });
+
+  it("adds device sessions in migration 010 without invalidating legacy sessions", async () => {
+    const schema = `devices_upgrade_${randomBytes(5).toString("hex")}`;
+    const client = await pool!.connect();
+    try {
+      await client.query(`CREATE SCHEMA ${schema}`);
+      await client.query(`SET search_path TO ${schema}`);
+      for (const name of [
+        "001_initial.sql",
+        "002_messages.sql",
+        "003_message_sequence.sql",
+        "004_history_contacts.sql",
+        "005_read_markers.sql",
+        "006_presence.sql",
+        "007_conversation_clears.sql",
+        "008_message_changes.sql",
+        "009_conversation_clears_hidden.sql",
+      ]) {
+        await client.query(
+          await readFile(
+            join(import.meta.dirname, "..", "migrations", name),
+            "utf8",
+          ),
+        );
+      }
+
+      const userId = randomBytes(32).toString("hex");
+      const legacyTokenHash = randomBytes(32).toString("hex");
+      await client.query(
+        `INSERT INTO users(id,encryption_public_key,key_binding_signature)
+         VALUES($1,$1,$1)`,
+        [userId],
+      );
+      await client.query(
+        "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '1 day')",
+        [legacyTokenHash, userId],
+      );
+      await client.query(
+        await readFile(
+          join(import.meta.dirname, "..", "migrations", "010_devices.sql"),
+          "utf8",
+        ),
+      );
+
+      const legacy = await client.query<{ device_id: string | null }>(
+        "SELECT device_id FROM sessions WHERE token_hash=$1",
+        [legacyTokenHash],
+      );
+      expect(legacy.rows).toEqual([{ device_id: null }]);
+
+      const deviceId = randomBytes(32).toString("hex");
+      const deviceTokenHash = randomBytes(32).toString("hex");
+      await client.query(
+        "INSERT INTO devices(device_id,user_id,label_ciphertext) VALUES($1,$2,'YQ==')",
+        [deviceId, userId],
+      );
+      await client.query(
+        "INSERT INTO sessions(token_hash,user_id,device_id,expires_at) VALUES($1,$2,$3,now()+interval '1 day')",
+        [deviceTokenHash, userId, deviceId],
+      );
+      await client.query("DELETE FROM devices WHERE device_id=$1", [deviceId]);
+      const cascaded = await client.query(
+        "SELECT 1 FROM sessions WHERE token_hash=$1",
+        [deviceTokenHash],
+      );
+      expect(cascaded.rowCount).toBe(0);
     } finally {
       await client.query("SET search_path TO public");
       await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
@@ -4544,5 +4820,540 @@ suite("server authentication (PostgreSQL)", () => {
       headers: { authorization: `Bearer ${alice.token}` },
     });
     expect(upToDate.json().messages).toEqual([]);
+  });
+
+  it("registers a device and exposes it as the current decrypted label", async () => {
+    const accountKeys = deriveKeys(generateMnemonic(12));
+    const { deviceId, deviceLabel, response } =
+      await registerDevice(accountKeys);
+    expect(response.statusCode).toBe(200);
+    expect(response.json().deviceId).toBe(deviceId);
+    const me = await app.inject({
+      method: "GET",
+      url: "/me",
+      headers: { authorization: `Bearer ${response.json().token}` },
+    });
+    expect(me.statusCode).toBe(200);
+    const devices = await app.inject({
+      method: "GET",
+      url: "/devices",
+      headers: { authorization: `Bearer ${response.json().token}` },
+    });
+    expect(devices.statusCode).toBe(200);
+    expect(devices.json().devices).toHaveLength(1);
+    expect(devices.json().devices[0]).toMatchObject({
+      deviceId,
+      labelCiphertext: deviceLabel,
+      current: true,
+    });
+    expect(
+      decryptDeviceLabel({
+        historyKey: accountKeys.historyKey,
+        deviceId,
+        blob: devices.json().devices[0].labelCiphertext,
+      }),
+    ).toEqual({ browser: "Test Browser", os: "Test OS" });
+  });
+
+  it("rejects invalid registration signatures and writes no device rows", async () => {
+    const challenge = await createChallenge();
+    const device = generateDeviceKeys();
+    const response = await app.inject({
+      method: "POST",
+      url: "/auth/device/register",
+      headers: { "x-forwarded-for": challenge.forwardedFor },
+      payload: {
+        challengeId: challenge.challengeId,
+        identityPublicKey,
+        encryptionPublicKey,
+        keyBindingSignature: bytesToHex(
+          signKeyBinding(keys.identity.privateKey, keys.encryption.publicKey),
+        ),
+        devicePublicKey: bytesToHex(device.publicKey),
+        deviceLabel: "dmFsaWQ=",
+        signature: bytesToHex(
+          signDeviceRegistration(
+            keys.identity.privateKey,
+            challenge.challengeId,
+            challenge.challenge,
+            generateDeviceKeys().publicKey,
+          ),
+        ),
+      },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toEqual({ error: "invalid_credentials" });
+  });
+
+  it("rejects reused and malformed device registration challenges", async () => {
+    const first = await registerDevice();
+    expect(first.response.statusCode).toBe(200);
+    const repeated = await app.inject({
+      method: "POST",
+      url: "/auth/device/register",
+      headers: { "x-forwarded-for": first.challenge.forwardedFor },
+      payload: {
+        challengeId: first.challenge.challengeId,
+        identityPublicKey,
+        encryptionPublicKey,
+        keyBindingSignature: bytesToHex(
+          signKeyBinding(keys.identity.privateKey, keys.encryption.publicKey),
+        ),
+        devicePublicKey: bytesToHex(first.device.publicKey),
+        deviceLabel: first.deviceLabel,
+        signature: "00".repeat(64),
+      },
+    });
+    expect(repeated.statusCode).toBe(401);
+    const malformed = await app.inject({
+      method: "POST",
+      url: "/auth/device/login",
+      payload: { challengeId: "X", deviceId: "x", signature: "x" },
+    });
+    expect(malformed.statusCode).toBe(401);
+  });
+
+  it("logs in with a device and updates last_seen_at", async () => {
+    const registered = await registerDevice();
+    const before = await pool!.query<{ last_seen_at: Date }>(
+      "SELECT last_seen_at FROM devices WHERE device_id=$1",
+      [registered.deviceId],
+    );
+    clock += 1_000;
+    const loggedIn = await loginDevice(registered.device);
+    expect(loggedIn.response.statusCode).toBe(200);
+    expect(loggedIn.response.json().deviceId).toBe(registered.deviceId);
+    const after = await pool!.query<{ last_seen_at: Date }>(
+      "SELECT last_seen_at FROM devices WHERE device_id=$1",
+      [registered.deviceId],
+    );
+    expect(after.rows[0]!.last_seen_at.getTime()).toBeGreaterThanOrEqual(
+      before.rows[0]!.last_seen_at.getTime(),
+    );
+  });
+
+  it("rejects unknown devices and device authentication from the identity key", async () => {
+    const unknown = await loginDevice(generateDeviceKeys());
+    expect(unknown.response.statusCode).toBe(401);
+    const registered = await registerDevice();
+    const challenge = await createChallenge();
+    const wrong = await app.inject({
+      method: "POST",
+      url: "/auth/device/login",
+      headers: { "x-forwarded-for": challenge.forwardedFor },
+      payload: {
+        challengeId: challenge.challengeId,
+        deviceId: registered.deviceId,
+        signature: bytesToHex(
+          signAuth(
+            keys.identity.privateKey,
+            challenge.challengeId,
+            challenge.challenge,
+          ),
+        ),
+      },
+    });
+    expect(wrong.statusCode).toBe(401);
+  });
+
+  it("hides revoked status behind valid device signatures", async () => {
+    const registered = await registerDevice();
+    await pool!.query(
+      "UPDATE devices SET revoked_at=now() WHERE device_id=$1",
+      [registered.deviceId],
+    );
+    const validChallenge = await createChallenge();
+    const valid = await app.inject({
+      method: "POST",
+      url: "/auth/device/login",
+      headers: { "x-forwarded-for": validChallenge.forwardedFor },
+      payload: {
+        challengeId: validChallenge.challengeId,
+        deviceId: registered.deviceId,
+        signature: bytesToHex(
+          signDeviceAuth(
+            registered.device.privateKey,
+            validChallenge.challengeId,
+            validChallenge.challenge,
+          ),
+        ),
+      },
+    });
+    expect(valid.statusCode).toBe(403);
+    expect(valid.json()).toEqual({ error: "device_revoked" });
+    const invalidChallenge = await createChallenge();
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/auth/device/login",
+      headers: { "x-forwarded-for": invalidChallenge.forwardedFor },
+      payload: {
+        challengeId: invalidChallenge.challengeId,
+        deviceId: registered.deviceId,
+        signature: "00".repeat(64),
+      },
+    });
+    expect(invalid.statusCode).toBe(401);
+    const repeatedRegistrationChallenge = await createChallenge();
+    const repeatedRegistration = await app.inject({
+      method: "POST",
+      url: "/auth/device/register",
+      headers: {
+        "x-forwarded-for": repeatedRegistrationChallenge.forwardedFor,
+      },
+      payload: {
+        challengeId: repeatedRegistrationChallenge.challengeId,
+        identityPublicKey,
+        encryptionPublicKey,
+        keyBindingSignature: bytesToHex(
+          signKeyBinding(keys.identity.privateKey, keys.encryption.publicKey),
+        ),
+        devicePublicKey: bytesToHex(registered.device.publicKey),
+        deviceLabel: registered.deviceLabel,
+        signature: bytesToHex(
+          signDeviceRegistration(
+            keys.identity.privateKey,
+            repeatedRegistrationChallenge.challengeId,
+            repeatedRegistrationChallenge.challenge,
+            registered.device.publicKey,
+          ),
+        ),
+      },
+    });
+    expect(repeatedRegistration.statusCode).toBe(403);
+  });
+
+  it("allows active registration of the same key and updates only its label", async () => {
+    const first = await registerDevice();
+    const secondChallenge = await createChallenge();
+    const secondLabel = encryptDeviceLabel({
+      historyKey: keys.historyKey,
+      deviceId: first.deviceId,
+      browser: "Updated",
+      os: "Updated OS",
+    });
+    const second = await app.inject({
+      method: "POST",
+      url: "/auth/device/register",
+      headers: { "x-forwarded-for": secondChallenge.forwardedFor },
+      payload: {
+        challengeId: secondChallenge.challengeId,
+        identityPublicKey,
+        encryptionPublicKey,
+        keyBindingSignature: bytesToHex(
+          signKeyBinding(keys.identity.privateKey, keys.encryption.publicKey),
+        ),
+        devicePublicKey: bytesToHex(first.device.publicKey),
+        deviceLabel: secondLabel,
+        signature: bytesToHex(
+          signDeviceRegistration(
+            keys.identity.privateKey,
+            secondChallenge.challengeId,
+            secondChallenge.challenge,
+            first.device.publicKey,
+          ),
+        ),
+      },
+    });
+    expect(second.statusCode).toBe(200);
+    expect(
+      (
+        await pool!.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM devices WHERE device_id=$1",
+          [first.deviceId],
+        )
+      ).rows[0]!.count,
+    ).toBe("1");
+  });
+
+  it("lists only the user's active devices with correct current flags", async () => {
+    const accountA = await createAccount();
+    const deviceA = await registerDevice(accountA.keys);
+    const deviceB = await registerDevice(accountA.keys);
+    expect(
+      (await app.inject({ method: "GET", url: "/devices" })).statusCode,
+    ).toBe(401);
+    const listed = await app.inject({
+      method: "GET",
+      url: "/devices",
+      headers: { authorization: `Bearer ${deviceA.response.json().token}` },
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json().devices).toHaveLength(2);
+    expect(listed.json().devices).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          deviceId: deviceA.deviceId,
+          current: true,
+        }),
+        expect.objectContaining({
+          deviceId: deviceB.deviceId,
+          current: false,
+        }),
+      ]),
+    );
+
+    const accountB = await createAccount();
+    const foreignDevice = await registerDevice(accountB.keys);
+    const listedAfterOtherAccount = await app.inject({
+      method: "GET",
+      url: "/devices",
+      headers: { authorization: `Bearer ${deviceA.response.json().token}` },
+    });
+    expect(listedAfterOtherAccount.json().devices).not.toContainEqual(
+      expect.objectContaining({ deviceId: foreignDevice.deviceId }),
+    );
+    const foreignDelete = await app.inject({
+      method: "DELETE",
+      url: `/devices/${deviceA.deviceId}`,
+      headers: {
+        authorization: `Bearer ${foreignDevice.response.json().token}`,
+      },
+    });
+    expect(foreignDelete.statusCode).toBe(404);
+    expect(
+      (
+        await pool!.query<{ revoked_at: Date | null }>(
+          "SELECT revoked_at FROM devices WHERE device_id=$1",
+          [deviceA.deviceId],
+        )
+      ).rows[0]!.revoked_at,
+    ).toBeNull();
+
+    const ownDelete = await app.inject({
+      method: "DELETE",
+      url: `/devices/${deviceA.deviceId}`,
+      headers: { authorization: `Bearer ${deviceB.response.json().token}` },
+    });
+    expect(ownDelete.statusCode).toBe(204);
+    const afterDelete = await app.inject({
+      method: "GET",
+      url: "/devices",
+      headers: { authorization: `Bearer ${deviceB.response.json().token}` },
+    });
+    expect(afterDelete.json().devices).toHaveLength(1);
+    expect(afterDelete.json().devices[0].deviceId).toBe(deviceB.deviceId);
+  });
+
+  it("deletes a device, protects the current device and repeats as 204", async () => {
+    const registered = await registerDevice();
+    const legacy = await login();
+    expect(legacy.response.statusCode).toBe(200);
+    const current = await app.inject({
+      method: "DELETE",
+      url: `/devices/${registered.deviceId}`,
+      headers: { authorization: `Bearer ${registered.response.json().token}` },
+    });
+    expect(current.statusCode).toBe(409);
+    const deviceLogin = await loginDevice(registered.device);
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/devices/${registered.deviceId}`,
+      headers: { authorization: `Bearer ${legacy.response.json().token}` },
+    });
+    expect(deleted.statusCode).toBe(204);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/me",
+          headers: {
+            authorization: `Bearer ${deviceLogin.response.json().token}`,
+          },
+        })
+      ).statusCode,
+    ).toBe(401);
+    const repeated = await app.inject({
+      method: "DELETE",
+      url: `/devices/${registered.deviceId}`,
+      headers: { authorization: `Bearer ${legacy.response.json().token}` },
+    });
+    expect(repeated.statusCode).toBe(204);
+  });
+
+  it("returns 400 for malformed device ids and 404 for unknown or foreign devices", async () => {
+    const account = await createAccount();
+    const bad = await app.inject({
+      method: "DELETE",
+      url: "/devices/not-a-device-id",
+      headers: { authorization: `Bearer ${account.token}` },
+    });
+    expect(bad.statusCode).toBe(400);
+    const unknown = await app.inject({
+      method: "DELETE",
+      url: `/devices/${"a".repeat(64)}`,
+      headers: { authorization: `Bearer ${account.token}` },
+    });
+    expect(unknown.statusCode).toBe(404);
+    const uppercase = await app.inject({
+      method: "DELETE",
+      url: `/devices/${"A".repeat(64)}`,
+      headers: { authorization: `Bearer ${account.token}` },
+    });
+    expect(uppercase.statusCode).toBe(400);
+  });
+
+  it("revokes other devices and legacy sessions while preserving the current session", async () => {
+    const account1 = await createAccount();
+    const deviceA = await registerDevice(account1.keys);
+    const deviceB = await registerDevice(account1.keys);
+    const deviceC = await registerDevice(account1.keys);
+    const account2 = await createAccount();
+    const deviceD = await registerDevice(account2.keys);
+    const revoke = await app.inject({
+      method: "POST",
+      url: "/devices/revoke-others",
+      headers: { authorization: `Bearer ${deviceC.response.json().token}` },
+      payload: {},
+    });
+    expect(revoke.statusCode).toBe(200);
+    expect(revoke.json()).toEqual({ revoked: 2, endedLegacySessions: 1 });
+
+    for (const token of [
+      deviceA.response.json().token,
+      deviceB.response.json().token,
+      account1.token,
+    ]) {
+      expect(
+        (
+          await app.inject({
+            method: "GET",
+            url: "/me",
+            headers: { authorization: `Bearer ${token}` },
+          })
+        ).statusCode,
+      ).toBe(401);
+    }
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/me",
+          headers: { authorization: `Bearer ${deviceC.response.json().token}` },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect((await loginDevice(deviceA.device)).response.statusCode).toBe(403);
+
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/me",
+          headers: { authorization: `Bearer ${deviceD.response.json().token}` },
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/me",
+          headers: { authorization: `Bearer ${account2.token}` },
+        })
+      ).statusCode,
+    ).toBe(200);
+    const account2Devices = await app.inject({
+      method: "GET",
+      url: "/devices",
+      headers: { authorization: `Bearer ${deviceD.response.json().token}` },
+    });
+    expect(account2Devices.json().devices).toEqual([
+      expect.objectContaining({ deviceId: deviceD.deviceId }),
+    ]);
+  });
+
+  it("rejects revoke-others bodies that are not empty", async () => {
+    const account = await createAccount();
+    const response = await app.inject({
+      method: "POST",
+      url: "/devices/revoke-others",
+      headers: { authorization: `Bearer ${account.token}` },
+      payload: { unexpected: true },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("limits a user to twenty active devices and revokes the oldest", async () => {
+    const account = await createAccount();
+    const registeredDevices: Awaited<ReturnType<typeof registerDevice>>[] = [];
+    for (let index = 0; index < 21; index++) {
+      const registered = await registerDevice(account.keys);
+      registeredDevices.push(registered);
+      await pool!.query(
+        "UPDATE devices SET last_seen_at=$2 WHERE device_id=$1",
+        [registered.deviceId, new Date(Date.UTC(2020, 0, 1) + index * 1000)],
+      );
+    }
+    const statuses = await pool!.query<{
+      device_id: string;
+      revoked_at: Date | null;
+    }>("SELECT device_id, revoked_at FROM devices WHERE user_id=$1", [
+      account.userId,
+    ]);
+    expect(statuses.rows).toHaveLength(21);
+    expect(statuses.rows.filter((row) => row.revoked_at)).toEqual([
+      expect.objectContaining({
+        device_id: registeredDevices[0]!.deviceId,
+      }),
+    ]);
+    expect(statuses.rows.filter((row) => row.revoked_at === null)).toHaveLength(
+      20,
+    );
+    expect(
+      statuses.rows.find(
+        (row) => row.device_id === registeredDevices[20]!.deviceId,
+      )!.revoked_at,
+    ).toBeNull();
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/me",
+          headers: {
+            authorization: `Bearer ${registeredDevices[0]!.response.json().token}`,
+          },
+        })
+      ).statusCode,
+    ).toBe(401);
+    expect(
+      (await loginDevice(registeredDevices[0]!.device)).response.statusCode,
+    ).toBe(403);
+  });
+
+  it("prunes the oldest revoked device after registration when over 100", async () => {
+    const account = await createAccount();
+    let oldestDeviceId = "";
+    const revokedAtBase = Date.UTC(2020, 0, 1);
+    for (let index = 0; index < 101; index++) {
+      const deviceId = (index + 1).toString(16).padStart(64, "0");
+      if (index === 0) oldestDeviceId = deviceId;
+      await pool!.query(
+        `INSERT INTO devices(device_id,user_id,label_ciphertext,revoked_at)
+         VALUES($1,$2,'dmFsaWQ=',$3)`,
+        [deviceId, account.userId, new Date(revokedAtBase + index * 1000)],
+      );
+    }
+    const registered = await registerDevice(account.keys);
+    expect(registered.response.statusCode).toBe(200);
+    const count = await pool!.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM devices WHERE user_id=$1 AND revoked_at IS NOT NULL",
+      [account.userId],
+    );
+    expect(Number(count.rows[0]!.count)).toBe(100);
+    const oldest = await pool!.query(
+      "SELECT 1 FROM devices WHERE user_id=$1 AND device_id=$2",
+      [account.userId, oldestDeviceId],
+    );
+    expect(oldest.rowCount).toBe(0);
+  });
+
+  it("keeps legacy login sessions compatible and marks them without a device", async () => {
+    const legacy = await createAccount();
+    const actual = await pool!.query<{ device_id: string | null }>(
+      "SELECT device_id FROM sessions WHERE user_id=$1 AND device_id IS NULL",
+      [legacy.userId],
+    );
+    expect(actual.rows.length).toBeGreaterThan(0);
+    expect(actual.rows[0]!.device_id).toBeNull();
   });
 });
