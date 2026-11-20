@@ -50,88 +50,111 @@ async function contextPage(browser: Browser) {
   return { context, page };
 }
 
-test("shows current and signed-in other devices", async ({ browser }) => {
-  const first = await contextPage(browser);
-  const phrase = await createAccount(first.page);
-  const second = await contextPage(browser);
-  await signIn(second.page, phrase);
+let sharedPhrase = "";
 
-  await openDevices(first.page);
-  await expect(first.page.getByTestId("device-row")).toHaveCount(2);
-  await expect(first.page.getByTestId("device-current")).toBeVisible();
-  await expect(
-    first.page.getByTestId("device-row").filter({ hasText: /^Chrome/ }),
-  ).toBeVisible();
-});
+test.describe.serial("devices", () => {
+  test.beforeAll(async ({ browser }) => {
+    const setup = await contextPage(browser);
+    sharedPhrase = await createAccount(setup.page);
+    await setup.context.close();
+  });
 
-test("revokes one device with confirmation", async ({ browser }) => {
-  const first = await contextPage(browser);
-  const phrase = await createAccount(first.page);
-  const second = await contextPage(browser);
-  await signIn(second.page, phrase);
-  await openDevices(first.page);
+  test("shows current and signed-in other devices", async ({ browser }) => {
+    const first = await contextPage(browser);
+    await signIn(first.page, sharedPhrase);
+    const second = await contextPage(browser);
+    await signIn(second.page, sharedPhrase);
 
-  await first.page.getByTestId("device-revoke").first().click();
-  await expect(first.page.getByText("Sign out on this device?")).toBeVisible();
-  await first.page.getByTestId("device-revoke-cancel").click();
-  await first.page.getByTestId("device-revoke").first().click();
-  await first.page.getByTestId("device-revoke-confirm").click();
-  await expect(first.page.getByTestId("devices-notice")).toBeVisible();
-  await expect(first.page.getByTestId("device-row")).toHaveCount(1);
-  await expect(second.page.getByTestId("device-revoked-notice")).toBeVisible();
-});
+    await openDevices(first.page);
+    await expect(first.page.getByTestId("device-row")).toHaveCount(2);
+    await expect(first.page.getByTestId("device-current")).toBeVisible();
+    await expect(
+      first.page
+        .getByTestId("device-row")
+        .filter({ hasText: /Chrome/ })
+        .first(),
+    ).toBeVisible();
+  });
 
-test("revokes all other devices with three contexts", async ({ browser }) => {
-  const first = await contextPage(browser);
-  const phrase = await createAccount(first.page);
-  const second = await contextPage(browser);
-  await signIn(second.page, phrase);
-  const third = await contextPage(browser);
-  await signIn(third.page, phrase);
+  test("revokes one device with confirmation", async ({ browser }) => {
+    const first = await contextPage(browser);
+    await signIn(first.page, sharedPhrase);
+    const second = await contextPage(browser);
+    await signIn(second.page, sharedPhrase);
+    await openDevices(first.page);
 
-  await openDevices(first.page);
-  await first.page.getByTestId("devices-revoke-others").click();
-  await expect(
-    first.page.getByText("Sign out on all other devices?"),
-  ).toBeVisible();
-  await first.page.getByTestId("devices-revoke-others-confirm").click();
-  await expect(first.page.getByTestId("device-row")).toHaveCount(1);
-  await expect(first.page.getByTestId("devices-revoke-others")).toHaveCount(0);
-  await expect(second.page.getByTestId("device-revoked-notice")).toBeVisible();
-  await expect(third.page.getByTestId("device-revoked-notice")).toBeVisible();
-});
+    await first.page.getByTestId("device-revoke").first().click();
+    await expect(
+      first.page.getByText("Sign out on this device?"),
+    ).toBeVisible();
+    await first.page.getByTestId("device-revoke-cancel").click();
+    await first.page.getByTestId("device-revoke").first().click();
+    await first.page.getByTestId("device-revoke-confirm").click();
+    await expect(first.page.getByTestId("devices-notice")).toBeVisible();
+    await expect(first.page.getByTestId("device-row")).toHaveCount(1);
+    await expect(
+      second.page.getByTestId("device-revoked-notice"),
+    ).toBeVisible();
+  });
 
-test("shows load error and retries after route is removed", async ({
-  page,
-}) => {
-  await setEnglish(page);
-  await createAccount(page);
-  await page.route("**/devices", (route) =>
-    route.fulfill({
-      status: 500,
-      contentType: "application/json",
-      body: JSON.stringify({ error: "server_error" }),
-    }),
-  );
-  await openDevices(page);
-  await expect(page.getByTestId("devices-error")).toBeVisible();
-  await page.unroute("**/devices");
-  await page.getByTestId("devices-retry").click();
-  await expect(page.getByTestId("device-row")).toBeVisible();
-});
+  test("revokes all other devices with three contexts", async ({ browser }) => {
+    const first = await contextPage(browser);
+    await signIn(first.page, sharedPhrase);
+    const second = await contextPage(browser);
+    await signIn(second.page, sharedPhrase);
+    const third = await contextPage(browser);
+    await signIn(third.page, sharedPhrase);
 
-test("devices section fits 360px viewport", async ({ page }) => {
-  await setEnglish(page);
-  await createAccount(page);
-  await page.setViewportSize({ width: 360, height: 740 });
-  await openDevices(page);
-  const panel = page.locator(".profile-panel");
-  const sizes = await panel.evaluate((element) => ({
-    clientWidth: element.clientWidth,
-    scrollWidth: element.scrollWidth,
-  }));
-  expect(sizes.scrollWidth).toBeLessThanOrEqual(sizes.clientWidth);
-  for (const button of await page.getByTestId("device-revoke").all()) {
-    await expect(button).toBeVisible();
-  }
+    await openDevices(first.page);
+    await first.page.getByTestId("devices-revoke-others").click();
+    await expect(
+      first.page.getByText("Sign out on all other devices?"),
+    ).toBeVisible();
+    await first.page.getByTestId("devices-revoke-others-confirm").click();
+    await expect(first.page.getByTestId("device-row")).toHaveCount(1);
+    await expect(first.page.getByTestId("devices-revoke-others")).toHaveCount(
+      0,
+    );
+    await expect(
+      second.page.getByTestId("device-revoked-notice"),
+    ).toBeVisible();
+    await expect(third.page.getByTestId("device-revoked-notice")).toBeVisible();
+  });
+
+  test("shows load error and retries after route is removed", async ({
+    browser,
+  }) => {
+    const setup = await contextPage(browser);
+    await signIn(setup.page, sharedPhrase);
+    await setup.page.route("**/devices", (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "server_error" }),
+      }),
+    );
+    await openDevices(setup.page);
+    await expect(setup.page.getByTestId("devices-error")).toBeVisible();
+    await setup.page.unroute("**/devices");
+    await setup.page.getByTestId("devices-retry").click();
+    await expect(setup.page.getByTestId("device-row")).toBeVisible();
+  });
+
+  test("devices section fits 360px viewport", async ({ browser }) => {
+    const first = await contextPage(browser);
+    await signIn(first.page, sharedPhrase);
+    const second = await contextPage(browser);
+    await signIn(second.page, sharedPhrase);
+    await first.page.setViewportSize({ width: 360, height: 740 });
+    await openDevices(first.page);
+    const panel = first.page.locator(".profile-panel");
+    const sizes = await panel.evaluate((element) => ({
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+    }));
+    expect(sizes.scrollWidth).toBeLessThanOrEqual(sizes.clientWidth);
+    for (const button of await first.page.getByTestId("device-revoke").all()) {
+      await expect(button).toBeVisible();
+    }
+  });
 });
