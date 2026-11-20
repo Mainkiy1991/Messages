@@ -43,6 +43,10 @@ async function readSessionStore(
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
     });
+    if (!db.objectStoreNames.contains("keys")) {
+      db.close();
+      return { keys: [], values: {} };
+    }
     const keys = await new Promise<string[]>((resolve, reject) => {
       const get = db.transaction("keys").objectStore("keys").getAllKeys();
       get.onsuccess = () => resolve(get.result as string[]);

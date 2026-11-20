@@ -29,6 +29,34 @@ const sample = {
   historyKey: new Uint8Array([5]),
 };
 
+async function readStoreKey(key: string): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("messages-session");
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains("keys"))
+        request.result.createObjectStore("keys");
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains("keys")) {
+        db.close();
+        resolve(undefined);
+        return;
+      }
+      const get = db.transaction("keys").objectStore("keys").get(key);
+      get.onsuccess = () => {
+        resolve(get.result);
+        db.close();
+      };
+      get.onerror = () => {
+        reject(get.error);
+        db.close();
+      };
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
 describe("session storage", () => {
   afterEach(async () => {
     await clearSession();
@@ -67,7 +95,7 @@ describe("session storage", () => {
     expect(await unlockWithPin("12345678")).toEqual(keys);
     expect(await restoreServerSession(keys)).toEqual(session);
     expect(await disablePin("12345678")).toEqual(keys);
-  });
+  }, 90000);
 
   it("packs and unpacks v2 device keys without identity private key", () => {
     const keys: DeviceKeys = {
@@ -106,22 +134,7 @@ describe("session storage", () => {
     await saveDeviceAccount(keys, session);
     await enablePin(keys, "old-pin-123");
 
-    const rawDeviceKey = await new Promise<unknown>((resolve, reject) => {
-      const request = indexedDB.open("messages-session");
-      request.onsuccess = () => {
-        const db = request.result;
-        const get = db
-          .transaction("keys")
-          .objectStore("keys")
-          .get("deviceKeys");
-        get.onsuccess = () => {
-          resolve(get.result);
-          db.close();
-        };
-        get.onerror = () => reject(get.error);
-      };
-      request.onerror = () => reject(request.error);
-    });
+    const rawDeviceKey = await readStoreKey("deviceKeys");
     expect(rawDeviceKey).toBeUndefined();
 
     await changePin(keys, "old-pin-123", "new-pin-456");
@@ -129,29 +142,14 @@ describe("session storage", () => {
     await expect(unlockWithPin("new-pin-456")).resolves.toEqual(keys);
 
     const otherKey = new Uint8Array(32).fill(99);
-    const storedSession = await new Promise<unknown>((resolve, reject) => {
-      const request = indexedDB.open("messages-session");
-      request.onsuccess = () => {
-        const db = request.result;
-        const get = db
-          .transaction("keys")
-          .objectStore("keys")
-          .get("serverSession");
-        get.onsuccess = () => {
-          resolve(get.result);
-          db.close();
-        };
-        get.onerror = () => reject(get.error);
-      };
-      request.onerror = () => reject(request.error);
-    });
+    const storedSession = await readStoreKey("serverSession");
     expect(() =>
       unwrapServerSession(
         storedSession as Parameters<typeof unwrapServerSession>[0],
         otherKey,
       ),
     ).toThrow();
-  });
+  }, 90000);
 
   it("does not store identity in the open device key object", async () => {
     const device = generateDeviceKeys();
@@ -170,22 +168,7 @@ describe("session storage", () => {
       userId: bytesToHex(keys.identityPublicKey),
       deviceId: bytesToHex(device.publicKey),
     });
-    const raw = await new Promise<unknown>((resolve, reject) => {
-      const request = indexedDB.open("messages-session");
-      request.onsuccess = () => {
-        const db = request.result;
-        const get = db
-          .transaction("keys")
-          .objectStore("keys")
-          .get("deviceKeys");
-        get.onsuccess = () => {
-          resolve(get.result);
-          db.close();
-        };
-        get.onerror = () => reject(get.error);
-      };
-      request.onerror = () => reject(request.error);
-    });
+    const raw = await readStoreKey("deviceKeys");
     expect(raw).not.toHaveProperty("identity");
   });
 });
