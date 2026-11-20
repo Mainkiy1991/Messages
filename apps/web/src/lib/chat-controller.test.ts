@@ -11,7 +11,12 @@ import {
   newReplayMessageId,
   signKeyBinding,
 } from "@messages/crypto";
-import { ApiError, type ContactBookResponse, type UserKeys } from "./api.js";
+import {
+  ApiError,
+  DeviceRevokedError,
+  type ContactBookResponse,
+  type UserKeys,
+} from "./api.js";
 import {
   ChatController,
   chatPreview,
@@ -146,6 +151,7 @@ function makeController(
     outbox?: ChatControllerDependencies["outbox"];
     isVisible?: () => boolean;
     now?: () => number;
+    onDeviceRevoked?: () => void | Promise<void>;
   } = {},
 ) {
   const sockets: TestSocket[] = [];
@@ -191,6 +197,7 @@ function makeController(
       outbox: options.outbox,
       isVisible: options.isVisible,
       now: options.now,
+      onDeviceRevoked: options.onDeviceRevoked,
     },
   );
   return { controller, sockets, tokens, getLoginCount: () => loginCount };
@@ -2779,6 +2786,30 @@ describe("ChatController", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(f.controller.getSnapshot().connectionState).toBe("connected");
     f.controller.stop();
+  });
+  it("handles device revocation once during account loading", async () => {
+    vi.useFakeTimers();
+    const onDeviceRevoked = vi.fn();
+    const setTimer = vi.fn((callback: TimerHandler, ms?: number) =>
+      setTimeout(callback, ms),
+    );
+    const f = makeController({
+      initialSession: null,
+      login: async () => {
+        throw new DeviceRevokedError();
+      },
+      getConversations: async () => ({ conversations: [], cleared: [] }),
+      getContacts: async () => ({ version: "0", blob: null }),
+      setTimer: setTimer as unknown as typeof setTimeout,
+      onDeviceRevoked,
+    });
+    f.controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+    expect(onDeviceRevoked).toHaveBeenCalledTimes(1);
+    expect(f.getLoginCount()).toBe(1);
+    f.controller.stop();
+    vi.useRealTimers();
   });
 });
 

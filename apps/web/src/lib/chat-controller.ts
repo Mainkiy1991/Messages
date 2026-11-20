@@ -10,7 +10,6 @@ import {
   newClientMsgId,
   newReplayMessageId,
   type DecryptedMessage,
-  type DerivedKeys,
 } from "@messages/crypto";
 import { MAX_CONVERSATIONS } from "@messages/shared";
 import {
@@ -30,11 +29,12 @@ import {
   type HistoryMessage,
 } from "./api.js";
 import { indexedDbOutbox, type OutboxStore } from "./outbox.js";
-import type { ServerSession } from "../session.js";
+import { type AccountKeys, type ServerSession } from "../session.js";
 import {
   ApiError,
+  DeviceRevokedError,
   getUserKeys,
-  loginToServer,
+  loginWithKeys,
   logoutFromServer,
   verifyUserKeys,
   type FetchLike,
@@ -118,7 +118,8 @@ export type SendDeleteResult =
 
 export type ChatControllerDependencies = {
   fetcher?: FetchLike;
-  login?: (keys: DerivedKeys, fetcher?: FetchLike) => Promise<ServerSession>;
+  login?: (keys: AccountKeys, fetcher?: FetchLike) => Promise<ServerSession>;
+  onDeviceRevoked?: () => void | Promise<void>;
   fetchPeerKeys?: (
     peerId: string,
     token: string,
@@ -255,7 +256,7 @@ export class ChatController {
   };
 
   constructor(
-    private readonly keys: DerivedKeys,
+    private readonly keys: AccountKeys,
     private readonly userId: string,
     session: ServerSession | null = null,
     private readonly deps: ChatControllerDependencies = {},
@@ -302,11 +303,12 @@ export class ChatController {
                 ? undefined
                 : "send_failed",
           })),
+        onRevoked: deps.onDeviceRevoked,
       },
       {
         fetcher: deps.fetcher,
         login: async (...args) => {
-          const session = await (deps.login ?? loginToServer)(...args);
+          const session = await (deps.login ?? loginWithKeys)(...args);
           this.markServerResponded();
           return session;
         },
@@ -508,6 +510,7 @@ export class ChatController {
         void this.loadHistory(activePeer, { silent: true });
     } catch (error) {
       this.recordAccountFailure("conversations");
+      if (error instanceof DeviceRevokedError) return;
       if (this.isRetryableAccountError(error))
         this.scheduleAccountRetry("conversations");
       else this.update({ error: "server_unavailable" });
@@ -562,6 +565,7 @@ export class ChatController {
     } catch (error) {
       if (this.stopped) return;
       this.recordAccountFailure("contacts");
+      if (error instanceof DeviceRevokedError) return;
       if (this.isRetryableAccountError(error))
         this.scheduleAccountRetry("contacts");
       else this.contactsLoaded = true;
@@ -634,6 +638,7 @@ export class ChatController {
   }
 
   private isRetryableAccountError(error: unknown): boolean {
+    if (error instanceof DeviceRevokedError) return false;
     if (error instanceof ApiError)
       return error.status === 0 || error.status >= 500;
     return error instanceof TypeError;

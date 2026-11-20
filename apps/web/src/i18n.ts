@@ -33,6 +33,13 @@ export const strings = {
     phrase: "Сид-фраза",
     signIn: "Войти",
     invalid: "Неверная сид-фраза. Проверьте слова и попробуйте снова.",
+    loggingIn: "Входим…",
+    registrationWaking: "Сервер просыпается, это может занять до минуты…",
+    registrationNetworkError:
+      "Не удалось связаться с сервером. Проверьте интернет и попробуйте ещё раз. Данные не сохранены.",
+    registrationError: "Не удалось войти. Попробуйте ещё раз.",
+    deviceRevokedNotice:
+      "Этот вход завершён на другом устройстве. Войдите снова по сид-фразе.",
     chats: "Чаты",
     profile: "Профиль",
     createChat: "Создать чат",
@@ -193,6 +200,14 @@ export const strings = {
     phrase: "Seed phrase",
     signIn: "Sign in",
     invalid: "Invalid seed phrase. Check the words and try again.",
+    loggingIn: "Signing in…",
+    registrationWaking:
+      "The server is waking up; this may take up to a minute…",
+    registrationNetworkError:
+      "Could not reach the server. Check your internet connection and try again. No data was saved.",
+    registrationError: "Could not sign in. Please try again.",
+    deviceRevokedNotice:
+      "This sign-in ended on another device. Sign in again with your seed phrase.",
     chats: "Chats",
     profile: "Profile",
     createChat: "Create chat",
@@ -353,6 +368,13 @@ export const strings = {
     phrase: "Сід-фраза",
     signIn: "Увійти",
     invalid: "Невірна сід-фраза. Перевірте слова й спробуйте ще раз.",
+    loggingIn: "Входимо…",
+    registrationWaking: "Сервер запускається, це може зайняти до хвилини…",
+    registrationNetworkError:
+      "Не вдалося зв’язатися з сервером. Перевірте інтернет і спробуйте ще раз. Дані не збережено.",
+    registrationError: "Не вдалося увійти. Спробуйте ще раз.",
+    deviceRevokedNotice:
+      "Цей вхід завершено на іншому пристрої. Увійдіть знову за сід-фразою.",
     chats: "Чати",
     profile: "Профіль",
     createChat: "Створити чат",

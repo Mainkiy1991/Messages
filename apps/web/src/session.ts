@@ -5,7 +5,9 @@ import {
   unwrapSecrets,
   wrapServerSession,
   wrapSecrets,
+  userIdFromPublicKey,
   type DerivedKeys,
+  type KeyPair,
   type WrappedServerSession,
   type WrappedSecrets,
 } from "@messages/crypto";
@@ -13,6 +15,26 @@ import { indexedDbOutbox } from "./lib/outbox.js";
 
 const DB_NAME = "messages-session";
 const STORE_NAME = "keys";
+export type DeviceKeys = {
+  identityPublicKey: Uint8Array;
+  encryption: KeyPair;
+  historyKey: Uint8Array;
+  device: KeyPair;
+};
+export type AccountKeys = DerivedKeys | DeviceKeys;
+
+export function isDeviceKeys(keys: AccountKeys): keys is DeviceKeys {
+  return "device" in keys;
+}
+export function accountUserId(keys: AccountKeys): string {
+  if (isDeviceKeys(keys)) {
+    return userIdFromPublicKey(keys.identityPublicKey);
+  }
+  return userIdFromPublicKey(keys.identity.publicKey);
+}
+export function serverSessionWrapKey(keys: AccountKeys): Uint8Array {
+  return isDeviceKeys(keys) ? keys.device.privateKey : keys.identity.privateKey;
+}
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, 1);
@@ -56,11 +78,22 @@ async function putValues(
     db.close();
   }
 }
-function packKeys(keys: DerivedKeys): Uint8Array {
+export function packKeys(keys: AccountKeys): Uint8Array {
   const pair = (p: { privateKey: Uint8Array; publicKey: Uint8Array }) => ({
     privateKey: bytesToBase64(p.privateKey),
     publicKey: bytesToBase64(p.publicKey),
   });
+  if (isDeviceKeys(keys)) {
+    return new TextEncoder().encode(
+      JSON.stringify({
+        v: 2,
+        identityPublicKey: bytesToBase64(keys.identityPublicKey),
+        encryption: pair(keys.encryption),
+        historyKey: bytesToBase64(keys.historyKey),
+        device: pair(keys.device),
+      }),
+    );
+  }
   return new TextEncoder().encode(
     JSON.stringify({
       identity: pair(keys.identity),
@@ -69,7 +102,7 @@ function packKeys(keys: DerivedKeys): Uint8Array {
     }),
   );
 }
-function unpackKeys(bytes: Uint8Array): DerivedKeys {
+export function unpackKeys(bytes: Uint8Array): AccountKeys {
   const raw = JSON.parse(
     new TextDecoder("utf-8", { fatal: true }).decode(bytes),
   );
@@ -77,6 +110,22 @@ function unpackKeys(bytes: Uint8Array): DerivedKeys {
     privateKey: base64ToBytes(p.privateKey),
     publicKey: base64ToBytes(p.publicKey),
   });
+  if (raw.v === 2) {
+    const keys: DeviceKeys = {
+      identityPublicKey: base64ToBytes(raw.identityPublicKey),
+      encryption: pair(raw.encryption),
+      historyKey: base64ToBytes(raw.historyKey),
+      device: pair(raw.device),
+    };
+    if (
+      [keys.identityPublicKey, keys.historyKey].some((v) => v.length !== 32) ||
+      [keys.encryption, keys.device].some(
+        (p) => p.privateKey.length !== 32 || p.publicKey.length !== 32,
+      )
+    )
+      throw new Error("Invalid secret data");
+    return keys;
+  }
   const keys = {
     identity: pair(raw.identity),
     encryption: pair(raw.encryption),
@@ -99,6 +148,7 @@ export type ServerSession = {
   token: string;
   expiresAt: string;
   userId: string;
+  deviceId?: string;
 };
 type StoredServerSession = ServerSession | WrappedServerSession;
 export type PinState = {
@@ -132,10 +182,20 @@ function parseServerSession(value: unknown): ServerSession {
     typeof value.userId !== "string"
   )
     throw new Error("SERVER_SESSION_INVALID");
+  const record = value as Record<string, unknown>;
+  if (
+    record.deviceId !== undefined &&
+    (typeof record.deviceId !== "string" ||
+      !/^[0-9a-f]{64}$/u.test(record.deviceId))
+  )
+    throw new Error("SERVER_SESSION_INVALID");
   return {
     token: value.token,
     expiresAt: value.expiresAt,
     userId: value.userId,
+    ...(typeof record.deviceId === "string"
+      ? { deviceId: record.deviceId }
+      : {}),
   };
 }
 
@@ -168,9 +228,21 @@ export function pinFailureState(
 export async function saveSession(keys: DerivedKeys): Promise<void> {
   await putValues([["derivedKeys", keys]]);
 }
+export async function saveDeviceAccount(
+  keys: DeviceKeys,
+  session: ServerSession,
+): Promise<void> {
+  await putValues(
+    [
+      ["deviceKeys", keys],
+      ["serverSession", session],
+    ],
+    ["derivedKeys"],
+  );
+}
 export async function saveServerSession(
   session: ServerSession,
-  keys: DerivedKeys,
+  keys: AccountKeys,
 ): Promise<void> {
   const pinState = await getValue<PinState>("pinState");
   if (!pinState) {
@@ -179,14 +251,17 @@ export async function saveServerSession(
   }
   const sessionBytes = packServerSession(session);
   try {
-    const encrypted = wrapServerSession(sessionBytes, keys.identity.privateKey);
+    const encrypted = wrapServerSession(
+      sessionBytes,
+      serverSessionWrapKey(keys),
+    );
     await putValues([["serverSession", encrypted]]);
   } finally {
     sessionBytes.fill(0);
   }
 }
 export async function restoreServerSession(
-  keys: DerivedKeys,
+  keys: AccountKeys,
 ): Promise<ServerSession | null> {
   const stored = await getValue<StoredServerSession>("serverSession");
   if (!stored) return null;
@@ -196,7 +271,7 @@ export async function restoreServerSession(
       await putValues([], ["serverSession"]);
       return null;
     }
-    const bytes = unwrapServerSession(stored, keys.identity.privateKey);
+    const bytes = unwrapServerSession(stored, serverSessionWrapKey(keys));
     try {
       return unpackServerSession(bytes);
     } finally {
@@ -216,11 +291,15 @@ export async function getPinState(): Promise<PinState | null> {
   }
   return pinState;
 }
-export async function restoreSession(): Promise<DerivedKeys | null> {
+export async function restoreSession(): Promise<AccountKeys | null> {
   if (await getPinState()) return null;
-  return (await getValue<DerivedKeys>("derivedKeys")) ?? null;
+  return (
+    (await getValue<DeviceKeys>("deviceKeys")) ??
+    (await getValue<DerivedKeys>("derivedKeys")) ??
+    null
+  );
 }
-export async function enablePin(keys: DerivedKeys, pin: string): Promise<void> {
+export async function enablePin(keys: AccountKeys, pin: string): Promise<void> {
   const secretBytes = packKeys(keys);
   let blob: WrappedSecrets;
   try {
@@ -240,20 +319,23 @@ export async function enablePin(keys: DerivedKeys, pin: string): Promise<void> {
     try {
       values.push([
         "serverSession",
-        wrapServerSession(sessionBytes, keys.identity.privateKey),
+        wrapServerSession(sessionBytes, serverSessionWrapKey(keys)),
       ]);
     } finally {
       sessionBytes.fill(0);
     }
   }
   await indexedDbOutbox.clear();
-  await putValues(values, ["derivedKeys"]);
+  await putValues(
+    values,
+    isDeviceKeys(keys) ? ["deviceKeys"] : ["derivedKeys"],
+  );
 }
-export async function unlockWithPin(pin: string): Promise<DerivedKeys> {
+export async function unlockWithPin(pin: string): Promise<AccountKeys> {
   const state = await getPinState();
   if (!state) throw new Error("PIN is not enabled");
   if (Date.now() < state.nextAttemptAt) throw new Error("PIN_ATTEMPT_DELAY");
-  let keys: DerivedKeys;
+  let keys: AccountKeys;
   try {
     const secretBytes = await unwrapSecrets(state.blob, pin);
     try {
@@ -283,7 +365,7 @@ export async function unlockWithPin(pin: string): Promise<DerivedKeys> {
   return keys;
 }
 export async function changePin(
-  keys: DerivedKeys,
+  keys: AccountKeys,
   oldPin: string,
   newPin: string,
 ): Promise<void> {
@@ -304,19 +386,27 @@ export async function changePin(
     ],
   ]);
 }
-export async function disablePin(pin: string): Promise<DerivedKeys> {
+export async function disablePin(pin: string): Promise<AccountKeys> {
   const keys = await unlockWithPin(pin);
   const storedSession = await getValue<unknown>("serverSession");
-  const values: Array<[string, unknown]> = [["derivedKeys", keys]];
+  const values: Array<[string, unknown]> = [
+    isDeviceKeys(keys) ? ["deviceKeys", keys] : ["derivedKeys", keys],
+  ];
   if (isWrappedServerSession(storedSession)) {
-    const bytes = unwrapServerSession(storedSession, keys.identity.privateKey);
+    const bytes = unwrapServerSession(
+      storedSession,
+      serverSessionWrapKey(keys),
+    );
     try {
       values.push(["serverSession", unpackServerSession(bytes)]);
     } finally {
       bytes.fill(0);
     }
   }
-  await putValues(values, ["pinState"]);
+  await putValues(values, [
+    "pinState",
+    isDeviceKeys(keys) ? "derivedKeys" : "deviceKeys",
+  ]);
   return keys;
 }
 export async function clearSession(): Promise<void> {

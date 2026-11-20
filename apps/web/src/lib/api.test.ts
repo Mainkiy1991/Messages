@@ -6,6 +6,11 @@ import {
   signKeyBinding,
   verifyAuth,
   verifyKeyBinding,
+  verifyDeviceRegistration,
+  decryptDeviceLabel,
+  generateDeviceKeys,
+  userIdFromPublicKey,
+  deviceIdFromPublicKey,
 } from "@messages/crypto";
 import { clearSession, restoreServerSession } from "../session.js";
 import {
@@ -17,6 +22,10 @@ import {
   loginToServer,
   updateMessage,
   verifyUserKeys,
+  registerDevice,
+  deviceLogin,
+  loginWithKeys,
+  DeviceRevokedError,
 } from "./api.js";
 import { resolveApiUrl } from "./api.js";
 
@@ -80,6 +89,250 @@ describe("server API login", () => {
       "http://localhost:3000/auth/login",
     ]);
     expect(await restoreServerSession(keys)).toEqual(session);
+  });
+
+  it("registers a device with the exact request fields and verifies its signature", async () => {
+    const fetcher: typeof fetch = async (input, init) => {
+      if (String(input).endsWith("/auth/challenge"))
+        return Response.json({
+          challengeId: "01".repeat(16),
+          challenge: "ab".repeat(32),
+        });
+      const body = JSON.parse(String(init?.body)) as Record<string, string>;
+      expect(Object.keys(body).sort()).toEqual(
+        [
+          "challengeId",
+          "identityPublicKey",
+          "encryptionPublicKey",
+          "keyBindingSignature",
+          "devicePublicKey",
+          "deviceLabel",
+          "signature",
+        ].sort(),
+      );
+      const devicePublicKey = Uint8Array.from(
+        body.devicePublicKey.match(/../gu)!.map((v) => Number.parseInt(v, 16)),
+      );
+      const signature = Uint8Array.from(
+        body.signature.match(/../gu)!.map((v) => Number.parseInt(v, 16)),
+      );
+      expect(
+        verifyDeviceRegistration(
+          keys.identity.publicKey,
+          body.challengeId,
+          "ab".repeat(32),
+          devicePublicKey,
+          signature,
+        ),
+      ).toBe(true);
+      const deviceId = deviceIdFromPublicKey(devicePublicKey);
+      expect(
+        decryptDeviceLabel({
+          historyKey: keys.historyKey,
+          deviceId,
+          blob: body.deviceLabel,
+        }),
+      ).toEqual({ browser: "unknown", os: "unknown" });
+      return Response.json({
+        token: "device-token",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+        deviceId,
+      });
+    };
+    const result = await registerDevice(keys, fetcher);
+    expect(result.session.deviceId).toBe(
+      deviceIdFromPublicKey(result.deviceKeys.device.publicKey),
+    );
+  });
+
+  it("rejects mismatched device registration response IDs", async () => {
+    const fetcher: typeof fetch = async (input) => {
+      if (String(input).endsWith("/auth/challenge"))
+        return Response.json({
+          challengeId: "01".repeat(16),
+          challenge: "ab".repeat(32),
+        });
+      return Response.json({
+        token: "device-token",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: "00".repeat(32),
+        deviceId: "11".repeat(32),
+      });
+    };
+    await expect(registerDevice(keys, fetcher)).rejects.toThrow(
+      "unexpected registration data",
+    );
+  });
+
+  it("device login retries one 401 and converts repeated 401 and 403", async () => {
+    const device = generateDeviceKeys();
+    const deviceKeys = {
+      identityPublicKey: keys.identity.publicKey,
+      encryption: keys.encryption,
+      historyKey: keys.historyKey,
+      device,
+    };
+    let challenge = 0;
+    let login = 0;
+    const retryFetcher: typeof fetch = async (input) => {
+      if (String(input).endsWith("/auth/challenge")) {
+        challenge++;
+        return Response.json({
+          challengeId: String(challenge).padStart(16, "0"),
+          challenge: "cd".repeat(32),
+        });
+      }
+      login++;
+      if (login === 1)
+        return Response.json({ error: "invalid_credentials" }, { status: 401 });
+      const deviceId = deviceIdFromPublicKey(device.publicKey);
+      return Response.json({
+        token: "device-token",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+        deviceId,
+      });
+    };
+    await expect(deviceLogin(deviceKeys, retryFetcher)).resolves.toMatchObject({
+      deviceId: deviceIdFromPublicKey(device.publicKey),
+    });
+    expect(challenge).toBe(2);
+
+    const revokedFetcher: typeof fetch = async (input) =>
+      String(input).endsWith("/auth/challenge")
+        ? Response.json({
+            challengeId: "01".repeat(16),
+            challenge: "ab".repeat(32),
+          })
+        : Response.json({ error: "device_revoked" }, { status: 403 });
+    await expect(
+      deviceLogin(deviceKeys, revokedFetcher),
+    ).rejects.toBeInstanceOf(DeviceRevokedError);
+
+    const twiceUnauthorized: typeof fetch = async (input) =>
+      String(input).endsWith("/auth/challenge")
+        ? Response.json({
+            challengeId: "01".repeat(16),
+            challenge: "ab".repeat(32),
+          })
+        : Response.json({ error: "invalid_credentials" }, { status: 401 });
+    await expect(
+      deviceLogin(deviceKeys, twiceUnauthorized),
+    ).rejects.toBeInstanceOf(DeviceRevokedError);
+
+    const limited: typeof fetch = async (input) =>
+      String(input).endsWith("/auth/challenge")
+        ? Response.json({
+            challengeId: "01".repeat(16),
+            challenge: "ab".repeat(32),
+          })
+        : Response.json({ error: "rate_limit" }, { status: 429 });
+    await expect(deviceLogin(deviceKeys, limited)).rejects.toMatchObject({
+      status: 429,
+    });
+  });
+});
+
+describe("device login error handling", () => {
+  it("does not convert 500, network TypeError, or timeout into DeviceRevokedError", async () => {
+    const device = generateDeviceKeys();
+    const deviceKeys = {
+      identityPublicKey: keys.identity.publicKey,
+      encryption: keys.encryption,
+      historyKey: keys.historyKey,
+      device,
+    };
+    const challenge = async (input: string | URL | Request) =>
+      String(input).endsWith("/auth/challenge")
+        ? Response.json({
+            challengeId: "01".repeat(16),
+            challenge: "ab".repeat(32),
+          })
+        : undefined;
+
+    const fetch500: typeof fetch = async (input) =>
+      (await challenge(input)) ??
+      Response.json({ error: "server" }, { status: 500 });
+    await expect(deviceLogin(deviceKeys, fetch500)).rejects.toMatchObject({
+      status: 500,
+    });
+
+    const fetchNetwork: typeof fetch = async (input) => {
+      const result = await challenge(input);
+      if (result) return result;
+      throw new TypeError("network failed");
+    };
+    await expect(deviceLogin(deviceKeys, fetchNetwork)).rejects.toBeInstanceOf(
+      TypeError,
+    );
+
+    vi.useFakeTimers();
+    const fetchTimeout: typeof fetch = async (input, init) => {
+      const result = await challenge(input);
+      if (result) return result;
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(new DOMException("Aborted", "AbortError")),
+        );
+      });
+    };
+    const timeoutPromise = deviceLogin(deviceKeys, fetchTimeout);
+    const timeoutAssertion = expect(timeoutPromise).rejects.toMatchObject({
+      status: 0,
+      code: "network_timeout",
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await timeoutAssertion;
+    vi.useRealTimers();
+  });
+
+  it("loginWithKeys chooses device login and legacy login paths", async () => {
+    const paths: string[] = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      const url = String(input);
+      paths.push(url);
+      if (url.endsWith("/auth/challenge"))
+        return Response.json({
+          challengeId: "01".repeat(16),
+          challenge: "ab".repeat(32),
+        });
+      if (url.endsWith("/auth/login"))
+        return Response.json({
+          token: "legacy",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          userId: userIdFromPublicKey(keys.identity.publicKey),
+        });
+      if (url.endsWith("/auth/device/login")) {
+        const body = JSON.parse(String(init?.body)) as Record<string, string>;
+        const deviceId = body.deviceId;
+        return Response.json({
+          token: "device",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          userId: userIdFromPublicKey(keys.identity.publicKey),
+          deviceId,
+        });
+      }
+      throw new Error("unexpected path");
+    };
+
+    const device = generateDeviceKeys();
+    await loginWithKeys(
+      {
+        identityPublicKey: keys.identity.publicKey,
+        encryption: keys.encryption,
+        historyKey: keys.historyKey,
+        device,
+      },
+      fetcher,
+    );
+    expect(paths.some((path) => path.endsWith("/auth/device/login"))).toBe(
+      true,
+    );
+
+    paths.length = 0;
+    await loginWithKeys(keys, fetcher);
+    expect(paths.some((path) => path.endsWith("/auth/login"))).toBe(true);
   });
 });
 

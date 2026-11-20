@@ -4,9 +4,7 @@ import {
   deriveKeys,
   generateMnemonic,
   normalizeMnemonic,
-  userIdFromPublicKey,
   validateMnemonic,
-  type DerivedKeys,
 } from "@messages/crypto";
 import {
   chooseCheckPositions,
@@ -21,12 +19,14 @@ import {
   clearSession,
   restoreSession,
   restoreServerSession,
-  saveSession,
   getPinState,
   unlockWithPin,
   enablePin,
   changePin,
   disablePin,
+  accountUserId,
+  saveDeviceAccount,
+  type AccountKeys,
 } from "./session.js";
 import { indexedDbOutbox } from "./lib/outbox.js";
 import { copyText } from "./lib/clipboard.js";
@@ -75,6 +75,7 @@ import {
   type LongPressHandlers,
 } from "./lib/long-press.js";
 import "./style.css";
+import { registerDeviceWithRetry, type SignInError } from "./lib/sign-in.js";
 
 type Screen =
   "loading" | "locked" | "welcome" | "create" | "verify" | "login" | "home";
@@ -95,7 +96,7 @@ function App() {
     document.documentElement.lang = language;
   }, [language]);
   const [screen, setScreen] = useState<Screen>("loading");
-  const [keys, setKeys] = useState<DerivedKeys | null>(null);
+  const [keys, setKeys] = useState<AccountKeys | null>(null);
   const [count, setCount] = useState<12 | 24>(12);
   const [phrase, setPhrase] = useState("");
   const [pin, setPin] = useState("");
@@ -114,6 +115,12 @@ function App() {
   const [positions, setPositions] = useState<number[]>([]);
   const [answers, setAnswers] = useState<string[]>(["", "", ""]);
   const [hasError, setHasError] = useState(false);
+  const [registrationBusy, setRegistrationBusy] = useState(false);
+  const [registrationError, setRegistrationError] = useState<
+    "network" | "other" | null
+  >(null);
+  const [registrationWaking, setRegistrationWaking] = useState(false);
+  const [deviceRevokedNotice, setDeviceRevokedNotice] = useState(false);
   const [copied, setCopied] = useState(false);
   const [profileCopyFailed, setProfileCopyFailed] = useState(false);
   const [idCopyStatus, setIdCopyStatus] = useState<"" | "copied" | "failed">(
@@ -171,6 +178,7 @@ function App() {
   const hoverRevealTimerRef = useRef<number | null>(null);
   const pinInputRef = useRef<HTMLInputElement | null>(null);
   const controllerRef = useRef<ChatController | null>(null);
+  const registrationBusyRef = useRef(false);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const wasNearBottomRef = useRef(true);
@@ -256,19 +264,46 @@ function App() {
         if (saved) {
           setKeys(saved);
           setScreen("home");
-        } else if (saved !== false) setScreen("welcome");
+        } else if (saved !== false) showAuthScreen("welcome");
       })
-      .catch(() => setScreen("welcome"));
+      .catch(() => showAuthScreen("welcome"));
   }, []);
   function changeLanguage(next: Language) {
     setLanguage(next);
     saveLanguagePreference(next);
   }
+  function showAuthScreen(next: "welcome" | "create" | "verify" | "login") {
+    setRegistrationError(null);
+    setRegistrationWaking(false);
+    setScreen(next);
+  }
 
   async function enter(mnemonic: string) {
+    if (registrationBusyRef.current) return;
+    registrationBusyRef.current = true;
+    setRegistrationBusy(true);
+    setRegistrationError(null);
+    setRegistrationWaking(false);
+    const wakeTimer = window.setTimeout(() => {
+      setRegistrationWaking(true);
+    }, 5_000);
     const derived = deriveKeys(normalizeMnemonic(mnemonic));
-    await saveSession(derived);
-    setKeys(derived);
+    try {
+      const { session, deviceKeys } = await registerDeviceWithRetry(derived);
+      await saveDeviceAccount(deviceKeys, session);
+      derived.identity.privateKey.fill(0);
+      setKeys(deviceKeys);
+    } catch (error) {
+      setRegistrationError(
+        (error as SignInError).kind === "network" ? "network" : "other",
+      );
+      throw error;
+    } finally {
+      window.clearTimeout(wakeTimer);
+      registrationBusyRef.current = false;
+      setRegistrationBusy(false);
+      setRegistrationWaking(false);
+    }
     setChatState({
       chats: [],
       activePeer: "",
@@ -446,7 +481,7 @@ function App() {
     setPinEnabled(false);
     setPin("");
     setShowForgotPinConfirmation(false);
-    setScreen("welcome");
+    showAuthScreen("welcome");
   }
 
   function beginCreate() {
@@ -455,7 +490,8 @@ function App() {
     setPositions(chooseCheckPositions(count));
     setAnswers(["", "", ""]);
     setHasError(false);
-    setScreen("verify");
+    setDeviceRevokedNotice(false);
+    showAuthScreen("verify");
   }
 
   async function handleLogin(event: React.FormEvent<HTMLFormElement>) {
@@ -469,7 +505,7 @@ function App() {
     try {
       await enter(clean);
     } catch {
-      setHasError(true);
+      /* Registration error is shown separately. */
     }
   }
 
@@ -487,7 +523,7 @@ function App() {
     try {
       await enter(phrase);
     } catch {
-      setHasError(true);
+      /* Registration error is shown separately. */
     }
   }
 
@@ -541,10 +577,10 @@ function App() {
     setLogoutError(false);
     setShowLogoutSkipWarning(false);
     setShowLogoutConfirmation(false);
-    setScreen("welcome");
+    showAuthScreen("welcome");
   }
 
-  const userId = keys ? userIdFromPublicKey(keys.identity.publicKey) : "";
+  const userId = keys ? accountUserId(keys) : "";
   const pinErrorText = pinButtonError
     ? pinButtonError === "incorrect"
       ? t.pinIncorrect
@@ -801,6 +837,27 @@ function App() {
       const controller = new ChatController(keys, userId, session, {
         onChange: setChatState,
         deferOutgoingUntilConversations: true,
+        onDeviceRevoked: async () => {
+          controllerRef.current?.stop();
+          controllerRef.current = null;
+          try {
+            await clearSession();
+          } finally {
+            setKeys(null);
+            setChatState({
+              chats: [],
+              activePeer: "",
+              connectionState: "offline",
+              error: "",
+              contacts: {},
+              contactsError: false,
+              waking: false,
+              presence: {},
+            });
+            showAuthScreen("welcome");
+            setDeviceRevokedNotice(true);
+          }
+        },
       });
       controllerRef.current = controller;
       controller.start();
@@ -1019,7 +1076,7 @@ function App() {
       <header className={screen === "home" ? "app-header" : undefined}>
         <a
           className="brand"
-          onClick={() => screen === "welcome" && setScreen("welcome")}
+          onClick={() => screen === "welcome" && showAuthScreen("welcome")}
         >
           {t.title}
         </a>
@@ -1391,10 +1448,22 @@ function App() {
         {screen === "welcome" && (
           <>
             <h1>{t.welcome}</h1>
+            {deviceRevokedNotice && (
+              <p
+                className="error"
+                role="alert"
+                data-testid="device-revoked-notice"
+              >
+                {t.deviceRevokedNotice}
+              </p>
+            )}
             <button
               data-testid="create-account"
               className="primary"
-              onClick={() => setScreen("create")}
+              onClick={() => {
+                setDeviceRevokedNotice(false);
+                showAuthScreen("create");
+              }}
             >
               {t.create}
             </button>
@@ -1404,7 +1473,8 @@ function App() {
               onClick={() => {
                 setPhrase("");
                 setHasError(false);
-                setScreen("login");
+                setDeviceRevokedNotice(false);
+                showAuthScreen("login");
               }}
             >
               {t.login}
@@ -1478,8 +1548,34 @@ function App() {
                 />
               </label>
             ))}
-            {hasError && <p className="error">{t.invalid}</p>}
-            <button className="primary">{t.finish}</button>
+            {hasError && (
+              <p className="error" role="alert">
+                {t.invalid}
+              </p>
+            )}
+            {registrationError === "network" && (
+              <p className="error" role="alert">
+                {t.registrationNetworkError}
+              </p>
+            )}
+            {registrationError === "other" && (
+              <p className="error" role="alert">
+                {t.registrationError}
+              </p>
+            )}
+            {registrationBusy && (
+              <p className="muted" role="status">
+                {t.loggingIn}
+              </p>
+            )}
+            {registrationWaking && (
+              <p className="muted" role="status">
+                {t.registrationWaking}
+              </p>
+            )}
+            <button className="primary" disabled={registrationBusy}>
+              {t.finish}
+            </button>
           </form>
         )}
         {screen === "login" && (
@@ -1497,8 +1593,34 @@ function App() {
                 required
               />
             </label>
-            {hasError && <p className="error">{t.invalid}</p>}
-            <button className="primary">{t.signIn}</button>
+            {hasError && (
+              <p className="error" role="alert">
+                {t.invalid}
+              </p>
+            )}
+            {registrationError === "network" && (
+              <p className="error" role="alert">
+                {t.registrationNetworkError}
+              </p>
+            )}
+            {registrationError === "other" && (
+              <p className="error" role="alert">
+                {t.registrationError}
+              </p>
+            )}
+            {registrationBusy && (
+              <p className="muted" role="status">
+                {t.loggingIn}
+              </p>
+            )}
+            {registrationWaking && (
+              <p className="muted" role="status">
+                {t.registrationWaking}
+              </p>
+            )}
+            <button className="primary" disabled={registrationBusy}>
+              {t.signIn}
+            </button>
           </form>
         )}
         {screen === "home" && (

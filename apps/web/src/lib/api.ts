@@ -5,9 +5,21 @@ import {
   signKeyBinding,
   userIdFromPublicKey,
   verifyKeyBinding,
+  generateDeviceKeys,
+  deviceIdFromPublicKey,
+  signDeviceRegistration,
+  signDeviceAuth,
+  encryptDeviceLabel,
   type DerivedKeys,
 } from "@messages/crypto";
-import { saveServerSession, type ServerSession } from "../session.js";
+import {
+  saveServerSession,
+  isDeviceKeys,
+  type AccountKeys,
+  type DeviceKeys,
+  type ServerSession,
+} from "../session.js";
+import { detectDeviceLabel } from "./device-label.js";
 
 export type FetchLike = typeof fetch;
 export type UserKeys = {
@@ -66,6 +78,13 @@ export class ApiError extends Error {
   ) {
     super(code);
     this.name = "ApiError";
+  }
+}
+
+export class DeviceRevokedError extends Error {
+  constructor() {
+    super("device_revoked");
+    this.name = "DeviceRevokedError";
   }
 }
 
@@ -157,6 +176,161 @@ export async function loginToServer(
     throw new Error("Server returned an unexpected user ID");
   await saveServerSession(result, keys);
   return result;
+}
+
+export async function registerDevice(
+  derived: DerivedKeys,
+  fetcher: FetchLike = fetch,
+): Promise<{ session: ServerSession; deviceKeys: DeviceKeys }> {
+  const challenge = await request<{ challengeId: string; challenge: string }>(
+    fetcher,
+    "/auth/challenge",
+    undefined,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    },
+  );
+  const device = generateDeviceKeys();
+  const deviceId = deviceIdFromPublicKey(device.publicKey);
+  const identityPublicKey = bytesToHex(derived.identity.publicKey);
+  const encryptionPublicKey = bytesToHex(derived.encryption.publicKey);
+  const historyKey = derived.historyKey;
+  const label = detectDeviceLabel(
+    typeof navigator === "undefined" ? "" : navigator.userAgent,
+  );
+  const deviceKeys: DeviceKeys = {
+    identityPublicKey: derived.identity.publicKey,
+    encryption: {
+      privateKey: derived.encryption.privateKey,
+      publicKey: derived.encryption.publicKey,
+    },
+    historyKey,
+    device,
+  };
+  const result = await request<ServerSession>(
+    fetcher,
+    "/auth/device/register",
+    undefined,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        challengeId: challenge.challengeId,
+        identityPublicKey,
+        encryptionPublicKey,
+        keyBindingSignature: bytesToHex(
+          signKeyBinding(
+            derived.identity.privateKey,
+            derived.encryption.publicKey,
+          ),
+        ),
+        devicePublicKey: bytesToHex(device.publicKey),
+        deviceLabel: encryptDeviceLabel({
+          historyKey,
+          deviceId,
+          browser: label.browser,
+          os: label.os,
+        }),
+        signature: bytesToHex(
+          signDeviceRegistration(
+            derived.identity.privateKey,
+            challenge.challengeId,
+            challenge.challenge,
+            device.publicKey,
+          ),
+        ),
+      }),
+    },
+  );
+  const expectedUserId = userIdFromPublicKey(derived.identity.publicKey);
+  if (result.userId !== expectedUserId || result.deviceId !== deviceId)
+    throw new Error("Server returned unexpected registration data");
+  return { session: { ...result, deviceId }, deviceKeys };
+}
+
+export async function deviceLogin(
+  keys: DeviceKeys,
+  fetcher: FetchLike = fetch,
+): Promise<ServerSession> {
+  const attempt = async (): Promise<ServerSession> => {
+    const challenge = await request<{ challengeId: string; challenge: string }>(
+      fetcher,
+      "/auth/challenge",
+      undefined,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      },
+    );
+    try {
+      const result = await request<ServerSession & { deviceId?: string }>(
+        fetcher,
+        "/auth/device/login",
+        undefined,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            challengeId: challenge.challengeId,
+            deviceId: deviceIdFromPublicKey(keys.device.publicKey),
+            signature: bytesToHex(
+              signDeviceAuth(
+                keys.device.privateKey,
+                challenge.challengeId,
+                challenge.challenge,
+              ),
+            ),
+          }),
+        },
+      );
+      if (
+        result.userId !== userIdFromPublicKey(keys.identityPublicKey) ||
+        result.deviceId !== deviceIdFromPublicKey(keys.device.publicKey)
+      )
+        throw new Error("Server returned unexpected device login data");
+      await saveServerSession(result, keys);
+      return result;
+    } catch (error) {
+      if (
+        error instanceof ApiError &&
+        error.status === 403 &&
+        error.code === "device_revoked"
+      )
+        throw new DeviceRevokedError();
+      throw error;
+    }
+  };
+
+  try {
+    return await attempt();
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) {
+      try {
+        return await attempt();
+      } catch (secondError) {
+        if (
+          secondError instanceof ApiError &&
+          (secondError.status === 401 ||
+            (secondError.status === 403 &&
+              secondError.code === "device_revoked"))
+        )
+          throw new DeviceRevokedError();
+        throw secondError;
+      }
+    }
+    throw error;
+  }
+}
+
+export async function loginWithKeys(
+  keys: AccountKeys,
+  fetcher: FetchLike = fetch,
+): Promise<ServerSession> {
+  if (isDeviceKeys(keys)) return deviceLogin(keys, fetcher);
+  return loginToServer(keys, fetcher);
 }
 
 export async function getUserKeys(

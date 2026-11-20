@@ -1660,7 +1660,10 @@ test.describe("real browser chat", () => {
       const get = IDBObjectStore.prototype.get;
       IDBObjectStore.prototype.get = function (key) {
         const request = get.call(this, key);
-        if (key === "derivedKeys" && descriptor?.set) {
+        if (
+          (key === "deviceKeys" || key === "derivedKeys") &&
+          descriptor?.set
+        ) {
           let callback: ((event: Event) => void) | null = null;
           Object.defineProperty(request, "onsuccess", {
             configurable: true,
