@@ -44,24 +44,34 @@ async function openDevices(page: Page) {
   ).toBeVisible();
 }
 
+async function resetOtherDevices(page: Page) {
+  await openDevices(page);
+  const revokeOthers = page.getByTestId("devices-revoke-others");
+  if (await revokeOthers.isVisible()) {
+    await revokeOthers.click();
+    await page.getByTestId("devices-revoke-others-confirm").click();
+    await expect(page.getByTestId("devices-notice")).toBeVisible();
+  }
+}
+
 async function contextPage(browser: Browser) {
   const context = await browser.newContext();
   const page = await context.newPage();
   return { context, page };
 }
 
+let sharedContext: Awaited<ReturnType<typeof contextPage>> | null = null;
 let sharedPhrase = "";
 
 test.describe.serial("devices", () => {
   test.beforeAll(async ({ browser }) => {
-    const setup = await contextPage(browser);
-    sharedPhrase = await createAccount(setup.page);
-    await setup.context.close();
+    sharedContext = await contextPage(browser);
+    sharedPhrase = await createAccount(sharedContext.page);
   });
 
   test("shows current and signed-in other devices", async ({ browser }) => {
-    const first = await contextPage(browser);
-    await signIn(first.page, sharedPhrase);
+    if (!sharedContext) throw new Error("Devices setup did not run");
+    const first = sharedContext;
     const second = await contextPage(browser);
     await signIn(second.page, sharedPhrase);
 
@@ -77,8 +87,9 @@ test.describe.serial("devices", () => {
   });
 
   test("revokes one device with confirmation", async ({ browser }) => {
-    const first = await contextPage(browser);
-    await signIn(first.page, sharedPhrase);
+    if (!sharedContext) throw new Error("Devices setup did not run");
+    const first = sharedContext;
+    await resetOtherDevices(first.page);
     const second = await contextPage(browser);
     await signIn(second.page, sharedPhrase);
     await openDevices(first.page);
@@ -98,8 +109,9 @@ test.describe.serial("devices", () => {
   });
 
   test("revokes all other devices with three contexts", async ({ browser }) => {
-    const first = await contextPage(browser);
-    await signIn(first.page, sharedPhrase);
+    if (!sharedContext) throw new Error("Devices setup did not run");
+    const first = sharedContext;
+    await resetOtherDevices(first.page);
     const second = await contextPage(browser);
     await signIn(second.page, sharedPhrase);
     const third = await contextPage(browser);
@@ -124,8 +136,8 @@ test.describe.serial("devices", () => {
   test("shows load error and retries after route is removed", async ({
     browser,
   }) => {
-    const setup = await contextPage(browser);
-    await signIn(setup.page, sharedPhrase);
+    if (!sharedContext) throw new Error("Devices setup did not run");
+    const setup = sharedContext;
     await setup.page.route("**/devices", (route) =>
       route.fulfill({
         status: 500,
@@ -141,8 +153,8 @@ test.describe.serial("devices", () => {
   });
 
   test("devices section fits 360px viewport", async ({ browser }) => {
-    const first = await contextPage(browser);
-    await signIn(first.page, sharedPhrase);
+    if (!sharedContext) throw new Error("Devices setup did not run");
+    const first = sharedContext;
     const second = await contextPage(browser);
     await signIn(second.page, sharedPhrase);
     await first.page.setViewportSize({ width: 360, height: 740 });
