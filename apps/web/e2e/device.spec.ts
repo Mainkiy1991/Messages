@@ -2,7 +2,11 @@ import { expect, test, type Page } from "@playwright/test";
 
 async function addEnglish(page: Page) {
   await page.addInitScript(() => {
-    localStorage.setItem("messages-lang", "en");
+    try {
+      localStorage.setItem("messages-lang", "en");
+    } catch {
+      /* About:blank has no origin. */
+    }
   });
 }
 
@@ -38,6 +42,9 @@ async function readSessionStore(
   page: Page,
 ): Promise<{ keys: unknown[]; values: unknown }> {
   return page.evaluate(async () => {
+    const databases = await indexedDB.databases();
+    if (!databases.some((database) => database.name === "messages-session"))
+      return { keys: [], values: {} };
     const request = indexedDB.open("messages-session");
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
       request.onsuccess = () => resolve(request.result);
@@ -97,12 +104,24 @@ test("revoke-others signs out another device and allows sign-in again", async ({
   browser,
 }) => {
   const first = await browser.newContext();
-  await first.addInitScript(() => localStorage.setItem("messages-lang", "en"));
+  await first.addInitScript(() => {
+    try {
+      localStorage.setItem("messages-lang", "en");
+    } catch {
+      /* About:blank has no origin. */
+    }
+  });
   const firstPage = await first.newPage();
   const phrase = await createAccount(firstPage);
 
   const second = await browser.newContext();
-  await second.addInitScript(() => localStorage.setItem("messages-lang", "en"));
+  await second.addInitScript(() => {
+    try {
+      localStorage.setItem("messages-lang", "en");
+    } catch {
+      /* About:blank has no origin. */
+    }
+  });
   const secondPage = await second.newPage();
   await signIn(secondPage, phrase);
   const secondStore = await readSessionStore(secondPage);
