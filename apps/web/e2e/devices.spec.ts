@@ -67,6 +67,13 @@ test.describe.serial("devices", () => {
     sharedPhrase = await createAccount(sharedContext.page);
   });
 
+  test.afterAll(async () => {
+    await sharedContext?.context.close();
+    sharedContext = null;
+    // Let the server's per-IP auth-challenge minute window reset before PIN specs.
+    await new Promise((resolve) => setTimeout(resolve, 61_000));
+  });
+
   test("shows current and signed-in other devices", async ({ browser }) => {
     if (!sharedContext) throw new Error("Devices setup did not run");
     const first = sharedContext;
