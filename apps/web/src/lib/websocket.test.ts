@@ -33,6 +33,11 @@ class FakeSocket extends EventTarget {
     this.closed = true;
     this.dispatchEvent(new Event("close"));
   }
+  closeWithCode(code: number) {
+    const event = new Event("close");
+    Object.defineProperty(event, "code", { value: code });
+    this.dispatchEvent(event);
+  }
   open() {
     this.dispatchEvent(new Event("open"));
   }
@@ -531,7 +536,7 @@ describe("websocket chat connection", () => {
     await vi.advanceTimersByTimeAsync(0);
     socket.frame({ type: "session_ended" });
     await vi.advanceTimersByTimeAsync(0);
-    socket.dispatchEvent(new CloseEvent("close", { code: 4401 }));
+    socket.closeWithCode(4401);
     await vi.advanceTimersByTimeAsync(0);
     expect(login).toHaveBeenCalledTimes(1);
     connection.stop();
