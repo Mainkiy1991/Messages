@@ -59,6 +59,8 @@ export class ChatConnection {
   private readonly clearTimer: typeof clearTimeout;
   private heartbeatIdleTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  private authTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastAuthTimeoutRenewAt = Number.NEGATIVE_INFINITY;
   private lastPingAt = 0;
   private readonly heartbeatDocument:
     | Pick<
@@ -94,6 +96,7 @@ export class ChatConnection {
       sendTimeoutMs?: number;
       heartbeatIdleMs?: number;
       heartbeatTimeoutMs?: number;
+      authTimeoutMs?: number;
       heartbeatMinIntervalMs?: number;
       document?: Pick<
         Document,
@@ -123,6 +126,7 @@ export class ChatConnection {
     this.active = false;
     if (this.timer) callClearTimer(this.clearTimer, this.timer);
     if (this.ackTimer) callClearTimer(this.clearTimer, this.ackTimer);
+    this.clearAuthTimer();
     this.timer = null;
     this.ackTimer = null;
     this.authenticated = false;
@@ -254,31 +258,48 @@ export class ChatConnection {
       );
       this.socket = socket;
       socket.addEventListener("open", () => {
-        if (this.active && this.socket === socket)
+        if (this.active && this.socket === socket) {
           socket.send(
             JSON.stringify({ type: "auth", token: this.currentToken() }),
           );
+          this.authTimer = callSetTimer(
+            this.setTimer,
+            () => {
+              this.authTimer = null;
+              if (!this.active || this.socket !== socket || this.authenticated)
+                return;
+              this.socket = null;
+              this.authenticated = false;
+              this.stopHeartbeat();
+              socket.close();
+              const now = Date.now();
+              const renew = now - this.lastAuthTimeoutRenewAt >= 60_000;
+              if (renew) this.lastAuthTimeoutRenewAt = now;
+              this.scheduleUnauthorized(renew);
+            },
+            this.deps.authTimeoutMs ?? 8_000,
+          );
+        }
       });
       socket.addEventListener("message", (event) => {
         if (this.active && this.socket === socket) {
           this.heartbeatFrameReceived();
           this.receiveQueue = this.receiveQueue
-            .then(() => this.receive(event.data))
+            .then(() => this.receive(event.data, socket))
             .catch(() => undefined);
         }
       });
       socket.addEventListener("close", (event) => {
         if (this.socket !== socket) return;
+        this.clearAuthTimer();
+        if (!this.active) return;
+        if (event.code === 4401) {
+          this.handleSessionEnded(socket);
+          return;
+        }
         this.stopHeartbeat();
         this.socket = null;
         this.authenticated = false;
-        if (!this.active) return;
-        if (event.code === 4401) {
-          const immediate = this.unauthorizedRetries === 0;
-          this.unauthorizedRetries++;
-          this.schedule(immediate ? 0 : undefined, true);
-          return;
-        }
         if (event.code === 4429) {
           this.schedule(30_000);
           return;
@@ -294,7 +315,7 @@ export class ChatConnection {
     }
   }
 
-  private async receive(raw: unknown): Promise<void> {
+  private async receive(raw: unknown, socket: SocketLike): Promise<void> {
     let frame: IncomingFrame;
     try {
       frame = JSON.parse(String(raw)) as IncomingFrame;
@@ -302,6 +323,7 @@ export class ChatConnection {
       return;
     }
     if (frame.type === "auth_ok") {
+      this.clearAuthTimer();
       this.authenticated = true;
       this.retry = 0;
       this.unauthorizedRetries = 0;
@@ -310,6 +332,10 @@ export class ChatConnection {
       this.sendPresenceSubscriptions();
       if (!this.sendingPaused)
         for (const pending of this.outbox.values()) this.sendPending(pending);
+      return;
+    }
+    if (frame.type === "session_ended") {
+      this.handleSessionEnded(socket);
       return;
     }
     if (frame.type === "pong") return;
@@ -369,6 +395,27 @@ export class ChatConnection {
       }
     }
     await this.handlers.onFrame(frame);
+  }
+
+  private clearAuthTimer(): void {
+    if (this.authTimer) callClearTimer(this.clearTimer, this.authTimer);
+    this.authTimer = null;
+  }
+
+  private handleSessionEnded(socket: SocketLike): void {
+    if (this.socket !== socket) return;
+    this.clearAuthTimer();
+    this.socket = null;
+    this.authenticated = false;
+    this.stopHeartbeat();
+    socket.close();
+    this.scheduleUnauthorized(true);
+  }
+
+  private scheduleUnauthorized(renew: boolean): void {
+    const immediate = this.unauthorizedRetries === 0;
+    this.unauthorizedRetries++;
+    this.schedule(immediate ? 0 : undefined, renew);
   }
 
   private sendPending(pending: PendingFrame): void {
