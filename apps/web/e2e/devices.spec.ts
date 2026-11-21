@@ -57,6 +57,8 @@ async function resetOtherDevices(page: Page) {
     await revokeOthers.click();
     await page.getByTestId("devices-revoke-others-confirm").click();
     await expect(page.getByTestId("devices-notice")).toBeVisible();
+    await expect(page.getByTestId("device-row")).toHaveCount(1);
+    await expect(page.getByTestId("devices-revoke-others")).toHaveCount(0);
   }
 }
 
@@ -99,6 +101,8 @@ test.describe.serial("devices", () => {
     const second = await contextPage(browser);
     await signIn(second.page, sharedPhrase);
     await openDevices(first.page);
+    await expect(first.page.getByTestId("device-row")).toHaveCount(2);
+    await expect(first.page.getByTestId("device-revoke").first()).toBeVisible();
 
     await first.page.getByTestId("device-revoke").first().click();
     await expect(
@@ -124,6 +128,7 @@ test.describe.serial("devices", () => {
     await signIn(third.page, sharedPhrase);
 
     await openDevices(first.page);
+    await expect(first.page.getByTestId("device-row")).toHaveCount(3);
     await first.page.getByTestId("devices-revoke-others").click();
     await expect(
       first.page.getByText("Sign out on all other devices?"),
@@ -163,6 +168,7 @@ test.describe.serial("devices", () => {
     await signIn(second.page, sharedPhrase);
     await first.page.setViewportSize({ width: 360, height: 740 });
     await openDevices(first.page);
+    await expect(first.page.getByTestId("device-row")).toHaveCount(2);
     const panel = first.page.locator(".profile-panel");
     const sizes = await panel.evaluate((element) => ({
       clientWidth: element.clientWidth,
