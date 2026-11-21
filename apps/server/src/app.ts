@@ -607,10 +607,37 @@ export async function buildApp(options: {
     async (request, reply) => {
       const token = bearerToken(request);
       if (!token) return reply.code(401).send({ error: "unauthorized" });
-      await pool.query("DELETE FROM sessions WHERE token_hash=$1", [
-        hashToken(token),
-      ]);
-      closeWebSocketsForToken(app, hashToken(token));
+      if (request.deviceId !== null) {
+        const client = await pool.connect();
+        const closedHashes: string[] = [];
+        try {
+          await client.query("BEGIN");
+          await client.query(
+            "UPDATE devices SET revoked_at=now() WHERE device_id=$1 AND revoked_at IS NULL",
+            [request.deviceId],
+          );
+          const removed = await client.query<{ token_hash: string }>(
+            "DELETE FROM sessions WHERE device_id=$1 RETURNING token_hash",
+            [request.deviceId],
+          );
+          for (const row of removed.rows) closedHashes.push(row.token_hash);
+          await client.query("COMMIT");
+        } catch (error) {
+          await client.query("ROLLBACK").catch(() => undefined);
+          throw error;
+        } finally {
+          client.release();
+        }
+        for (const tokenHash of closedHashes) {
+          closeWebSocketsForToken(app, tokenHash);
+        }
+      } else {
+        const tokenHash = hashToken(token);
+        await pool.query("DELETE FROM sessions WHERE token_hash=$1", [
+          tokenHash,
+        ]);
+        closeWebSocketsForToken(app, tokenHash);
+      }
       return reply.code(204).send();
     },
   );

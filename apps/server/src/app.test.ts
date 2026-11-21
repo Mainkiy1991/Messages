@@ -1872,6 +1872,98 @@ suite("server authentication (PostgreSQL)", () => {
     expect(events).toEqual(["session_ended", "close:4401"]);
   });
 
+  it("logout revokes the device", async () => {
+    const first = await registerDevice();
+    const second = await registerDevice();
+    const response = await app.inject({
+      method: "POST",
+      url: "/auth/logout",
+      headers: { authorization: `Bearer ${first.response.json().token}` },
+    });
+    expect(response.statusCode).toBe(204);
+    const devices = await app.inject({
+      method: "GET",
+      url: "/devices",
+      headers: { authorization: `Bearer ${second.response.json().token}` },
+    });
+    expect(devices.json().devices).not.toContainEqual(
+      expect.objectContaining({ deviceId: first.deviceId }),
+    );
+    const login = await loginDevice(first.device);
+    expect(login.response.statusCode).toBe(403);
+    expect(login.response.json()).toEqual({ error: "device_revoked" });
+  });
+
+  it("logout ends every session and socket of the device", async () => {
+    const first = await registerDevice();
+    const second = await loginDevice(first.device);
+    const url = await listen();
+    const firstSocket = (await connectAuth(first.response.json().token, url))
+      .socket;
+    const secondSocket = (await connectAuth(second.response.json().token, url))
+      .socket;
+    const ended = [firstSocket, secondSocket].map((socket) =>
+      nextFrame(socket, (frame) => frame.type === "session_ended"),
+    );
+    const closed = [firstSocket, secondSocket].map(
+      (socket) =>
+        new Promise<number>((resolve) =>
+          socket.once("close", (code) => resolve(code)),
+        ),
+    );
+    const response = await app.inject({
+      method: "POST",
+      url: "/auth/logout",
+      headers: { authorization: `Bearer ${first.response.json().token}` },
+    });
+    expect(response.statusCode).toBe(204);
+    await Promise.all(ended);
+    expect(await Promise.all(closed)).toEqual([4401, 4401]);
+    for (const token of [
+      first.response.json().token,
+      second.response.json().token,
+    ]) {
+      const me = await app.inject({
+        method: "GET",
+        url: "/me",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(me.statusCode).toBe(401);
+    }
+  });
+
+  it("logout of a session without a device only deletes the session", async () => {
+    const deviceSession = await registerDevice(keys);
+    const before = await app.inject({
+      method: "GET",
+      url: "/devices",
+      headers: {
+        authorization: `Bearer ${deviceSession.response.json().token}`,
+      },
+    });
+    const legacy = await login();
+    const response = await app.inject({
+      method: "POST",
+      url: "/auth/logout",
+      headers: { authorization: `Bearer ${legacy.response.json().token}` },
+    });
+    expect(response.statusCode).toBe(204);
+    const me = await app.inject({
+      method: "GET",
+      url: "/me",
+      headers: { authorization: `Bearer ${legacy.response.json().token}` },
+    });
+    expect(me.statusCode).toBe(401);
+    const after = await app.inject({
+      method: "GET",
+      url: "/devices",
+      headers: {
+        authorization: `Bearer ${deviceSession.response.json().token}`,
+      },
+    });
+    expect(after.json().devices).toHaveLength(before.json().devices.length);
+  });
+
   it("sends session_ended to a logged-out session before closing it", async () => {
     const account = await createAccount();
     const socket = (await connectAuth(account.token, await listen())).socket;
