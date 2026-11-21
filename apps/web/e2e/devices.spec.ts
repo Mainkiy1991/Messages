@@ -52,18 +52,6 @@ async function openDevices(page: Page) {
   ).toBeVisible();
 }
 
-async function resetOtherDevices(page: Page) {
-  await openDevices(page);
-  const revokeOthers = page.getByTestId("devices-revoke-others");
-  if (await revokeOthers.isVisible()) {
-    await revokeOthers.click();
-    await page.getByTestId("devices-revoke-others-confirm").click();
-    await expect(page.getByTestId("devices-notice")).toBeVisible();
-    await expect(page.getByTestId("device-row")).toHaveCount(1);
-    await expect(page.getByTestId("devices-revoke-others")).toHaveCount(0);
-  }
-}
-
 async function contextPage(browser: Browser) {
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -94,12 +82,15 @@ test.describe.serial("devices", () => {
         .filter({ hasText: /Chrome/ })
         .first(),
     ).toBeVisible();
+    await first.page.getByTestId("device-revoke").first().click();
+    await first.page.getByTestId("device-revoke-confirm").click();
+    await expect(first.page.getByTestId("device-row")).toHaveCount(1);
+    await second.context.close();
   });
 
   test("revokes one device with confirmation", async ({ browser }) => {
     if (!sharedContext) throw new Error("Devices setup did not run");
     const first = sharedContext;
-    await resetOtherDevices(first.page);
     const second = await contextPage(browser);
     await signIn(second.page, sharedPhrase);
     await openDevices(first.page);
@@ -118,12 +109,12 @@ test.describe.serial("devices", () => {
     await expect(
       second.page.getByTestId("device-revoked-notice"),
     ).toBeVisible();
+    await second.context.close();
   });
 
   test("revokes all other devices with three contexts", async ({ browser }) => {
     if (!sharedContext) throw new Error("Devices setup did not run");
     const first = sharedContext;
-    await resetOtherDevices(first.page);
     const second = await contextPage(browser);
     await signIn(second.page, sharedPhrase);
     const third = await contextPage(browser);
@@ -144,6 +135,8 @@ test.describe.serial("devices", () => {
       second.page.getByTestId("device-revoked-notice"),
     ).toBeVisible();
     await expect(third.page.getByTestId("device-revoked-notice")).toBeVisible();
+    await second.context.close();
+    await third.context.close();
   });
 
   test("shows load error and retries after route is removed", async () => {
@@ -180,5 +173,6 @@ test.describe.serial("devices", () => {
     for (const button of await first.page.getByTestId("device-revoke").all()) {
       await expect(button).toBeVisible();
     }
+    await second.context.close();
   });
 });
