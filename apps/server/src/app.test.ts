@@ -651,6 +651,64 @@ suite("server authentication (PostgreSQL)", () => {
     await closedB;
   });
 
+  it("sends session_ended before closing a revoked device WebSocket", async () => {
+    const account = await createAccount();
+    const deviceA = await registerDevice(account.keys);
+    const deviceB = await registerDevice(account.keys);
+    const url = await listen();
+    const socket = (await connectAuth(deviceA.response.json().token, url))
+      .socket;
+    const events: string[] = [];
+    socket.on("message", (data) =>
+      events.push(JSON.parse(data.toString()).type),
+    );
+    socket.on("close", (code) => events.push(`close:${code}`));
+    const closed = new Promise<void>((resolve) =>
+      socket.once("close", resolve),
+    );
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/devices/${deviceA.deviceId}`,
+      headers: { authorization: `Bearer ${deviceB.response.json().token}` },
+    });
+    expect(deleted.statusCode).toBe(204);
+    await closed;
+    expect(events).toEqual(["session_ended", "close:4401"]);
+    const other = (await connectAuth(deviceB.response.json().token, url))
+      .socket;
+    other.close();
+  });
+
+  it("sends session_ended before closing other device sockets", async () => {
+    const accountKeys = deriveKeys(generateMnemonic(12));
+    const deviceA = await registerDevice(accountKeys);
+    const deviceB = await registerDevice(accountKeys);
+    const socket = (
+      await connectAuth(deviceA.response.json().token, await listen())
+    ).socket;
+    const events: string[] = [];
+    socket.on("message", (data) =>
+      events.push(JSON.parse(data.toString()).type),
+    );
+    socket.on("close", (code) => events.push(`close:${code}`));
+    const closed = new Promise<void>((resolve) =>
+      socket.once("close", resolve),
+    );
+    const response = await app.inject({
+      method: "POST",
+      url: "/devices/revoke-others",
+      headers: { authorization: `Bearer ${deviceB.response.json().token}` },
+      payload: {},
+    });
+    expect(response.statusCode).toBe(200);
+    await closed;
+    expect(events).toEqual(["session_ended", "close:4401"]);
+    const current = (
+      await connectAuth(deviceB.response.json().token, await listen())
+    ).socket;
+    current.close();
+  });
+
   it("closes other device WebSockets on revoke-others and preserves the current one", async () => {
     const accountKeys = deriveKeys(generateMnemonic(12));
     const deviceA = await registerDevice(accountKeys);
@@ -1230,11 +1288,35 @@ suite("server authentication (PostgreSQL)", () => {
   it("closes WebSocket with 4401 for an invalid token", async () => {
     const socket = connect(await listen(), { origin: "http://localhost:5173" });
     await new Promise<void>((resolve) => socket.once("open", resolve));
-    const closed = new Promise<number>((resolve) =>
-      socket.once("close", (code) => resolve(code)),
+    const events: string[] = [];
+    socket.on("message", (data) =>
+      events.push(JSON.parse(data.toString()).type),
+    );
+    socket.on("close", (code) => events.push(`close:${code}`));
+    const closed = new Promise<void>((resolve) =>
+      socket.once("close", resolve),
     );
     socket.send(JSON.stringify({ type: "auth", token: "A".repeat(43) }));
-    expect(await closed).toBe(4401);
+    await closed;
+    expect(events).toEqual(["session_ended", "close:4401"]);
+  });
+
+  it("notifies an invalid-token WebSocket before its 4401 close", async () => {
+    const socket = connect(await listen(), { origin: "http://localhost:5173" });
+    await new Promise<void>((resolve) => socket.once("open", resolve));
+    const events: string[] = [];
+    const closed = new Promise<void>((resolve) => {
+      socket.on("message", (data) =>
+        events.push(JSON.parse(data.toString()).type),
+      );
+      socket.on("close", (code) => {
+        events.push(`close:${code}`);
+        resolve();
+      });
+    });
+    socket.send(JSON.stringify({ type: "auth", token: "A".repeat(43) }));
+    await closed;
+    expect(events).toEqual(["session_ended", "close:4401"]);
   });
 
   it("closes unauthenticated WebSocket after configured timeout", async () => {
@@ -1772,8 +1854,13 @@ suite("server authentication (PostgreSQL)", () => {
   it("closes token WebSockets on logout", async () => {
     const account = await createAccount();
     const socket = (await connectAuth(account.token, await listen())).socket;
-    const closed = new Promise<number>((resolve) =>
-      socket.once("close", (code) => resolve(code)),
+    const events: string[] = [];
+    socket.on("message", (data) =>
+      events.push(JSON.parse(data.toString()).type),
+    );
+    socket.on("close", (code) => events.push(`close:${code}`));
+    const closed = new Promise<void>((resolve) =>
+      socket.once("close", resolve),
     );
     const response = await app.inject({
       method: "POST",
@@ -1781,7 +1868,31 @@ suite("server authentication (PostgreSQL)", () => {
       headers: { authorization: `Bearer ${account.token}` },
     });
     expect(response.statusCode).toBe(204);
-    expect(await closed).toBe(4401);
+    await closed;
+    expect(events).toEqual(["session_ended", "close:4401"]);
+  });
+
+  it("sends session_ended to a logged-out session before closing it", async () => {
+    const account = await createAccount();
+    const socket = (await connectAuth(account.token, await listen())).socket;
+    const events: string[] = [];
+    const closed = new Promise<void>((resolve) => {
+      socket.on("message", (data) =>
+        events.push(JSON.parse(data.toString()).type),
+      );
+      socket.on("close", (code) => {
+        events.push(`close:${code}`);
+        resolve();
+      });
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/auth/logout",
+      headers: { authorization: `Bearer ${account.token}` },
+    });
+    expect(response.statusCode).toBe(204);
+    await closed;
+    expect(events).toEqual(["session_ended", "close:4401"]);
   });
 
   it("closes a connection after 120 frames in ten seconds", async () => {

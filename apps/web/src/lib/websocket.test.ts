@@ -79,6 +79,7 @@ describe("websocket chat connection", () => {
     );
     connection.start();
     await vi.advanceTimersByTimeAsync(0);
+    socket.open();
     socket.frame({ type: "auth_ok" });
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(24);
@@ -250,7 +251,7 @@ describe("websocket chat connection", () => {
           return socket;
         },
         setTimer,
-        clearTimer,
+        clearTimer: clearTimer as unknown as typeof clearTimeout,
         random: () => 0,
         sendTimeoutMs: 100,
       },
@@ -465,6 +466,202 @@ describe("websocket chat connection", () => {
     expect(login).toHaveBeenCalledTimes(1);
     expect((connection as unknown as { state: string }).state).toBe("offline");
     expect(setTimer).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("renews immediately after session_ended and handles revoked devices once", async () => {
+    vi.useFakeTimers();
+    const keys = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    const socket = new FakeSocket();
+    const login = vi.fn().mockRejectedValue(new DeviceRevokedError());
+    const onRevoked = vi.fn();
+    const setTimer = vi.fn((callback: TimerHandler, ms?: number) =>
+      setTimeout(callback, ms),
+    );
+    const connection = new ChatConnection(
+      keys,
+      {
+        token: "a".repeat(43),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+      },
+      { onState: vi.fn(), onFrame: vi.fn(), onRevoked },
+      {
+        socketFactory: () => socket,
+        login,
+        setTimer: setTimer as unknown as typeof setTimeout,
+        clearTimer: clearTimeout,
+      },
+    );
+    connection.start();
+    await vi.advanceTimersByTimeAsync(0);
+    socket.frame({ type: "session_ended" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(login).toHaveBeenCalledTimes(1);
+    expect(onRevoked).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+    connection.stop();
+    vi.useRealTimers();
+  });
+
+  it("does not renew twice when session_ended is followed by close 4401", async () => {
+    vi.useFakeTimers();
+    const keys = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    const socket = new FakeSocket();
+    const login = vi.fn().mockResolvedValue({
+      token: "b".repeat(43),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      userId: userIdFromPublicKey(keys.identity.publicKey),
+    });
+    const connection = new ChatConnection(
+      keys,
+      {
+        token: "a".repeat(43),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+      },
+      { onState: vi.fn(), onFrame: vi.fn() },
+      { socketFactory: () => socket, login },
+    );
+    connection.start();
+    await vi.advanceTimersByTimeAsync(0);
+    socket.frame({ type: "session_ended" });
+    await vi.advanceTimersByTimeAsync(0);
+    socket.dispatchEvent(new CloseEvent("close", { code: 4401 }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(login).toHaveBeenCalledTimes(1);
+    connection.stop();
+    vi.useRealTimers();
+  });
+
+  it("renews after an authorization timeout and reconnects", async () => {
+    vi.useFakeTimers();
+    const keys = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    const sockets: FakeSocket[] = [];
+    const login = vi.fn().mockResolvedValue({
+      token: "b".repeat(43),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      userId: userIdFromPublicKey(keys.identity.publicKey),
+    });
+    const connection = new ChatConnection(
+      keys,
+      {
+        token: "a".repeat(43),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+      },
+      { onState: vi.fn(), onFrame: vi.fn() },
+      {
+        socketFactory: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+        login,
+        authTimeoutMs: 100,
+        random: () => 0,
+      },
+    );
+    connection.start();
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.open();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sockets[0]!.closed).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(login).toHaveBeenCalledTimes(1);
+    expect(sockets).toHaveLength(2);
+    connection.stop();
+    vi.useRealTimers();
+  });
+
+  it("uses ordinary reconnect for a second authorization timeout within a minute", async () => {
+    vi.useFakeTimers();
+    const keys = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    const sockets: FakeSocket[] = [];
+    const login = vi.fn().mockResolvedValue({
+      token: "b".repeat(43),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      userId: userIdFromPublicKey(keys.identity.publicKey),
+    });
+    const connection = new ChatConnection(
+      keys,
+      {
+        token: "a".repeat(43),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+      },
+      { onState: vi.fn(), onFrame: vi.fn() },
+      {
+        socketFactory: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+        login,
+        authTimeoutMs: 100,
+        random: () => 0,
+      },
+    );
+    connection.start();
+    await vi.advanceTimersByTimeAsync(0);
+    sockets[0]!.open();
+    await vi.advanceTimersByTimeAsync(1_100);
+    sockets[1]!.open();
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(login).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(sockets).toHaveLength(3);
+    connection.stop();
+    vi.useRealTimers();
+  });
+
+  it("cancels authorization timeout when auth_ok arrives", async () => {
+    vi.useFakeTimers();
+    const keys = deriveKeys(
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+    );
+    const socket = new FakeSocket();
+    const login = vi.fn();
+    const setTimer = vi.fn((callback: TimerHandler, ms?: number) =>
+      setTimeout(callback, ms),
+    );
+    const clearTimer = vi.fn((timer: ReturnType<typeof setTimeout>) =>
+      clearTimeout(timer),
+    );
+    const connection = new ChatConnection(
+      keys,
+      {
+        token: "a".repeat(43),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        userId: userIdFromPublicKey(keys.identity.publicKey),
+      },
+      { onState: vi.fn(), onFrame: vi.fn() },
+      {
+        socketFactory: () => socket,
+        login,
+        authTimeoutMs: 100,
+        setTimer: setTimer as unknown as typeof setTimeout,
+        clearTimer: clearTimer as unknown as typeof globalThis.clearTimeout,
+      },
+    );
+    connection.start();
+    await vi.advanceTimersByTimeAsync(0);
+    socket.open();
+    socket.frame({ type: "auth_ok" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(clearTimer).toHaveBeenCalledWith(setTimer.mock.results[0]!.value);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(login).not.toHaveBeenCalled();
+    expect(socket.closed).toBe(false);
+    connection.stop();
     vi.useRealTimers();
   });
 

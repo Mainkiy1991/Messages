@@ -354,6 +354,13 @@ export async function registerWebSocket(
 
   function closeToken(tokenHashValue: string) {
     for (const connection of perToken.get(tokenHashValue) ?? []) {
+      if (connection.socket.readyState === WebSocket.OPEN) {
+        try {
+          connection.socket.send(JSON.stringify({ type: "session_ended" }));
+        } catch {
+          // Closing the revoked session must not depend on notification delivery.
+        }
+      }
       connection.socket.close(4401, "session logged out");
       remove(connection);
     }
@@ -498,6 +505,13 @@ export async function registerWebSocket(
             if (closed || socket.readyState !== WebSocket.OPEN) return;
             if (!result.rowCount) {
               closed = true;
+              if (socket.readyState === WebSocket.OPEN) {
+                try {
+                  socket.send(JSON.stringify({ type: "session_ended" }));
+                } catch {
+                  // Closing an invalid session must not depend on notification delivery.
+                }
+              }
               socket.close(4401, "invalid token");
               return;
             }
