@@ -6,6 +6,7 @@ import {
   decryptTextMessage,
   deriveKeys,
   encryptContactBook,
+  encryptDeviceLabel,
   encryptHistoryEntry,
   encryptTextMessage,
   newReplayMessageId,
@@ -143,6 +144,9 @@ function makeController(
     deleteConversation?: ChatControllerDependencies["deleteConversation"];
     eraseConversation?: ChatControllerDependencies["eraseConversation"];
     getContacts?: ChatControllerDependencies["getContacts"];
+    getDevices?: ChatControllerDependencies["getDevices"];
+    revokeDevice?: ChatControllerDependencies["revokeDevice"];
+    revokeOtherDevices?: ChatControllerDependencies["revokeOtherDevices"];
     getHistory?: ChatControllerDependencies["getHistory"];
     getHistoryAfter?: ChatControllerDependencies["getHistoryAfter"];
     getHistoryChangedAfter?: ChatControllerDependencies["getHistoryChangedAfter"];
@@ -189,6 +193,9 @@ function makeController(
       deleteConversation: options.deleteConversation,
       eraseConversation: options.eraseConversation,
       getContacts: options.getContacts,
+      getDevices: options.getDevices,
+      revokeDevice: options.revokeDevice,
+      revokeOtherDevices: options.revokeOtherDevices,
       getHistory: options.getHistory,
       getHistoryAfter: options.getHistoryAfter,
       getHistoryChangedAfter: options.getHistoryChangedAfter,
@@ -5135,6 +5142,259 @@ describe("ChatController linked Alice and Bob", () => {
     });
     expect(saved.unreadCount).toBe(0);
     f.controller.stop();
+  });
+});
+
+describe("device management", () => {
+  const deviceId = "11".repeat(32);
+  const otherDeviceId = "22".repeat(32);
+  const deviceRow = (id: string, labelCiphertext: string, current = false) => ({
+    deviceId: id,
+    labelCiphertext,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    lastSeenAt: "2026-01-02T00:00:00.000Z",
+    current,
+  });
+
+  it("decrypts device labels and marks a damaged label as unknown", async () => {
+    const f = makeController({
+      initialSession: session("device-token"),
+      getDevices: async () => ({
+        devices: [
+          deviceRow(
+            deviceId,
+            encryptDeviceLabel({
+              historyKey: alice.historyKey,
+              deviceId,
+              browser: "Firefox",
+              os: "Linux",
+            }),
+            true,
+          ),
+          deviceRow(otherDeviceId, "damaged ciphertext"),
+        ],
+      }),
+    });
+
+    await expect(f.controller.listDevices()).resolves.toEqual({
+      ok: true,
+      devices: [
+        {
+          deviceId,
+          browser: "Firefox",
+          os: "Linux",
+          labelKnown: true,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          lastSeenAt: "2026-01-02T00:00:00.000Z",
+          current: true,
+        },
+        {
+          deviceId: otherDeviceId,
+          browser: "",
+          os: "",
+          labelKnown: false,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          lastSeenAt: "2026-01-02T00:00:00.000Z",
+          current: false,
+        },
+      ],
+    });
+  });
+
+  it("refreshes the session once after a 401 while listing devices", async () => {
+    let calls = 0;
+    const f = makeController({
+      initialSession: session("old-device-token"),
+      getDevices: async (token) => {
+        calls++;
+        if (calls === 1) {
+          expect(token).toBe("old-device-token");
+          throw new ApiError(401, "unauthorized");
+        }
+        expect(token).toBe("token-1");
+        return { devices: [] };
+      },
+    });
+
+    await expect(f.controller.listDevices()).resolves.toEqual({
+      ok: true,
+      devices: [],
+    });
+    expect(calls).toBe(2);
+    expect(f.getLoginCount()).toBe(1);
+  });
+
+  it.each([
+    ["server errors", new ApiError(503, "unavailable")],
+    ["network timeout", new ApiError(0, "network_timeout")],
+    ["network TypeError", new TypeError("offline")],
+  ])("maps %s to a network error", async (_name, error) => {
+    const f = makeController({
+      initialSession: session("device-token"),
+      getDevices: async () => {
+        throw error;
+      },
+    });
+
+    await expect(f.controller.listDevices()).resolves.toEqual({
+      ok: false,
+      error: "network",
+    });
+  });
+
+  it("maps a device list 429 to rate_limited", async () => {
+    const f = makeController({
+      initialSession: session("device-token"),
+      getDevices: async () => {
+        throw new ApiError(429, "rate_limited");
+      },
+    });
+
+    await expect(f.controller.listDevices()).resolves.toEqual({
+      ok: false,
+      error: "rate_limited",
+    });
+  });
+
+  it("treats a revoked device 404 as an already completed revocation", async () => {
+    const f = makeController({
+      initialSession: session("device-token"),
+      revokeDevice: async () => {
+        throw new ApiError(404, "not_found");
+      },
+    });
+
+    await expect(f.controller.revokeDevice(deviceId)).resolves.toEqual({
+      ok: true,
+    });
+  });
+
+  it("rejects revoking the current device with a 409", async () => {
+    const f = makeController({
+      initialSession: session("device-token"),
+      revokeDevice: async () => {
+        throw new ApiError(409, "current_device");
+      },
+    });
+
+    await expect(f.controller.revokeDevice(deviceId)).resolves.toEqual({
+      ok: false,
+      error: "failed",
+    });
+  });
+
+  it("passes the device ID and session token to the revoke dependency", async () => {
+    const revokeDevice = vi.fn(async () => {});
+    const f = makeController({
+      initialSession: session("device-token"),
+      revokeDevice,
+    });
+
+    await expect(f.controller.revokeDevice(deviceId)).resolves.toEqual({
+      ok: true,
+    });
+    expect(revokeDevice).toHaveBeenCalledExactlyOnceWith(
+      deviceId,
+      "device-token",
+    );
+  });
+
+  it("reports a revoked device after session refresh and notifies once", async () => {
+    const onDeviceRevoked = vi.fn();
+    const f = makeController({
+      initialSession: session("old-device-token"),
+      login: async () => {
+        throw new DeviceRevokedError();
+      },
+      getDevices: async () => {
+        throw new ApiError(401, "unauthorized");
+      },
+      onDeviceRevoked,
+    });
+
+    await expect(f.controller.listDevices()).resolves.toEqual({
+      ok: false,
+      error: "revoked",
+    });
+    expect(onDeviceRevoked).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks other device operations while listing and releases the busy flag", async () => {
+    let release!: (value: { devices: [] }) => void;
+    const f = makeController({
+      initialSession: session("device-token"),
+      getDevices: () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+      revokeDevice: async () => {},
+      revokeOtherDevices: async () => ({
+        revoked: 0,
+        endedLegacySessions: 0,
+      }),
+    });
+
+    const listing = f.controller.listDevices();
+    await waitFor(() => release !== undefined);
+    await expect(f.controller.revokeDevice(deviceId)).resolves.toEqual({
+      ok: false,
+      error: "busy",
+    });
+    await expect(f.controller.revokeOtherDevices()).resolves.toEqual({
+      ok: false,
+      error: "busy",
+    });
+    release({ devices: [] });
+    await expect(listing).resolves.toEqual({ ok: true, devices: [] });
+    await expect(f.controller.revokeDevice(deviceId)).resolves.toEqual({
+      ok: true,
+    });
+  });
+
+  it("releases the busy flag after a device request fails", async () => {
+    let attempts = 0;
+    const f = makeController({
+      initialSession: session("device-token"),
+      revokeDevice: async () => {
+        attempts++;
+        if (attempts === 1) throw new TypeError("offline");
+      },
+    });
+
+    await expect(f.controller.revokeDevice(deviceId)).resolves.toEqual({
+      ok: false,
+      error: "network",
+    });
+    await expect(f.controller.revokeDevice(deviceId)).resolves.toEqual({
+      ok: true,
+    });
+    expect(attempts).toBe(2);
+  });
+
+  it("returns revoked counts and maps revoke-other 429 to rate_limited", async () => {
+    const success = makeController({
+      initialSession: session("device-token"),
+      revokeOtherDevices: async () => ({
+        revoked: 3,
+        endedLegacySessions: 2,
+      }),
+    });
+    await expect(success.controller.revokeOtherDevices()).resolves.toEqual({
+      ok: true,
+      revoked: 3,
+      endedLegacySessions: 2,
+    });
+
+    const limited = makeController({
+      initialSession: session("device-token"),
+      revokeOtherDevices: async () => {
+        throw new ApiError(429, "rate_limited");
+      },
+    });
+    await expect(limited.controller.revokeOtherDevices()).resolves.toEqual({
+      ok: false,
+      error: "rate_limited",
+    });
   });
 });
 
