@@ -199,6 +199,44 @@ header {
 .profile-section .profile-language {
   padding: 4px 0;
 }
+.devices-panel {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.devices-hint,
+.devices-loading,
+.devices-notice,
+.devices-error {
+  margin: 4px 0;
+}
+.device-row {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 0;
+  border-top: 1px solid #e4e6ee;
+}
+.device-label,
+.device-current {
+  font-weight: 600;
+}
+.device-dates,
+.devices-confirm,
+.devices-confirm-actions {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.devices-confirm-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.device-revoke,
+.devices-revoke-others,
+.devices-confirm button {
+  max-width: 100%;
+}
 .pin-settings {
   display: grid;
   gap: 8px;

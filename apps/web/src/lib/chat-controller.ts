@@ -23,11 +23,17 @@ import {
   eraseConversation as eraseConversationRequest,
   deleteMessage as deleteMessageRow,
   putContacts,
+  getDevices,
+  revokeDevice as revokeDeviceRequest,
+  revokeOtherDevices as revokeOtherDevicesRequest,
   type ContactBookResponse,
   type ConversationClear,
   type ConversationSummary,
   type HistoryMessage,
+  type DevicesResponse,
+  type RevokeOthersResponse,
 } from "./api.js";
+import { decryptDevices, type DeviceInfo } from "./devices.js";
 import { indexedDbOutbox, type OutboxStore } from "./outbox.js";
 import { type AccountKeys, type ServerSession } from "../session.js";
 import {
@@ -115,6 +121,15 @@ export type SendDeleteError =
   ChatError | "unknown_message" | "not_deletable" | "delete_pending";
 export type SendDeleteResult =
   { ok: true } | { ok: false; error: SendDeleteError };
+export type DevicesError =
+  "network" | "rate_limited" | "not_found" | "failed" | "revoked" | "busy";
+export type ListDevicesResult =
+  { ok: true; devices: DeviceInfo[] } | { ok: false; error: DevicesError };
+export type RevokeDeviceResult =
+  { ok: true } | { ok: false; error: DevicesError };
+export type RevokeOtherDevicesResult =
+  | { ok: true; revoked: number; endedLegacySessions: number }
+  | { ok: false; error: DevicesError };
 
 export type ChatControllerDependencies = {
   fetcher?: FetchLike;
@@ -194,6 +209,9 @@ export type ChatControllerDependencies = {
     version: string,
     blob: string,
   ) => Promise<{ version: string }>;
+  getDevices?: (token: string) => Promise<DevicesResponse>;
+  revokeDevice?: (deviceId: string, token: string) => Promise<void>;
+  revokeOtherDevices?: (token: string) => Promise<RevokeOthersResponse>;
   outbox?: OutboxStore;
 };
 
@@ -230,6 +248,7 @@ export class ChatController {
   private readonly pendingEdits = new Set<string>();
   /** Row IDs whose delete request is still on its way to the server. */
   private readonly pendingDeletes = new Set<string>();
+  private devicesOperationBusy = false;
   /** Highest change number of a chat whose rows are already applied here. */
   private readonly knownChangeSeqs = new Map<string, string>();
   /** Last change number the conversation list reported per chat. */
@@ -1692,6 +1711,86 @@ export class ChatController {
     this.applyDeleted(peerId, message.id, "out");
     this.update({ error: "" });
     return { ok: true };
+  }
+
+  async listDevices(): Promise<ListDevicesResult> {
+    if (this.devicesOperationBusy) return { ok: false, error: "busy" };
+    this.devicesOperationBusy = true;
+    try {
+      const session = await this.connection.ensureSession();
+      const get =
+        this.deps.getDevices ??
+        ((token: string) => getDevices(token, this.deps.fetcher));
+      const response = await this.withFreshSession(session.token, get);
+      return {
+        ok: true,
+        devices: decryptDevices(response.devices, this.keys.historyKey),
+      };
+    } catch (error) {
+      return { ok: false, error: this.deviceRequestError(error) };
+    } finally {
+      this.devicesOperationBusy = false;
+    }
+  }
+
+  async revokeDevice(deviceId: string): Promise<RevokeDeviceResult> {
+    if (this.devicesOperationBusy) return { ok: false, error: "busy" };
+    this.devicesOperationBusy = true;
+    try {
+      const session = await this.connection.ensureSession();
+      const revoke =
+        this.deps.revokeDevice ??
+        ((id: string, token: string) =>
+          revokeDeviceRequest(id, token, this.deps.fetcher));
+      await this.withFreshSession(session.token, (token) =>
+        revoke(deviceId, token),
+      );
+      return { ok: true };
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404)
+        return { ok: true };
+      return { ok: false, error: this.deviceRequestError(error) };
+    } finally {
+      this.devicesOperationBusy = false;
+    }
+  }
+
+  async revokeOtherDevices(): Promise<RevokeOtherDevicesResult> {
+    if (this.devicesOperationBusy) return { ok: false, error: "busy" };
+    this.devicesOperationBusy = true;
+    try {
+      const session = await this.connection.ensureSession();
+      const revoke =
+        this.deps.revokeOtherDevices ??
+        ((token: string) =>
+          revokeOtherDevicesRequest(token, this.deps.fetcher));
+      const result = await this.withFreshSession(session.token, revoke);
+      return {
+        ok: true,
+        revoked: result.revoked,
+        endedLegacySessions: result.endedLegacySessions,
+      };
+    } catch (error) {
+      return { ok: false, error: this.deviceRequestError(error) };
+    } finally {
+      this.devicesOperationBusy = false;
+    }
+  }
+
+  private deviceRequestError(error: unknown): DevicesError {
+    if (error instanceof DeviceRevokedError) return "revoked";
+    if (error instanceof ApiError) {
+      if (error.status === 429) return "rate_limited";
+      if (
+        error.status === 0 ||
+        error.status >= 500 ||
+        error.code === "network_timeout"
+      )
+        return "network";
+      if (error.status === 404) return "not_found";
+    }
+    if (error instanceof TypeError) return "network";
+    return "failed";
   }
 
   /**
