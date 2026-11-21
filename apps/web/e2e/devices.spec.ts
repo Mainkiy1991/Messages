@@ -42,9 +42,11 @@ async function openDevices(page: Page) {
     await page.getByTestId("profile").click();
   }
   const devicesButton = page.getByTestId("profile-devices");
-  if ((await devicesButton.getAttribute("aria-expanded")) !== "true") {
+  if ((await devicesButton.getAttribute("aria-expanded")) === "true") {
     await devicesButton.click();
+    await expect(devicesButton).toHaveAttribute("aria-expanded", "false");
   }
+  await devicesButton.click();
   await expect(
     page.getByText("Devices where you are signed in", { exact: false }),
   ).toBeVisible();
