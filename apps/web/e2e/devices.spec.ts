@@ -67,6 +67,62 @@ test.describe.serial("devices", () => {
     sharedPhrase = await createAccount(sharedContext.page);
   });
 
+  test("does not reopen the previous account chat after the device is ended", async ({
+    browser,
+  }) => {
+    if (!sharedContext) throw new Error("Devices setup did not run");
+    const first = sharedContext;
+    const profileButton = first.page.getByTestId("profile");
+    if ((await profileButton.getAttribute("aria-expanded")) !== "true") {
+      await profileButton.click();
+    }
+    const userIdButton = first.page.getByRole("button", { name: "User ID" });
+    if ((await userIdButton.getAttribute("aria-expanded")) !== "true") {
+      await userIdButton.click();
+    }
+    const accountAId = await first.page.getByTestId("user-id").innerText();
+    await profileButton.click();
+    await first.page.getByRole("button", { name: /New chat/u }).click();
+    await first.page.getByTestId("peer-id-input").fill(accountAId);
+    await first.page.getByTestId("new-chat").click();
+    await expect(first.page.getByTestId("saved-chat-title")).toBeVisible();
+
+    const second = await contextPage(browser);
+    await signIn(second.page, sharedPhrase);
+    await openDevices(second.page);
+    await second.page.getByTestId("devices-revoke-others").click();
+    await expect(
+      second.page.getByText("Sign out on all other devices?"),
+    ).toBeVisible();
+    await second.page.getByTestId("devices-revoke-others-confirm").click();
+
+    await expect(first.page.getByTestId("device-revoked-notice")).toBeVisible();
+    await expect(first.page.getByTestId("create-account")).toBeVisible();
+    await first.page.getByTestId("create-account").click();
+    await first.page.getByRole("button", { name: "Continue" }).click();
+    const words = await first.page
+      .getByTestId("seed-phrase")
+      .locator("li > span:last-child")
+      .allTextContents();
+    const inputs = first.page.locator('form input[autocomplete="off"]');
+    for (let i = 0; i < (await inputs.count()); i++) {
+      const prompt = await inputs.nth(i).locator("xpath=..").innerText();
+      const position = Number(prompt.match(/#(\d+)/)?.[1]);
+      await inputs.nth(i).fill(words[position - 1]!.trim());
+    }
+    await first.page.getByLabel("I have saved the phrase").check();
+    await first.page
+      .getByRole("button", { name: "Finish account setup" })
+      .click();
+    await expect(first.page.getByTestId("profile")).toBeVisible();
+    await expect(first.page.getByTestId("saved-chat-title")).toHaveCount(0);
+    await expect(first.page.locator(".messenger.show-chat")).toHaveCount(0);
+    await expect(first.page.locator("body")).not.toContainText(accountAId);
+
+    sharedContext = second;
+    await first.context.close();
+  });
+
   test.afterAll(async () => {
     await sharedContext?.context.close();
     sharedContext = null;
@@ -180,60 +236,6 @@ test.describe.serial("devices", () => {
     for (const button of await first.page.getByTestId("device-revoke").all()) {
       await expect(button).toBeVisible();
     }
-    await second.context.close();
-  });
-
-  test("does not reopen the previous account chat after the device is ended", async ({
-    browser,
-  }) => {
-    if (!sharedContext) throw new Error("Devices setup did not run");
-    const first = sharedContext;
-    const profileButton = first.page.getByTestId("profile");
-    if ((await profileButton.getAttribute("aria-expanded")) !== "true") {
-      await profileButton.click();
-    }
-    const userIdButton = first.page.getByRole("button", { name: "User ID" });
-    if ((await userIdButton.getAttribute("aria-expanded")) !== "true") {
-      await userIdButton.click();
-    }
-    const accountAId = await first.page.getByTestId("user-id").innerText();
-    await profileButton.click();
-    await first.page.getByRole("button", { name: /New chat/u }).click();
-    await first.page.getByTestId("peer-id-input").fill(accountAId);
-    await first.page.getByTestId("new-chat").click();
-    await expect(first.page.getByTestId("saved-chat-title")).toBeVisible();
-
-    const second = await contextPage(browser);
-    await signIn(second.page, sharedPhrase);
-    await openDevices(second.page);
-    await second.page.getByTestId("devices-revoke-others").click();
-    await expect(
-      second.page.getByText("Sign out on all other devices?"),
-    ).toBeVisible();
-    await second.page.getByTestId("devices-revoke-others-confirm").click();
-
-    await expect(first.page.getByTestId("device-revoked-notice")).toBeVisible();
-    await expect(first.page.getByTestId("create-account")).toBeVisible();
-    await first.page.getByTestId("create-account").click();
-    await first.page.getByRole("button", { name: "Continue" }).click();
-    const words = await first.page
-      .getByTestId("seed-phrase")
-      .locator("li > span:last-child")
-      .allTextContents();
-    const inputs = first.page.locator('form input[autocomplete="off"]');
-    for (let i = 0; i < (await inputs.count()); i++) {
-      const prompt = await inputs.nth(i).locator("xpath=..").innerText();
-      const position = Number(prompt.match(/#(\d+)/)?.[1]);
-      await inputs.nth(i).fill(words[position - 1]!.trim());
-    }
-    await first.page.getByLabel("I have saved the phrase").check();
-    await first.page
-      .getByRole("button", { name: "Finish account setup" })
-      .click();
-    await expect(first.page.getByTestId("profile")).toBeVisible();
-    await expect(first.page.getByTestId("saved-chat-title")).toHaveCount(0);
-    await expect(first.page.locator(".messenger.show-chat")).toHaveCount(0);
-    await expect(first.page.locator("body")).not.toContainText(accountAId);
     await second.context.close();
   });
 });
