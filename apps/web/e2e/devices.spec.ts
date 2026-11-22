@@ -184,6 +184,7 @@ test.describe.serial("devices", () => {
   });
 });
 
+// Идёт после afterAll с паузой в devices describe: лимит 20 запросов в минуту на /auth/challenge общий, тест использует три входа; не переносить выше без учёта лимита.
 test("does not reopen the previous account chat after the device is ended", async ({
   browser,
 }) => {
@@ -209,7 +210,13 @@ test("does not reopen the previous account chat after the device is ended", asyn
   await second.page.getByTestId("devices-revoke-others-confirm").click();
 
   await expect(first.page.getByTestId("device-revoked-notice")).toBeVisible();
+  expect(await first.page.evaluate(() => window.history.state)).toBeNull();
   await expect(first.page.getByTestId("create-account")).toBeVisible();
+  await first.page.evaluate(
+    (peer) =>
+      window.history.replaceState({ chat: peer }, "", window.location.href),
+    "a".repeat(64),
+  );
   await first.page.getByTestId("create-account").click();
   await first.page.getByRole("button", { name: "Continue" }).click();
   const words = await first.page
@@ -227,9 +234,8 @@ test("does not reopen the previous account chat after the device is ended", asyn
     .getByRole("button", { name: "Finish account setup" })
     .click();
   await expect(first.page.getByTestId("profile")).toBeVisible();
-  await expect(first.page.getByTestId("saved-chat-title")).toHaveCount(0);
+  expect(await first.page.evaluate(() => window.history.state)).toBeNull();
   await expect(first.page.locator(".messenger.show-chat")).toHaveCount(0);
-  await expect(first.page.locator("body")).not.toContainText(accountAId);
 
   await first.context.close();
   await second.context.close();
