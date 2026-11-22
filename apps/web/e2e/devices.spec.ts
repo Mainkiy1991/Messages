@@ -183,3 +183,60 @@ test.describe.serial("devices", () => {
     await second.context.close();
   });
 });
+
+// Идёт после afterAll с паузой в devices describe: лимит 20 запросов в минуту на /auth/challenge общий, тест использует три входа; не переносить выше без учёта лимита.
+test("does not reopen the previous account chat after the device is ended", async ({
+  browser,
+}) => {
+  const first = await contextPage(browser);
+  const accountAPhrase = await createAccount(first.page);
+  const profileButton = first.page.getByTestId("profile");
+  await profileButton.click();
+  await first.page.getByRole("button", { name: "User ID" }).click();
+  const accountAId = await first.page.getByTestId("user-id").innerText();
+  await profileButton.click();
+  await first.page.getByRole("button", { name: /New chat/u }).click();
+  await first.page.getByTestId("peer-id-input").fill(accountAId);
+  await first.page.getByTestId("new-chat").click();
+  await expect(first.page.getByTestId("saved-chat-title")).toBeVisible();
+
+  const second = await contextPage(browser);
+  await signIn(second.page, accountAPhrase);
+  await openDevices(second.page);
+  await second.page.getByTestId("devices-revoke-others").click();
+  await expect(
+    second.page.getByText("Sign out on all other devices?"),
+  ).toBeVisible();
+  await second.page.getByTestId("devices-revoke-others-confirm").click();
+
+  await expect(first.page.getByTestId("device-revoked-notice")).toBeVisible();
+  expect(await first.page.evaluate(() => window.history.state)).toBeNull();
+  await expect(first.page.getByTestId("create-account")).toBeVisible();
+  await first.page.evaluate(
+    (peer) =>
+      window.history.replaceState({ chat: peer }, "", window.location.href),
+    "a".repeat(64),
+  );
+  await first.page.getByTestId("create-account").click();
+  await first.page.getByRole("button", { name: "Continue" }).click();
+  const words = await first.page
+    .getByTestId("seed-phrase")
+    .locator("li > span:last-child")
+    .allTextContents();
+  const inputs = first.page.locator('form input[autocomplete="off"]');
+  for (let i = 0; i < (await inputs.count()); i++) {
+    const prompt = await inputs.nth(i).locator("xpath=..").innerText();
+    const position = Number(prompt.match(/#(\d+)/)?.[1]);
+    await inputs.nth(i).fill(words[position - 1]!.trim());
+  }
+  await first.page.getByLabel("I have saved the phrase").check();
+  await first.page
+    .getByRole("button", { name: "Finish account setup" })
+    .click();
+  await expect(first.page.getByTestId("profile")).toBeVisible();
+  expect(await first.page.evaluate(() => window.history.state)).toBeNull();
+  await expect(first.page.locator(".messenger.show-chat")).toHaveCount(0);
+
+  await first.context.close();
+  await second.context.close();
+});
