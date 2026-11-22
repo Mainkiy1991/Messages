@@ -189,6 +189,11 @@ function App() {
   const longPressHandlersRef = useRef(new Map<string, LongPressHandlers>());
   const chatPointerTypesRef = useRef(new Map<string, string>());
 
+  function clearChatHistoryEntry() {
+    window.history.replaceState(null, "", window.location.href);
+    chatHistoryRef.current = false;
+  }
+
   useEffect(() => {
     const timer = window.setInterval(
       () => setPresenceClock(Date.now()),
@@ -316,6 +321,7 @@ function App() {
       presence: {},
     });
     setPhrase("");
+    clearChatHistoryEntry();
     setScreen("home");
     setHasError(false);
   }
@@ -562,8 +568,7 @@ function App() {
     await controllerRef.current?.logout();
     controllerRef.current = null;
     await clearSession();
-    window.history.replaceState(null, "", window.location.href);
-    chatHistoryRef.current = false;
+    clearChatHistoryEntry();
     setKeys(null);
     setChatState({
       chats: [],
@@ -846,6 +851,7 @@ function App() {
           try {
             await clearSession();
           } finally {
+            clearChatHistoryEntry();
             setKeys(null);
             setChatState({
               chats: [],
