@@ -191,6 +191,7 @@ suite("server authentication (PostgreSQL)", () => {
       keys: accountKeys,
       device: registered.device,
       deviceId: registered.deviceId,
+      response: registered.response,
     };
   }
 
@@ -5218,9 +5219,8 @@ suite("server authentication (PostgreSQL)", () => {
   });
 
   it("lists only the user's active devices with correct current flags", async () => {
-    const accountA = await createAccount();
-    const deviceA = await registerDevice(accountA.keys);
-    const deviceB = await registerDevice(accountA.keys);
+    const deviceA = await createAccount();
+    const deviceB = await registerDevice(deviceA.keys);
     expect(
       (await app.inject({ method: "GET", url: "/devices" })).statusCode,
     ).toBe(401);
@@ -5344,13 +5344,13 @@ suite("server authentication (PostgreSQL)", () => {
   });
 
   it("revokes other devices and legacy sessions while preserving the current session", async () => {
-    const account1 = await createAccount();
-    const deviceA = await registerDevice(account1.keys);
+    const deviceA = await createAccount();
+    const account1 = deviceA;
     const deviceB = await registerDevice(account1.keys);
     const deviceC = await registerDevice(account1.keys);
     const legacyToken = await insertLegacySession(account1.userId);
-    const account2 = await createAccount();
-    const deviceD = await registerDevice(account2.keys);
+    const deviceD = await createAccount();
+    const account2 = deviceD;
     const revoke = await app.inject({
       method: "POST",
       url: "/devices/revoke-others",
@@ -5428,7 +5428,7 @@ suite("server authentication (PostgreSQL)", () => {
   it("limits a user to twenty active devices and revokes the oldest", async () => {
     const account = await createAccount();
     const registeredDevices: Awaited<ReturnType<typeof registerDevice>>[] = [];
-    for (let index = 0; index < 21; index++) {
+    for (let index = 0; index < 20; index++) {
       const registered = await registerDevice(account.keys);
       registeredDevices.push(registered);
       await pool!.query(
@@ -5453,7 +5453,7 @@ suite("server authentication (PostgreSQL)", () => {
     );
     expect(
       statuses.rows.find(
-        (row) => row.device_id === registeredDevices[20]!.deviceId,
+        (row) => row.device_id === registeredDevices[19]!.deviceId,
       )!.revoked_at,
     ).toBeNull();
     expect(
