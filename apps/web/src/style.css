@@ -856,8 +856,7 @@ select {
   pointer-events: auto;
 }
 @media (hover: hover) {
-  .message-row:hover .message-edit,
-  .message-row:focus-within .message-edit {
+  .message-row:hover .message-edit {
     opacity: 1;
     pointer-events: auto;
   }
@@ -918,11 +917,15 @@ select {
   pointer-events: auto;
 }
 @media (hover: hover) {
-  .message-row:hover .message-delete,
-  .message-row:focus-within .message-delete {
+  .message-row:hover .message-delete {
     opacity: 1;
     pointer-events: auto;
   }
+}
+.message-edit:focus-visible,
+.message-delete:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
 }
 .message-delete-icon {
   width: 15px;
