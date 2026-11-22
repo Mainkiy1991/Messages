@@ -188,10 +188,16 @@ test.describe.serial("devices", () => {
   }) => {
     if (!sharedContext) throw new Error("Devices setup did not run");
     const first = sharedContext;
-    await first.page.getByTestId("profile").click();
-    await first.page.getByRole("button", { name: "User ID" }).click();
+    const profileButton = first.page.getByTestId("profile");
+    if ((await profileButton.getAttribute("aria-expanded")) !== "true") {
+      await profileButton.click();
+    }
+    const userIdButton = first.page.getByRole("button", { name: "User ID" });
+    if ((await userIdButton.getAttribute("aria-expanded")) !== "true") {
+      await userIdButton.click();
+    }
     const accountAId = await first.page.getByTestId("user-id").innerText();
-    await first.page.getByTestId("profile").click();
+    await profileButton.click();
     await first.page.getByRole("button", { name: /New chat/u }).click();
     await first.page.getByTestId("peer-id-input").fill(accountAId);
     await first.page.getByTestId("new-chat").click();
