@@ -1371,6 +1371,60 @@ test.describe("real browser chat", () => {
     await expect(second.page.getByTestId("unread-count")).toHaveCount(0);
   });
 
+  test("message buttons appear on keyboard focus only (focus-visible)", async ({
+    browser,
+  }) => {
+    const a = await openUser(browser);
+    const alice = await createAccount(a.page);
+
+    await a.page.getByRole("button", { name: /New chat/u }).click();
+    await a.page.getByTestId("peer-id-input").fill(alice.id);
+    await a.page.getByTestId("new-chat").click();
+    await expect(a.page.getByTestId("saved-chat-title")).toHaveText(
+      "Saved messages",
+    );
+
+    const messageText = `Keyboard focus message ${Date.now()}`;
+    await send(a.page, messageText);
+    const row = a.page
+      .getByTestId("message-row")
+      .filter({ hasText: messageText });
+    const edit = row.getByTestId("edit-message");
+    const remove = row.getByTestId("delete-message");
+    await expect(edit).toBeVisible();
+    await a.page.mouse.move(0, 0);
+    await expect
+      .poll(() => edit.evaluate((element) => getComputedStyle(element).opacity))
+      .toBe("0");
+
+    await a.page.getByTestId("chat-menu").focus();
+    let focusedEdit = false;
+    for (let index = 0; index < 10; index += 1) {
+      await a.page.keyboard.press("Tab");
+      focusedEdit = await a.page.evaluate(
+        () =>
+          document.activeElement?.getAttribute("data-testid") ===
+          "edit-message",
+      );
+      if (focusedEdit) break;
+    }
+    expect(focusedEdit).toBe(true);
+    await expect
+      .poll(() => edit.evaluate((element) => getComputedStyle(element).opacity))
+      .toBe("1");
+
+    await a.page.keyboard.press("Tab");
+    await expect(remove).toBeFocused();
+    await expect
+      .poll(() =>
+        remove.evaluate((element) => getComputedStyle(element).opacity),
+      )
+      .toBe("1");
+    await expect
+      .poll(() => edit.evaluate((element) => getComputedStyle(element).opacity))
+      .toBe("0");
+  });
+
   test("shows the empty saved messages row first with a hint", async ({
     browser,
   }) => {
