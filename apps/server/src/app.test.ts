@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Socket } from "node:net";
 import pg from "pg";
 import WebSocket from "ws";
@@ -16,9 +16,9 @@ import {
   encryptHistoryEntry,
   encryptTextMessage,
   generateDeviceKeys,
-  signAuth,
   signDeviceAuth,
   signDeviceRegistration,
+  signAuth,
   signKeyBinding,
   generateMnemonic,
   newReplayMessageId,
@@ -180,73 +180,63 @@ suite("server authentication (PostgreSQL)", () => {
     };
   }
 
-  function loginPayload(
-    challenge: { challengeId: string; challenge: string },
-    overrides: Record<string, unknown> = {},
-  ) {
-    return {
-      challengeId: challenge.challengeId,
-      identityPublicKey,
-      encryptionPublicKey,
-      keyBindingSignature: bytesToHex(
-        signKeyBinding(keys.identity.privateKey, keys.encryption.publicKey),
-      ),
-      signature: bytesToHex(
-        signAuth(
-          keys.identity.privateKey,
-          challenge.challengeId,
-          challenge.challenge,
-        ),
-      ),
-      ...overrides,
-    };
-  }
-
-  async function login(target = app) {
-    const challenge = await createChallenge(target);
-    const response = await target.inject({
-      method: "POST",
-      url: "/auth/login",
-      headers: { "x-forwarded-for": challenge.forwardedFor },
-      payload: loginPayload(challenge),
-    });
-    return { challenge, response };
-  }
-
   async function createAccount() {
     const accountKeys = deriveKeys(generateMnemonic(12));
     const accountId = bytesToHex(accountKeys.identity.publicKey);
-    const accountEncryption = bytesToHex(accountKeys.encryption.publicKey);
-    const forwardedFor = `198.51.100.${accountIp++}`;
-    const challenge = await createChallenge(app, forwardedFor);
-    const response = await app.inject({
-      method: "POST",
-      url: "/auth/login",
-      headers: { "x-forwarded-for": forwardedFor },
-      payload: {
-        challengeId: challenge.challengeId,
-        identityPublicKey: accountId,
-        encryptionPublicKey: accountEncryption,
-        keyBindingSignature: bytesToHex(
-          signKeyBinding(
-            accountKeys.identity.privateKey,
-            accountKeys.encryption.publicKey,
-          ),
-        ),
-        signature: bytesToHex(
-          signAuth(
-            accountKeys.identity.privateKey,
-            challenge.challengeId,
-            challenge.challenge,
-          ),
-        ),
-      },
-    });
-    expect(response.statusCode).toBe(200);
+    const registered = await registerDevice(accountKeys);
+    expect(registered.response.statusCode).toBe(200);
     return {
       userId: accountId,
-      token: response.json().token as string,
+      token: registered.response.json().token as string,
       keys: accountKeys,
+      device: registered.device,
+      deviceId: registered.deviceId,
+    };
+  }
+
+  async function insertLegacySession(userId: string) {
+    const token = randomBytes(32).toString("base64url");
+    const tokenHash = createHash("sha256").update(token).digest("hex");
+    await pool!.query(
+      "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,$3)",
+      [tokenHash, userId, new Date(clock + 30 * 24 * 60 * 60 * 1000)],
+    );
+    return token;
+  }
+
+  function deviceRegistrationPayload(
+    accountKeys: typeof keys,
+    challenge: { challengeId: string; challenge: string },
+    device: ReturnType<typeof generateDeviceKeys>,
+    overrides: Record<string, unknown> = {},
+  ) {
+    const deviceId = deviceIdFromPublicKey(device.publicKey);
+    return {
+      challengeId: challenge.challengeId,
+      identityPublicKey: bytesToHex(accountKeys.identity.publicKey),
+      encryptionPublicKey: bytesToHex(accountKeys.encryption.publicKey),
+      keyBindingSignature: bytesToHex(
+        signKeyBinding(
+          accountKeys.identity.privateKey,
+          accountKeys.encryption.publicKey,
+        ),
+      ),
+      devicePublicKey: bytesToHex(device.publicKey),
+      deviceLabel: encryptDeviceLabel({
+        historyKey: accountKeys.historyKey,
+        deviceId,
+        browser: "Test Browser",
+        os: "Test OS",
+      }),
+      signature: bytesToHex(
+        signDeviceRegistration(
+          accountKeys.identity.privateKey,
+          challenge.challengeId,
+          challenge.challenge,
+          device.publicKey,
+        ),
+      ),
+      ...overrides,
     };
   }
 
@@ -266,27 +256,9 @@ suite("server authentication (PostgreSQL)", () => {
       method: "POST",
       url: "/auth/device/register",
       headers: { "x-forwarded-for": challenge.forwardedFor },
-      payload: {
-        challengeId: challenge.challengeId,
-        identityPublicKey: bytesToHex(accountKeys.identity.publicKey),
-        encryptionPublicKey: bytesToHex(accountKeys.encryption.publicKey),
-        keyBindingSignature: bytesToHex(
-          signKeyBinding(
-            accountKeys.identity.privateKey,
-            accountKeys.encryption.publicKey,
-          ),
-        ),
-        devicePublicKey: bytesToHex(device.publicKey),
+      payload: deviceRegistrationPayload(accountKeys, challenge, device, {
         deviceLabel,
-        signature: bytesToHex(
-          signDeviceRegistration(
-            accountKeys.identity.privateKey,
-            challenge.challengeId,
-            challenge.challenge,
-            device.publicKey,
-          ),
-        ),
-      },
+      }),
     });
     return { challenge, device, deviceId, deviceLabel, response };
   }
@@ -433,87 +405,65 @@ suite("server authentication (PostgreSQL)", () => {
     return randomBytes(16).toString("hex");
   }
 
-  it("logs in and completes challenge → login → /me", async () => {
-    const { response } = await login();
-    expect(response.statusCode).toBe(200);
-    const { token, userId } = response.json();
-    expect(userId).toBe(identityPublicKey);
-    const me = await app.inject({
-      method: "GET",
-      url: "/me",
-      headers: { authorization: `Bearer ${token}` },
-    });
-    expect(me.statusCode).toBe(200);
-    expect(me.json().userId).toBe(userId);
-  });
-
-  it("rejects reusing a challenge", async () => {
-    const challenge = await createChallenge();
-    const payload = loginPayload(challenge);
-    expect(
-      (await app.inject({ method: "POST", url: "/auth/login", payload }))
-        .statusCode,
-    ).toBe(200);
-    const repeated = await app.inject({
+  it("old login endpoint answers 410 login_removed", async () => {
+    const response = await app.inject({
       method: "POST",
       url: "/auth/login",
-      payload,
+      payload: { malformed: true },
     });
-    expect(repeated.statusCode).toBe(401);
-    expect(repeated.json()).toEqual({ error: "invalid_credentials" });
+    expect(response.statusCode).toBe(410);
+    expect(response.json()).toEqual({ error: "login_removed" });
   });
 
-  it("rejects an expired challenge", async () => {
+  it("rejects expired device registration challenges", async () => {
     const challenge = await createChallenge();
+    const device = generateDeviceKeys();
+    const payload = deviceRegistrationPayload(keys, challenge, device);
     clock += 61_000;
     const response = await app.inject({
       method: "POST",
-      url: "/auth/login",
-      payload: loginPayload(challenge),
+      url: "/auth/device/register",
+      headers: { "x-forwarded-for": challenge.forwardedFor },
+      payload,
     });
     expect(response.statusCode).toBe(401);
     expect(response.json()).toEqual({ error: "invalid_credentials" });
   });
 
-  it("rejects an invalid signature", async () => {
+  it("rejects device registrations signed by a different identity key", async () => {
     const challenge = await createChallenge();
-    const response = await app.inject({
-      method: "POST",
-      url: "/auth/login",
-      payload: loginPayload(challenge, { signature: "00".repeat(64) }),
-    });
-    expect(response.statusCode).toBe(401);
-    expect(response.json()).toEqual({ error: "invalid_credentials" });
-  });
-
-  it("rejects a signature from a different identity key", async () => {
-    const challenge = await createChallenge();
+    const device = generateDeviceKeys();
     const foreignKeys = deriveKeys(
       "legal winner thank year wave sausage worth useful legal winner thank yellow",
     );
+    const payload = deviceRegistrationPayload(keys, challenge, device, {
+      signature: bytesToHex(
+        signDeviceRegistration(
+          foreignKeys.identity.privateKey,
+          challenge.challengeId,
+          challenge.challenge,
+          device.publicKey,
+        ),
+      ),
+    });
     const response = await app.inject({
       method: "POST",
-      url: "/auth/login",
-      payload: loginPayload(challenge, {
-        signature: bytesToHex(
-          signAuth(
-            foreignKeys.identity.privateKey,
-            challenge.challengeId,
-            challenge.challenge,
-          ),
-        ),
-      }),
+      url: "/auth/device/register",
+      headers: { "x-forwarded-for": challenge.forwardedFor },
+      payload,
     });
     expect(response.statusCode).toBe(401);
     expect(response.json()).toEqual({ error: "invalid_credentials" });
   });
 
-  it("rejects encryption key substitution without a valid binding", async () => {
+  it("rejects encryption key substitution without a valid device binding", async () => {
     const challenge = await createChallenge();
+    const device = generateDeviceKeys();
     const response = await app.inject({
       method: "POST",
-      url: "/auth/login",
-      payload: loginPayload(challenge, {
+      url: "/auth/device/register",
+      headers: { "x-forwarded-for": challenge.forwardedFor },
+      payload: deviceRegistrationPayload(keys, challenge, device, {
         encryptionPublicKey: "00".repeat(32),
       }),
     });
@@ -537,8 +487,7 @@ suite("server authentication (PostgreSQL)", () => {
   });
 
   it("returns found and missing public keys", async () => {
-    const { response: loginResponse } = await login();
-    const token = loginResponse.json().token;
+    const token = (await registerDevice()).response.json().token;
     const found = await app.inject({
       method: "GET",
       url: `/users/${identityPublicKey}/keys`,
@@ -555,8 +504,7 @@ suite("server authentication (PostgreSQL)", () => {
   });
 
   it("invalidates a session after logout", async () => {
-    const { response: loginResponse } = await login();
-    const token = loginResponse.json().token;
+    const token = (await registerDevice()).response.json().token;
     expect(
       (
         await app.inject({
@@ -593,8 +541,7 @@ suite("server authentication (PostgreSQL)", () => {
   });
 
   it("uses the token identity and ignores X-Auth-User-Id", async () => {
-    const { response: loginResponse } = await login();
-    const token = loginResponse.json().token;
+    const token = (await registerDevice()).response.json().token;
     const me = await app.inject({
       method: "GET",
       url: "/me?x=1",
@@ -1941,17 +1888,19 @@ suite("server authentication (PostgreSQL)", () => {
         authorization: `Bearer ${deviceSession.response.json().token}`,
       },
     });
-    const legacy = await login();
+    const legacyToken = await insertLegacySession(
+      deviceSession.response.json().userId,
+    );
     const response = await app.inject({
       method: "POST",
       url: "/auth/logout",
-      headers: { authorization: `Bearer ${legacy.response.json().token}` },
+      headers: { authorization: `Bearer ${legacyToken}` },
     });
     expect(response.statusCode).toBe(204);
     const me = await app.inject({
       method: "GET",
       url: "/me",
-      headers: { authorization: `Bearer ${legacy.response.json().token}` },
+      headers: { authorization: `Bearer ${legacyToken}` },
     });
     expect(me.statusCode).toBe(401);
     const after = await app.inject({
@@ -5339,8 +5288,7 @@ suite("server authentication (PostgreSQL)", () => {
 
   it("deletes a device, protects the current device and repeats as 204", async () => {
     const registered = await registerDevice();
-    const legacy = await login();
-    expect(legacy.response.statusCode).toBe(200);
+    const otherDevice = await registerDevice();
     const current = await app.inject({
       method: "DELETE",
       url: `/devices/${registered.deviceId}`,
@@ -5351,7 +5299,7 @@ suite("server authentication (PostgreSQL)", () => {
     const deleted = await app.inject({
       method: "DELETE",
       url: `/devices/${registered.deviceId}`,
-      headers: { authorization: `Bearer ${legacy.response.json().token}` },
+      headers: { authorization: `Bearer ${otherDevice.response.json().token}` },
     });
     expect(deleted.statusCode).toBe(204);
     expect(
@@ -5368,7 +5316,7 @@ suite("server authentication (PostgreSQL)", () => {
     const repeated = await app.inject({
       method: "DELETE",
       url: `/devices/${registered.deviceId}`,
-      headers: { authorization: `Bearer ${legacy.response.json().token}` },
+      headers: { authorization: `Bearer ${otherDevice.response.json().token}` },
     });
     expect(repeated.statusCode).toBe(204);
   });
@@ -5400,6 +5348,7 @@ suite("server authentication (PostgreSQL)", () => {
     const deviceA = await registerDevice(account1.keys);
     const deviceB = await registerDevice(account1.keys);
     const deviceC = await registerDevice(account1.keys);
+    const legacyToken = await insertLegacySession(account1.userId);
     const account2 = await createAccount();
     const deviceD = await registerDevice(account2.keys);
     const revoke = await app.inject({
@@ -5414,7 +5363,7 @@ suite("server authentication (PostgreSQL)", () => {
     for (const token of [
       deviceA.response.json().token,
       deviceB.response.json().token,
-      account1.token,
+      legacyToken,
     ]) {
       expect(
         (
@@ -5550,11 +5499,13 @@ suite("server authentication (PostgreSQL)", () => {
     expect(oldest.rowCount).toBe(0);
   });
 
-  it("keeps legacy login sessions compatible and marks them without a device", async () => {
-    const legacy = await createAccount();
+  it("marks directly inserted legacy sessions without a device", async () => {
+    const account = await createAccount();
+    const legacyToken = await insertLegacySession(account.userId);
+    const tokenHash = createHash("sha256").update(legacyToken).digest("hex");
     const actual = await pool!.query<{ device_id: string | null }>(
-      "SELECT device_id FROM sessions WHERE user_id=$1 AND device_id IS NULL",
-      [legacy.userId],
+      "SELECT device_id FROM sessions WHERE user_id=$1 AND token_hash=$2",
+      [account.userId, tokenHash],
     );
     expect(actual.rows.length).toBeGreaterThan(0);
     expect(actual.rows[0]!.device_id).toBeNull();

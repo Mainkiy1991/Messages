@@ -11,7 +11,6 @@ import {
   deviceIdFromPublicKey,
   hexToBytes,
   userIdFromPublicKey,
-  verifyAuth,
   verifyDeviceAuth,
   verifyDeviceRegistration,
   verifyKeyBinding,
@@ -40,13 +39,6 @@ const challengeTtl = 60_000;
 const sessionTtl = 30 * 24 * 60 * 60 * 1000;
 const sessionCleanupInterval = 60 * 60 * 1000;
 const challengeSchema = z.object({}).strict();
-const loginSchema = z.object({
-  challengeId: z.string().regex(/^[0-9a-f]{32}$/u),
-  identityPublicKey: z.string().regex(/^[0-9a-f]{64}$/u),
-  encryptionPublicKey: z.string().regex(/^[0-9a-f]{64}$/u),
-  keyBindingSignature: z.string().regex(/^[0-9a-f]{128}$/u),
-  signature: z.string().regex(/^[0-9a-f]{128}$/u),
-});
 const deviceRegisterSchema = z
   .object({
     challengeId: z.string().regex(/^[0-9a-f]{32}$/u),
@@ -339,58 +331,7 @@ export async function buildApp(options: {
   app.post(
     "/auth/login",
     { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
-    async (request, reply) => {
-      const parsed = loginSchema.safeParse(request.body);
-      if (!parsed.success) {
-        return reply.code(401).send({ error: "invalid_credentials" });
-      }
-      const input = parsed.data;
-      const pending = challenges.get(input.challengeId);
-      challenges.delete(input.challengeId);
-      if (!pending || pending.expiresAt <= now()) {
-        return reply.code(401).send({ error: "invalid_credentials" });
-      }
-      const identity = hexToBytes(input.identityPublicKey);
-      const encryption = hexToBytes(input.encryptionPublicKey);
-      const signature = hexToBytes(input.signature);
-      const binding = hexToBytes(input.keyBindingSignature);
-      if (
-        !verifyAuth(
-          identity,
-          input.challengeId,
-          pending.challenge,
-          signature,
-        ) ||
-        !verifyKeyBinding(identity, encryption, binding)
-      ) {
-        return reply.code(401).send({ error: "invalid_credentials" });
-      }
-      const userId = userIdFromPublicKey(identity);
-      const expiresAt = new Date(now() + sessionTtl);
-      const token = randomBytes(32).toString("base64url");
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        await client.query(
-          `INSERT INTO users(id, encryption_public_key, key_binding_signature, last_seen_at)
-           VALUES($1,$2,$3,now()) ON CONFLICT(id) DO UPDATE SET
-           encryption_public_key=EXCLUDED.encryption_public_key,
-           key_binding_signature=EXCLUDED.key_binding_signature,last_seen_at=now()`,
-          [userId, input.encryptionPublicKey, input.keyBindingSignature],
-        );
-        await client.query(
-          "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,$3)",
-          [hashToken(token), userId, expiresAt],
-        );
-        await client.query("COMMIT");
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      } finally {
-        client.release();
-      }
-      return { token, expiresAt: expiresAt.toISOString(), userId };
-    },
+    async (_request, reply) => reply.code(410).send({ error: "login_removed" }),
   );
 
   app.post(

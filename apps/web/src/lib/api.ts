@@ -1,7 +1,6 @@
 import {
   bytesToHex,
   hexToBytes,
-  signAuth,
   signKeyBinding,
   userIdFromPublicKey,
   verifyKeyBinding,
@@ -142,52 +141,6 @@ async function request<T>(
   } finally {
     clearTimer(timer);
   }
-}
-
-export async function loginToServer(
-  keys: DerivedKeys,
-  fetcher: FetchLike = fetch,
-): Promise<ServerSession> {
-  const challenge = await request<{ challengeId: string; challenge: string }>(
-    fetcher,
-    "/auth/challenge",
-    undefined,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    },
-  );
-  const identityPublicKey = bytesToHex(keys.identity.publicKey);
-  const encryptionPublicKey = bytesToHex(keys.encryption.publicKey);
-  const result = await request<ServerSession>(
-    fetcher,
-    "/auth/login",
-    undefined,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        challengeId: challenge.challengeId,
-        identityPublicKey,
-        encryptionPublicKey,
-        keyBindingSignature: bytesToHex(
-          signKeyBinding(keys.identity.privateKey, keys.encryption.publicKey),
-        ),
-        signature: bytesToHex(
-          signAuth(
-            keys.identity.privateKey,
-            challenge.challengeId,
-            challenge.challenge,
-          ),
-        ),
-      }),
-    },
-  );
-  if (result.userId !== userIdFromPublicKey(keys.identity.publicKey))
-    throw new Error("Server returned an unexpected user ID");
-  await saveServerSession(result, keys);
-  return result;
 }
 
 export async function registerDevice(
@@ -342,7 +295,7 @@ export async function loginWithKeys(
   fetcher: FetchLike = fetch,
 ): Promise<ServerSession> {
   if (isDeviceKeys(keys)) return deviceLogin(keys, fetcher);
-  return loginToServer(keys, fetcher);
+  throw new DeviceRevokedError();
 }
 
 export async function getUserKeys(

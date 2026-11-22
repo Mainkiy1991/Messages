@@ -3,8 +3,11 @@ import WebSocket from "ws";
 import {
   bytesToHex,
   deriveKeys,
+  deviceIdFromPublicKey,
+  encryptDeviceLabel,
+  generateDeviceKeys,
   generateMnemonic,
-  signAuth,
+  signDeviceRegistration,
   signKeyBinding,
 } from "@messages/crypto";
 import { loadServerEnv } from "./env.js";
@@ -28,6 +31,14 @@ function fail(name: string): never {
 async function createAccount() {
   const keys = deriveKeys(generateMnemonic(12));
   const identityPublicKey = bytesToHex(keys.identity.publicKey);
+  const device = generateDeviceKeys();
+  const deviceId = deviceIdFromPublicKey(device.publicKey);
+  const deviceLabel = encryptDeviceLabel({
+    historyKey: keys.historyKey,
+    deviceId,
+    browser: "Smoke Test",
+    os: "Server",
+  });
   const challengeResponse = await fetch(new URL("/auth/challenge", baseUrl), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -38,7 +49,7 @@ async function createAccount() {
     challengeId: string;
     challenge: string;
   };
-  const loginResponse = await fetch(new URL("/auth/login", baseUrl), {
+  const loginResponse = await fetch(new URL("/auth/device/register", baseUrl), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -48,11 +59,14 @@ async function createAccount() {
       keyBindingSignature: bytesToHex(
         signKeyBinding(keys.identity.privateKey, keys.encryption.publicKey),
       ),
+      devicePublicKey: bytesToHex(device.publicKey),
+      deviceLabel,
       signature: bytesToHex(
-        signAuth(
+        signDeviceRegistration(
           keys.identity.privateKey,
           challenge.challengeId,
           challenge.challenge,
+          device.publicKey,
         ),
       ),
     }),
@@ -61,7 +75,9 @@ async function createAccount() {
   const login = (await loginResponse.json()) as {
     userId: string;
     token: string;
+    deviceId: string;
   };
+  if (login.deviceId !== deviceId) fail("login");
   tokens.push(login.token);
   return login;
 }
