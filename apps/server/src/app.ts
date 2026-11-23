@@ -108,6 +108,17 @@ const contactsSchema = z
       ),
   })
   .strict();
+const pinSettingsSchema = z
+  .object({
+    baseVersion: z
+      .string()
+      .refine(
+        (value) =>
+          /^\d{1,19}$/u.test(value) && BigInt(value) <= 9223372036854775806n,
+      ),
+    blob: z.string(),
+  })
+  .strict();
 const challenges = new Map<string, { challenge: string; expiresAt: number }>();
 const emptyBodySchema = z.object({}).strict();
 const base64Schema = z
@@ -1093,6 +1104,52 @@ export async function buildApp(options: {
       if (updated.rowCount) return { version: updated.rows[0].version };
       const current = await pool.query(
         "SELECT version::text AS version, blob FROM contact_books WHERE user_id=$1",
+        [request.userId],
+      );
+      return reply.code(409).send({
+        error: "version_conflict",
+        version: current.rows[0]?.version ?? "0",
+        blob: current.rows[0]?.blob ?? null,
+      });
+    },
+  );
+  app.get("/pin-settings", { preHandler: authenticate }, async (request) => {
+    const result = await pool.query(
+      "SELECT version::text AS version, blob FROM pin_settings WHERE user_id=$1",
+      [request.userId],
+    );
+    return result.rowCount ? result.rows[0] : { version: "0", blob: null };
+  });
+  app.put(
+    "/pin-settings",
+    {
+      preHandler: authenticate,
+      bodyLimit: 4 * 1024,
+      config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      const parsed = pinSettingsSchema.safeParse(request.body);
+      if (!parsed.success)
+        return reply.code(400).send({ error: "invalid_request" });
+      const { baseVersion, blob } = parsed.data;
+      const decoded = Buffer.from(blob, "base64");
+      if (
+        decoded.toString("base64") !== blob ||
+        decoded.length < 16 ||
+        decoded.length > 1024
+      )
+        return reply.code(400).send({ error: "invalid_request" });
+      const updated = await pool.query(
+        `INSERT INTO pin_settings(user_id, version, blob)
+       SELECT $1, 1, $3
+       WHERE $2::bigint = 0 OR EXISTS(SELECT 1 FROM pin_settings WHERE user_id=$1)
+       ON CONFLICT(user_id) DO UPDATE SET version=pin_settings.version+1, blob=EXCLUDED.blob, updated_at=now()
+       WHERE pin_settings.version=$2::bigint RETURNING version::text AS version`,
+        [request.userId, baseVersion, blob],
+      );
+      if (updated.rowCount) return { version: updated.rows[0].version };
+      const current = await pool.query(
+        "SELECT version::text AS version, blob FROM pin_settings WHERE user_id=$1",
         [request.userId],
       );
       return reply.code(409).send({
