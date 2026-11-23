@@ -3256,13 +3256,19 @@ suite("server authentication (PostgreSQL)", () => {
       blob: firstBlob,
     });
     expect((await put("1", nextBlob)).json()).toEqual({ version: "2" });
+    const concurrentBlobs = [
+      randomBytes(32).toString("base64"),
+      randomBytes(32).toString("base64"),
+    ];
     const concurrent = await Promise.all([
-      put("2", randomBytes(32).toString("base64")),
-      put("2", randomBytes(32).toString("base64")),
+      put("2", concurrentBlobs[0]),
+      put("2", concurrentBlobs[1]),
     ]);
     expect(concurrent.map((response) => response.statusCode).sort()).toEqual([
       200, 409,
     ]);
+    expect((await get(a.token)).json()).toMatchObject({ version: "3" });
+    expect(concurrentBlobs).toContain((await get(a.token)).json().blob);
     expect((await get(b.token)).json()).toEqual({ version: "0", blob: null });
     const secondUserBlob = randomBytes(32).toString("base64");
     expect((await put("0", secondUserBlob, b.token)).json()).toEqual({
@@ -3272,7 +3278,7 @@ suite("server authentication (PostgreSQL)", () => {
       version: "1",
       blob: secondUserBlob,
     });
-    expect((await get(a.token)).json().blob).toBe(nextBlob);
+    expect(concurrentBlobs).toContain((await get(a.token)).json().blob);
     expect((await get(a.token)).json().blob).not.toBe(secondUserBlob);
     expect(
       (await app.inject({ method: "GET", url: "/pin-settings" })).statusCode,
