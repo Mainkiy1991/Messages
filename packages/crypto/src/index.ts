@@ -287,6 +287,7 @@ const MESSAGE_INFO = encoder.encode("messages/v1/message");
 const HISTORY_INFO = encoder.encode("messages/v1/history-entry");
 const CONTACTS_INFO = encoder.encode("messages/v1/contacts");
 const DEVICE_LABEL_INFO = "messages/v1/device-label";
+const PIN_SETTINGS_INFO = "messages/v1/pin-settings";
 const VERSION = 1;
 const MESSAGE_VERSION_V2 = 2;
 const NONCE_LENGTH = 24;
@@ -796,6 +797,144 @@ export function decryptDeviceLabel(input: {
   } catch {
     throw new DecryptError();
   }
+}
+
+export type PinSettings = { enabled: boolean; pin: string; updatedAt: number };
+
+export function encryptPinSettings(input: {
+  historyKey: Uint8Array;
+  userId: string;
+  enabled: boolean;
+  pin: string;
+  updatedAt: number;
+}): string {
+  checkKey(input.historyKey);
+  checkId(input.userId, 64, /^[0-9a-f]{64}$/u);
+  const settings = validatePinSettings(
+    input.enabled,
+    input.pin,
+    input.updatedAt,
+  );
+  const key = hkdf(
+    sha256,
+    input.historyKey,
+    HKDF_SALT,
+    encoder.encode(PIN_SETTINGS_INFO),
+    32,
+  );
+  const nonce = randomBytes(NONCE_LENGTH);
+  const aad = encoder.encode(`${PIN_SETTINGS_INFO}\n${input.userId}`);
+  const json = encoder.encode(JSON.stringify({ v: VERSION, ...settings }));
+  if (json.length > 510) {
+    key.fill(0);
+    json.fill(0);
+    throw new TypeError("PIN settings are too large");
+  }
+  const plaintext = new Uint8Array(512);
+  plaintext[0] = (json.length >> 8) & 0xff;
+  plaintext[1] = json.length & 0xff;
+  plaintext.set(json, 2);
+  json.fill(0);
+  try {
+    const encrypted = xchacha20poly1305(key, nonce, aad).encrypt(plaintext);
+    return bytesToBase64(concat(Uint8Array.of(VERSION), nonce, encrypted));
+  } finally {
+    key.fill(0);
+    plaintext.fill(0);
+  }
+}
+
+export function decryptPinSettings(input: {
+  historyKey: Uint8Array;
+  userId: string;
+  blob: string;
+}): PinSettings {
+  let key: Uint8Array | undefined;
+  let plaintext: Uint8Array | undefined;
+  try {
+    checkKey(input.historyKey);
+    checkId(input.userId, 64, /^[0-9a-f]{64}$/u);
+    if (typeof input.blob !== "string" || input.blob.length > 1024)
+      throw new Error("Invalid PIN settings blob");
+    const packed = base64ToBytes(input.blob);
+    if (packed.length !== 1 + NONCE_LENGTH + 512 + 16 || packed[0] !== VERSION)
+      throw new Error("Invalid PIN settings envelope");
+    const nonce = packed.subarray(1, 1 + NONCE_LENGTH);
+    const aad = encoder.encode(`${PIN_SETTINGS_INFO}\n${input.userId}`);
+    key = hkdf(
+      sha256,
+      input.historyKey,
+      HKDF_SALT,
+      encoder.encode(PIN_SETTINGS_INFO),
+      32,
+    );
+    plaintext = xchacha20poly1305(key, nonce, aad).decrypt(
+      packed.subarray(1 + NONCE_LENGTH),
+    );
+    if (plaintext.length !== 512)
+      throw new Error("Invalid PIN settings length");
+    const jsonLength = (plaintext[0] << 8) | plaintext[1];
+    if (jsonLength > 510) throw new Error("Invalid PIN settings JSON length");
+    for (let i = 2 + jsonLength; i < plaintext.length; i++)
+      if (plaintext[i] !== 0) throw new Error("Invalid PIN settings padding");
+    const value = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(
+        plaintext.subarray(2, 2 + jsonLength),
+      ),
+    ) as Record<string, unknown>;
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      Object.keys(value).length !== 4 ||
+      !["v", "enabled", "pin", "updatedAt"].every((field) =>
+        Object.hasOwn(value, field),
+      ) ||
+      value.v !== VERSION
+    )
+      throw new Error("Invalid PIN settings object");
+    const settings = validatePinSettings(
+      value.enabled,
+      value.pin,
+      value.updatedAt,
+    );
+    if (settings.pin !== value.pin) throw new Error("PIN is not normalized");
+    return settings;
+  } catch {
+    throw new DecryptError();
+  } finally {
+    key?.fill(0);
+    plaintext?.fill(0);
+  }
+}
+
+function validatePinSettings(
+  enabled: unknown,
+  pin: unknown,
+  updatedAt: unknown,
+): PinSettings {
+  if (
+    typeof enabled !== "boolean" ||
+    typeof pin !== "string" ||
+    typeof updatedAt !== "number" ||
+    !Number.isSafeInteger(updatedAt) ||
+    updatedAt < 0
+  )
+    throw new TypeError("Invalid PIN settings");
+  const normalizedPin = pin.normalize("NFKC");
+  const pinBytes = encoder.encode(normalizedPin);
+  if (
+    (enabled &&
+      (Array.from(normalizedPin).length < 6 ||
+        Array.from(normalizedPin).length > 64 ||
+        pinBytes.length > 256)) ||
+    (!enabled && pin !== "")
+  ) {
+    pinBytes.fill(0);
+    throw new TypeError("Invalid PIN");
+  }
+  pinBytes.fill(0);
+  return { enabled, pin: normalizedPin, updatedAt };
 }
 
 function validateDeviceLabelField(value: unknown): asserts value is string {
