@@ -608,6 +608,11 @@ export class ChatController {
     }
   }
 
+  async withSession<T>(request: (token: string) => Promise<T>): Promise<T> {
+    const session = await this.connection.ensureSession();
+    return this.withFreshSession(session.token, request);
+  }
+
   private beginWaking(): void {
     if (
       this.stopped ||
