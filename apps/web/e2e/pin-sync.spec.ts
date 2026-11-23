@@ -134,6 +134,9 @@ test.describe.serial("shared PIN sync", () => {
       const phrase = await createAccount(a.page);
       await setPin(a.page, "accountPin1");
       await signIn(b.page, phrase);
+      await expect(b.page.getByTestId("pin-sync-notice")).toContainText(
+        /^PIN updated/,
+      );
       await b.page.reload();
       await b.page.getByLabel("PIN").fill("accountPin1");
       await b.page.getByRole("button", { name: "Unlock" }).click();
