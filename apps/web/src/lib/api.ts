@@ -57,6 +57,7 @@ export type HistoryMessage = {
   deleted?: boolean;
 };
 export type ContactBookResponse = { version: string; blob: string | null };
+export type PinSettingsResponse = { version: string; blob: string | null };
 export type DeviceRow = {
   deviceId: string;
   labelCiphertext: string;
@@ -468,6 +469,23 @@ export function putContacts(
   fetcher: FetchLike = fetch,
 ) {
   return request<{ version: string }>(fetcher, "/contacts", token, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ baseVersion, blob }),
+  });
+}
+
+export function getPinSettings(token: string, fetcher: FetchLike = fetch) {
+  return request<PinSettingsResponse>(fetcher, "/pin-settings", token);
+}
+
+export function putPinSettings(
+  token: string,
+  baseVersion: string,
+  blob: string,
+  fetcher: FetchLike = fetch,
+) {
+  return request<{ version: string }>(fetcher, "/pin-settings", token, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ baseVersion, blob }),
