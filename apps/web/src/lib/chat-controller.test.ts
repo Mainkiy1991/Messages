@@ -5748,6 +5748,33 @@ describe("ChatController contact actions", () => {
     nearLimit.stop();
   });
 
+  it("rejects contact actions while contactsError is set without network calls", async () => {
+    const putContacts = vi.fn(async () => ({ version: "2" }));
+    const controller = contactController({}, {}, { putContacts });
+    await loadContactBook(controller);
+    (
+      controller as unknown as { state: { contactsError: boolean } }
+    ).state.contactsError = true;
+    expect(await controller.addContact(bobId, "Bob")).toEqual({
+      ok: false,
+      error: "contacts_not_loaded",
+    });
+    expect(await controller.renameContact(bobId, "Bob")).toEqual({
+      ok: false,
+      error: "contacts_not_loaded",
+    });
+    expect(await controller.saveContactNote(bobId, "note")).toEqual({
+      ok: false,
+      error: "contacts_not_loaded",
+    });
+    expect(await controller.removeContact(bobId)).toEqual({
+      ok: false,
+      error: "contacts_not_loaded",
+    });
+    expect(putContacts).not.toHaveBeenCalled();
+    controller.stop();
+  });
+
   it("validates names and descriptions by trimmed code points and controls", async () => {
     const controller = contactController();
     await loadContactBook(controller);
@@ -5771,7 +5798,20 @@ describe("ChatController contact actions", () => {
       ok: false,
       error: "note_invalid",
     });
-    expect(await controller.addContact(bobId, "Bob", "x".repeat(200))).toEqual({
+    expect(await controller.addContact(bobId, "Bob", "   ")).toEqual({
+      ok: true,
+    });
+    expect(controller.getSnapshot().contactNotes[bobId]).toBeUndefined();
+    const fresh = contactController();
+    await loadContactBook(fresh);
+    expect(await fresh.addContact(bobId, "Bob", "\n")).toEqual({
+      ok: false,
+      error: "note_invalid",
+    });
+    fresh.stop();
+    expect(
+      await controller.addContact(charlieId, "Bob", "x".repeat(200)),
+    ).toEqual({
       ok: true,
     });
     controller.stop();
@@ -5807,6 +5847,19 @@ describe("ChatController contact actions", () => {
       });
       controller.stop();
     }
+    const wrongPeerKey = contactController(
+      {},
+      {},
+      {
+        fetchPeerKeys: async () => userKeys(charlie),
+      },
+    );
+    await loadContactBook(wrongPeerKey);
+    expect(await wrongPeerKey.addContact(bobId, "Bob")).toEqual({
+      ok: false,
+      error: "bad_peer_key",
+    });
+    wrongPeerKey.stop();
     for (const [error, expected] of [
       [new ApiError(500, "failed"), "save_failed"],
       [new TypeError("offline"), "server_unavailable"],
@@ -5872,6 +5925,38 @@ describe("ChatController contact actions", () => {
     expect(writes).toBe(1);
     expect(controller.getSnapshot().contacts[bobId]).toBe("Remote");
     controller.stop();
+
+    let mergeWrites = 0;
+    let retried = "";
+    const merges = contactController(
+      {},
+      {},
+      {
+        putContacts: async (_token, _version, blob) => {
+          mergeWrites++;
+          if (mergeWrites === 1)
+            throw new ApiError(409, "version_conflict", {
+              version: "2",
+              blob: encryptContactBook({
+                historyKey: alice.historyKey,
+                contacts: { [charlieId]: "Charlie" },
+              }),
+            });
+          retried = blob;
+          return { version: "3" };
+        },
+      },
+    );
+    await loadContactBook(merges);
+    expect(await merges.addContact(bobId, "Bob")).toEqual({ ok: true });
+    expect(
+      decryptContactBookFull({ historyKey: alice.historyKey, blob: retried })
+        .contacts,
+    ).toEqual({
+      [bobId]: "Bob",
+      [charlieId]: "Charlie",
+    });
+    merges.stop();
   });
 
   it("renames while retaining notes and reports conflicts against fresh removals", async () => {
@@ -5895,6 +5980,10 @@ describe("ChatController contact actions", () => {
         bobId
       ],
     ).toBe("Note");
+    expect(await controller.renameContact(bobId, "R".repeat(65))).toEqual({
+      ok: false,
+      error: "name_too_long",
+    });
     controller.stop();
 
     let writes = 0;
@@ -5945,6 +6034,8 @@ describe("ChatController contact actions", () => {
     expect(controller.getSnapshot().contactNotes).toEqual({
       [charlieId]: "keep",
     });
+    expect(controller.getSnapshot().chats).toEqual([]);
+    expect(controller.getSnapshot().activePeer).toBe("");
     controller.stop();
 
     let removeWrites = 0;
