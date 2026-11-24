@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
+import { hkdf } from "@noble/hashes/hkdf.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import {
   base64ToBytes,
   bytesToBase64,
@@ -6,10 +9,12 @@ import {
   DecryptError,
   decryptHistoryEntry,
   decryptContactBook,
+  decryptContactBookFull,
   decryptTextMessage,
   deriveKeys,
   encryptHistoryEntry,
   encryptContactBook,
+  CONTACT_BOOK_MAX_BYTES,
   encryptTextMessage,
   newClientMsgId,
   newReplayMessageId,
@@ -67,6 +72,15 @@ describe("encrypted contact books", () => {
     });
   });
 
+  it("reads the compatibility vector with no notes", () => {
+    const blob =
+      "AQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCbgXix4P4PJLLOnCbynEK2BkKpV+4cJ2BZ104XAUIYsuxSBXfTvhDDIYY7z5Olbv73Yuo88YtFML2j99OZtYVwGuKjtO6ZBJ2ZDWIGbjZDldqHR4pmagCuEllL5DD9ZpfsNbXJLPpuhxy+RakI534A==";
+    expect(decryptContactBookFull({ historyKey: contactKey, blob })).toEqual({
+      contacts: { [contactId]: "Alice" },
+      notes: {},
+    });
+  });
+
   it("round-trips names and empty books with a fresh nonce", () => {
     const contacts = { [contactId]: " Алиса 🚀 ", [bobId]: "Bob" };
     const first = encryptContactBook({ historyKey: contactKey, contacts });
@@ -81,6 +95,145 @@ describe("encrypted contact books", () => {
         blob: encryptContactBook({ historyKey: contactKey, contacts: {} }),
       }),
     ).toEqual({});
+  });
+
+  it("round-trips notes and omits an empty notes field", () => {
+    const contacts = { [contactId]: "Alice" };
+    const notes = { [contactId]: "Friend 🚀" };
+    const legacyShape = encryptContactBook({
+      historyKey: contactKey,
+      contacts,
+    });
+    const emptyNotesShape = encryptContactBook({
+      historyKey: contactKey,
+      contacts,
+      notes: {},
+    });
+    const withNotes = encryptContactBook({
+      historyKey: contactKey,
+      contacts,
+      notes,
+    });
+    expect(legacyShape).toHaveLength(emptyNotesShape.length);
+    expect(withNotes.length).toBeGreaterThan(legacyShape.length);
+    expect(
+      decryptContactBookFull({ historyKey: contactKey, blob: withNotes }),
+    ).toEqual({ contacts, notes });
+    expect(new TextDecoder().decode(base64ToBytes(withNotes))).not.toContain(
+      "Friend 🚀",
+    );
+  });
+
+  it("validates notes on encryption, including Unicode code points", () => {
+    const contacts = { [contactId]: "Alice" };
+    for (const note of [
+      "",
+      "  ",
+      "x".repeat(201),
+      "line\nbreak",
+      "bad\u0001",
+    ]) {
+      expect(() =>
+        encryptContactBook({
+          historyKey: contactKey,
+          contacts,
+          notes: { [contactId]: note },
+        }),
+      ).toThrow(TypeError);
+    }
+    expect(() =>
+      encryptContactBook({
+        historyKey: contactKey,
+        contacts,
+        notes: { nope: "note" },
+      }),
+    ).toThrow(TypeError);
+    expect(() =>
+      encryptContactBook({
+        historyKey: contactKey,
+        contacts,
+        notes: { [contactId]: "😀".repeat(200) },
+      }),
+    ).not.toThrow();
+  });
+
+  it("enforces the plaintext contact book byte limit", () => {
+    const under = Object.fromEntries(
+      Array.from({ length: 1000 }, (_, i) => [
+        i.toString(16).padStart(64, "0"),
+        "A",
+      ]),
+    );
+    let noteLength = 200;
+    let notesUnder = Object.fromEntries(
+      Object.keys(under).map((id) => [id, "x".repeat(noteLength)]),
+    );
+    while (
+      new TextEncoder().encode(
+        JSON.stringify({ v: 1, contacts: under, notes: notesUnder }),
+      ).length > CONTACT_BOOK_MAX_BYTES &&
+      noteLength > 0
+    ) {
+      noteLength--;
+      notesUnder = Object.fromEntries(
+        Object.keys(under).map((id) => [id, "x".repeat(noteLength)]),
+      );
+    }
+    expect(() =>
+      encryptContactBook({
+        historyKey: contactKey,
+        contacts: under,
+        notes: notesUnder,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      encryptContactBook({
+        historyKey: contactKey,
+        contacts: under,
+        notes: Object.fromEntries(
+          Object.keys(under).map((id) => [id, "x".repeat(noteLength + 1)]),
+        ),
+      }),
+    ).toThrow(RangeError);
+    const notesOver = Object.fromEntries(
+      Object.keys(under).map((id) => [id, "x".repeat(200)]),
+    );
+    expect(() =>
+      encryptContactBook({
+        historyKey: contactKey,
+        contacts: under,
+        notes: notesOver,
+      }),
+    ).toThrow(RangeError);
+    expect(CONTACT_BOOK_MAX_BYTES).toBe(200 * 1024);
+  });
+
+  it("drops notes for missing contacts and rejects malformed encrypted notes", () => {
+    const info = new TextEncoder().encode("messages/v1/contacts");
+    const salt = new Uint8Array(32);
+    const key = hkdf(sha256, contactKey, salt, info, 32);
+    const nonce = new Uint8Array(24).fill(9);
+    const createBlob = (notes: unknown) => {
+      const plaintext = new TextEncoder().encode(
+        JSON.stringify({ v: 1, contacts: { [contactId]: "Alice" }, notes }),
+      );
+      const ciphertext = xchacha20poly1305(key, nonce, info).encrypt(plaintext);
+      return bytesToBase64(Uint8Array.from([1, ...nonce, ...ciphertext]));
+    };
+    expect(
+      decryptContactBookFull({
+        historyKey: contactKey,
+        blob: createBlob({ ["cd".repeat(32)]: "orphan", [contactId]: "note" }),
+      }).notes,
+    ).toEqual({ [contactId]: "note" });
+    for (const malformed of [123, "x".repeat(201), "bad\u0001", "  "]) {
+      expect(() =>
+        decryptContactBookFull({
+          historyKey: contactKey,
+          blob: createBlob({ [contactId]: malformed }),
+        }),
+      ).toThrow(DecryptError);
+    }
   });
 
   it("rejects corrupt blobs and invalid contact data", () => {
