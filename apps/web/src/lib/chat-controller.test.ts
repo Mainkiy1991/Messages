@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as cryptoModule from "@messages/crypto";
 import {
   bytesToHex,
   decryptContactBook,
+  decryptContactBookFull,
   decryptHistoryEntry,
   decryptTextMessage,
   deriveKeys,
@@ -2374,6 +2376,170 @@ describe("ChatController", () => {
     expect(await controller.saveContactName(bobId, "  Local  ")).toBe(true);
     expect(writes).toBe(2);
     expect(controller.getSnapshot().contacts[bobId]).toBe("Local");
+  });
+
+  it("loads contact descriptions into the snapshot", async () => {
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => ({
+        version: "1",
+        blob: encryptContactBook({
+          historyKey: alice.historyKey,
+          contacts: { [bobId]: "Bob" },
+          notes: { [bobId]: "Work colleague" },
+        }),
+      }),
+    });
+    await (
+      controller as unknown as { loadContacts(token: string): Promise<void> }
+    ).loadContacts("token");
+    expect(controller.getSnapshot().contactNotes).toEqual({
+      [bobId]: "Work colleague",
+    });
+    controller.stop();
+  });
+
+  it("loads old contact books with empty descriptions", async () => {
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => ({
+        version: "1",
+        blob: encryptContactBook({
+          historyKey: alice.historyKey,
+          contacts: { [bobId]: "Bob" },
+        }),
+      }),
+    });
+    await (
+      controller as unknown as { loadContacts(token: string): Promise<void> }
+    ).loadContacts("token");
+    expect(controller.getSnapshot().contactNotes).toEqual({});
+    controller.stop();
+  });
+
+  it("preserves descriptions when renaming a contact", async () => {
+    const initial = encryptContactBook({
+      historyKey: alice.historyKey,
+      contacts: { [bobId]: "Bob", [aliceId]: "Alice" },
+      notes: { [bobId]: "Old friend", [aliceId]: "Other note" },
+    });
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => ({ version: "1", blob: initial }),
+      putContacts: async (_token, _version, blob) => {
+        expect(
+          decryptContactBookFull({ historyKey: alice.historyKey, blob }),
+        ).toEqual({
+          contacts: { [bobId]: "Robert", [aliceId]: "Alice" },
+          notes: { [bobId]: "Old friend", [aliceId]: "Other note" },
+        });
+        return { version: "2" };
+      },
+    });
+    await (
+      controller as unknown as { loadContacts(token: string): Promise<void> }
+    ).loadContacts("token");
+    expect(await controller.saveContactName(bobId, "Robert")).toBe(true);
+    controller.stop();
+  });
+
+  it("removes a contact description with its empty name", async () => {
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => ({
+        version: "1",
+        blob: encryptContactBook({
+          historyKey: alice.historyKey,
+          contacts: { [bobId]: "Bob", [aliceId]: "Alice" },
+          notes: { [bobId]: "Remove me", [aliceId]: "Keep me" },
+        }),
+      }),
+      putContacts: async (_token, _version, blob) => {
+        expect(
+          decryptContactBookFull({ historyKey: alice.historyKey, blob }),
+        ).toEqual({
+          contacts: { [aliceId]: "Alice" },
+          notes: { [aliceId]: "Keep me" },
+        });
+        return { version: "2" };
+      },
+    });
+    await (
+      controller as unknown as { loadContacts(token: string): Promise<void> }
+    ).loadContacts("token");
+    expect(await controller.saveContactName(bobId, "  ")).toBe(true);
+    controller.stop();
+  });
+
+  it("does not restore a contact deleted on the other device after conflict", async () => {
+    const staleId = "cd".repeat(32);
+    let writes = 0;
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => ({
+        version: "2",
+        blob: encryptContactBook({
+          historyKey: alice.historyKey,
+          contacts: { [bobId]: "Bob" },
+        }),
+      }),
+      putContacts: async (_token, _version, blob) => {
+        writes++;
+        if (writes === 1) throw new ApiError(409, "version_conflict");
+        expect(
+          decryptContactBookFull({ historyKey: alice.historyKey, blob })
+            .contacts,
+        ).toEqual({ [bobId]: "Bobby" });
+        return { version: "3" };
+      },
+    });
+    await (
+      controller as unknown as { loadContacts(token: string): Promise<void> }
+    ).loadContacts("token");
+    // Add a stale local entry to model another device deleting it before this write.
+    (
+      controller as unknown as { state: { contacts: Record<string, string> } }
+    ).state.contacts[staleId] = "Stale";
+    expect(await controller.saveContactName(bobId, "Bobby")).toBe(true);
+    expect(controller.getSnapshot().contacts).toEqual({ [bobId]: "Bobby" });
+    controller.stop();
+  });
+
+  it("preserves a description added remotely during a name conflict", async () => {
+    const latest = encryptContactBook({
+      historyKey: alice.historyKey,
+      contacts: { [bobId]: "Remote" },
+      notes: { [bobId]: "Added elsewhere" },
+    });
+    let writes = 0;
+    const controller = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => ({ version: "2", blob: latest }),
+      putContacts: async (_token, _version, blob) => {
+        writes++;
+        if (writes === 1) throw new ApiError(409, "version_conflict");
+        expect(
+          decryptContactBookFull({ historyKey: alice.historyKey, blob }),
+        ).toEqual({
+          contacts: { [bobId]: "Local" },
+          notes: { [bobId]: "Added elsewhere" },
+        });
+        return { version: "3" };
+      },
+    });
+    expect(await controller.saveContactName(bobId, "Local")).toBe(true);
+    expect(controller.getSnapshot().contactNotes).toEqual({
+      [bobId]: "Added elsewhere",
+    });
+    controller.stop();
+  });
+
+  it("leaves the snapshot unchanged when encryption rejects an oversized book", async () => {
+    const controller = new ChatController(alice, aliceId, session("token"));
+    const before = controller.getSnapshot();
+    const encrypt = vi
+      .spyOn(cryptoModule, "encryptContactBook")
+      .mockImplementation(() => {
+        throw new RangeError("Contact book too large");
+      });
+    expect(await controller.saveContactName(bobId, "Bob")).toBe(false);
+    expect(controller.getSnapshot()).toEqual(before);
+    encrypt.mockRestore();
+    controller.stop();
   });
 
   it("starts a contact book for an existing account at version zero", async () => {

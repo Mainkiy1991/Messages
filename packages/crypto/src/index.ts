@@ -286,6 +286,7 @@ export async function unwrapSecrets(
 const MESSAGE_INFO = encoder.encode("messages/v1/message");
 const HISTORY_INFO = encoder.encode("messages/v1/history-entry");
 const CONTACTS_INFO = encoder.encode("messages/v1/contacts");
+export const CONTACT_BOOK_MAX_BYTES = 200 * 1024;
 const DEVICE_LABEL_INFO = "messages/v1/device-label";
 const VERSION = 1;
 const MESSAGE_VERSION_V2 = 2;
@@ -671,14 +672,22 @@ export function decryptHistoryEntry(input: {
 export function encryptContactBook(input: {
   historyKey: Uint8Array;
   contacts: Record<string, string>;
+  notes?: Record<string, string>;
 }): string {
   checkKey(input.historyKey);
   validateContacts(input.contacts);
+  const notes = input.notes === undefined ? {} : input.notes;
+  validateNotes(input.contacts, notes);
+  const book = {
+    v: VERSION,
+    contacts: input.contacts,
+    ...(Object.keys(notes).length ? { notes } : {}),
+  };
+  const plaintext = encoder.encode(JSON.stringify(book));
+  if (plaintext.length > CONTACT_BOOK_MAX_BYTES)
+    throw new RangeError("Contact book too large");
   const key = hkdf(sha256, input.historyKey, HKDF_SALT, CONTACTS_INFO, 32);
   const nonce = randomBytes(NONCE_LENGTH);
-  const plaintext = encoder.encode(
-    JSON.stringify({ v: VERSION, contacts: input.contacts }),
-  );
   return bytesToBase64(
     concat(
       Uint8Array.of(VERSION),
@@ -692,6 +701,13 @@ export function decryptContactBook(input: {
   historyKey: Uint8Array;
   blob: string;
 }): Record<string, string> {
+  return decryptContactBookFull(input).contacts;
+}
+
+export function decryptContactBookFull(input: {
+  historyKey: Uint8Array;
+  blob: string;
+}): { contacts: Record<string, string>; notes: Record<string, string> } {
   try {
     checkKey(input.historyKey);
     const packed = base64ToBytes(input.blob);
@@ -713,7 +729,20 @@ export function decryptContactBook(input: {
       throw new Error("Invalid contact book");
     const contacts = value.contacts as Record<string, string>;
     validateContacts(contacts);
-    return contacts;
+    const notesValue = value.notes === undefined ? {} : value.notes;
+    if (
+      !notesValue ||
+      typeof notesValue !== "object" ||
+      Array.isArray(notesValue)
+    )
+      throw new Error("Invalid contact notes");
+    const notes: Record<string, string> = {};
+    for (const [userId, note] of Object.entries(notesValue)) {
+      if (!Object.hasOwn(contacts, userId)) continue;
+      validateNote(note);
+      notes[userId] = note;
+    }
+    return { contacts, notes };
   } catch {
     throw new DecryptError();
   }
@@ -824,6 +853,29 @@ function validateContacts(contacts: Record<string, string>): void {
       Array.from(name.trim()).length > 64
     )
       throw new TypeError("Invalid contact");
+  }
+}
+
+function validateNote(value: unknown): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    value.trim().length === 0 ||
+    Array.from(value).length > 200 ||
+    /\p{Cc}/u.test(value)
+  )
+    throw new TypeError("Invalid contact note");
+}
+
+export function validateNotes(
+  contacts: Record<string, string>,
+  notes: Record<string, string>,
+): void {
+  if (!notes || typeof notes !== "object" || Array.isArray(notes))
+    throw new TypeError("Invalid contact notes");
+  for (const [userId, note] of Object.entries(notes)) {
+    if (!Object.hasOwn(contacts, userId))
+      throw new TypeError("Invalid contact note");
+    validateNote(note);
   }
 }
 

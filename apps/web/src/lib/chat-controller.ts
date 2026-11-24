@@ -1,6 +1,6 @@
 import {
   base64ToBytes,
-  decryptContactBook,
+  decryptContactBookFull,
   decryptHistoryEntry,
   decryptTextMessage,
   encryptContactBook,
@@ -96,6 +96,7 @@ export type ChatControllerState = {
   connectionState: SocketState;
   error: string;
   contacts: Record<string, string>;
+  contactNotes: Record<string, string>;
   contactsError: boolean;
   waking: boolean;
   presence: Record<string, { online: boolean; lastSeenAt: string | null }>;
@@ -269,6 +270,7 @@ export class ChatController {
     connectionState: "offline",
     error: "",
     contacts: {},
+    contactNotes: {},
     contactsError: false,
     waking: false,
     presence: {},
@@ -570,14 +572,15 @@ export class ChatController {
       const book = await this.withFreshSession(token, get);
       if (this.stopped) return;
       let contacts: Record<string, string> = {};
+      let contactNotes: Record<string, string> = {};
       if (book.blob) {
-        contacts = decryptContactBook({
+        ({ contacts, notes: contactNotes } = decryptContactBookFull({
           historyKey: this.keys.historyKey,
           blob: book.blob,
-        });
+        }));
       }
       this.contactsVersion = book.version;
-      this.update({ contacts, contactsError: false });
+      this.update({ contacts, contactNotes, contactsError: false });
       this.contactsLoaded = true;
       this.accountDataFailuresAfterResponse.delete("contacts");
       this.resetAccountRetry("contacts");
@@ -1153,14 +1156,17 @@ export class ChatController {
     }
   }
 
-  async saveContactName(peerId: string, value: string): Promise<boolean> {
-    /* The saved chat is named by the translation and never enters the contact book. */
-    if (peerId === this.userId) return true;
-    const name = value.trim();
-    if (Array.from(name).length > 64) return false;
-    const local = { ...this.state.contacts };
-    if (name) local[peerId] = name;
-    else delete local[peerId];
+  private async mutateContactBook(
+    apply: (book: {
+      contacts: Record<string, string>;
+      notes: Record<string, string>;
+    }) => { contacts: Record<string, string>; notes: Record<string, string> },
+  ): Promise<boolean> {
+    const initial = {
+      contacts: { ...this.state.contacts },
+      notes: { ...this.state.contactNotes },
+    };
+    let book = apply(initial);
     const save =
       this.deps.putContacts ??
       ((token, version, blob) =>
@@ -1170,18 +1176,24 @@ export class ChatController {
       ((token) => getContacts(token, this.deps.fetcher));
     try {
       const session = await this.connection.ensureSession();
+      let version = this.contactsVersion;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           const result = await save(
             session.token,
-            this.contactsVersion,
+            version,
             encryptContactBook({
               historyKey: this.keys.historyKey,
-              contacts: local,
+              contacts: book.contacts,
+              notes: book.notes,
             }),
           );
           this.contactsVersion = result.version;
-          this.update({ contacts: local, contactsError: false });
+          this.update({
+            contacts: book.contacts,
+            contactNotes: book.notes,
+            contactsError: false,
+          });
           return true;
         } catch (error) {
           if (
@@ -1199,21 +1211,36 @@ export class ChatController {
               ? { version: conflict.version, blob: conflict.blob }
               : await fetchBook(session.token);
           const remote = latest.blob
-            ? decryptContactBook({
+            ? decryptContactBookFull({
                 historyKey: this.keys.historyKey,
                 blob: latest.blob,
               })
-            : {};
-          if (name) remote[peerId] = name;
-          else delete remote[peerId];
-          Object.assign(local, remote);
-          this.contactsVersion = latest.version;
+            : { contacts: {}, notes: {} };
+          book = apply(remote);
+          version = latest.version;
         }
       }
     } catch {
       /* localized UI error is displayed by the caller */
     }
     return false;
+  }
+
+  async saveContactName(peerId: string, value: string): Promise<boolean> {
+    /* The saved chat is named by the translation and never enters the contact book. */
+    if (peerId === this.userId) return true;
+    const name = value.trim();
+    if (Array.from(name).length > 64) return false;
+    return this.mutateContactBook((book) => {
+      const contacts = { ...book.contacts };
+      const notes = { ...book.notes };
+      if (name) contacts[peerId] = name;
+      else {
+        delete contacts[peerId];
+        delete notes[peerId];
+      }
+      return { contacts, notes };
+    });
   }
 
   stop(): void {
