@@ -1218,7 +1218,7 @@ export class ChatController {
           } catch (error) {
             if (error instanceof RangeError)
               return { ok: false, error: "book_too_large" };
-            throw error;
+            return { ok: false, error: "save_failed" };
           }
           const result = await save(session.token, version, encrypted);
           this.contactsVersion = result.version;
@@ -1306,14 +1306,14 @@ export class ChatController {
     const name = value.trim();
     if (!name) return "name_required";
     if (Array.from(name).length > 64) return "name_too_long";
-    if (/\p{Cc}/u.test(value)) return "name_invalid";
+    if (/\p{Cc}/u.test(name)) return "name_invalid";
     return { value: name };
   }
 
   private validateContactNote(value: string): { value: string } | ContactError {
     const note = value.trim();
     if (Array.from(note).length > 200) return "note_too_long";
-    if (/\p{Cc}/u.test(value)) return "note_invalid";
+    if (/\p{Cc}/u.test(note)) return "note_invalid";
     return { value: note };
   }
 

@@ -5804,10 +5804,8 @@ describe("ChatController contact actions", () => {
     expect(controller.getSnapshot().contactNotes[bobId]).toBeUndefined();
     const fresh = contactController();
     await loadContactBook(fresh);
-    expect(await fresh.addContact(bobId, "Bob", "\n")).toEqual({
-      ok: false,
-      error: "note_invalid",
-    });
+    expect(await fresh.addContact(bobId, "Bob", "\n")).toEqual({ ok: true });
+    expect(fresh.getSnapshot().contactNotes[bobId]).toBeUndefined();
     fresh.stop();
     expect(
       await controller.addContact(charlieId, "Bob", "x".repeat(200)),
@@ -5822,6 +5820,43 @@ describe("ChatController contact actions", () => {
       await edge.addContact(bobId, "N".repeat(64), "😀".repeat(200)),
     ).toEqual({ ok: true });
     edge.stop();
+  });
+
+  it("trims edge control characters from contact names and notes", async () => {
+    const controller = contactController();
+    await loadContactBook(controller);
+    let saved = "";
+    (
+      controller as unknown as { deps: ChatControllerDependencies }
+    ).deps.putContacts = async (_token, _version, blob) => {
+      saved = blob;
+      return { version: "2" };
+    };
+    expect(await controller.addContact(bobId, "Bob\n", "note\n")).toEqual({
+      ok: true,
+    });
+    expect(
+      decryptContactBookFull({ historyKey: alice.historyKey, blob: saved }),
+    ).toEqual({
+      contacts: { [bobId]: "Bob" },
+      notes: { [bobId]: "note" },
+    });
+    expect(await controller.addContact(charlieId, "Bo\nb")).toEqual({
+      ok: false,
+      error: "name_invalid",
+    });
+    expect(await controller.renameContact(bobId, "Robert\n")).toEqual({
+      ok: true,
+    });
+    expect(await controller.saveContactNote(bobId, "no\nte")).toEqual({
+      ok: false,
+      error: "note_invalid",
+    });
+    expect(await controller.saveContactNote(bobId, "note\n")).toEqual({
+      ok: true,
+    });
+    expect(controller.getSnapshot().contactNotes[bobId]).toBe("note");
+    controller.stop();
   });
 
   it("maps peer key and save failures without changing contact state", async () => {
@@ -5896,6 +5931,23 @@ describe("ChatController contact actions", () => {
     expect(encrypt).toHaveBeenCalled();
     encrypt.mockRestore();
     oversized.stop();
+  });
+
+  it("maps non-RangeError contact book encryption failures to save_failed", async () => {
+    const controller = contactController();
+    await loadContactBook(controller);
+    const encrypt = vi
+      .spyOn(cryptoModule, "encryptContactBook")
+      .mockImplementation(() => {
+        throw new TypeError("invalid");
+      });
+    expect(await controller.addContact(bobId, "Bob")).toEqual({
+      ok: false,
+      error: "save_failed",
+    });
+    expect(encrypt).toHaveBeenCalled();
+    encrypt.mockRestore();
+    controller.stop();
   });
 
   it("reapplies add to the fresh book after a conflict and rejects duplicates", async () => {
@@ -6100,6 +6152,51 @@ describe("ChatController contact actions", () => {
       notes: { [bobId]: "local note" },
     });
     controller.stop();
+  });
+
+  it("rejects saving a note for a missing contact before and after a conflict", async () => {
+    const putContacts = vi.fn(async () => ({ version: "2" }));
+    const missing = contactController({}, {}, { putContacts });
+    await loadContactBook(missing);
+    expect(await missing.saveContactNote(bobId, "valid note")).toEqual({
+      ok: false,
+      error: "not_a_contact",
+    });
+    expect(putContacts).not.toHaveBeenCalled();
+    missing.stop();
+
+    let writes = 0;
+    const freshBlob = encryptContactBook({
+      historyKey: alice.historyKey,
+      contacts: { [charlieId]: "Charlie" },
+      notes: { [charlieId]: "keep" },
+    });
+    const conflicted = contactController(
+      { [bobId]: "Bob" },
+      { [bobId]: "old" },
+      {
+        putContacts: async () => {
+          writes++;
+          throw new ApiError(409, "version_conflict", {
+            version: "2",
+            blob: freshBlob,
+          });
+        },
+      },
+    );
+    await loadContactBook(conflicted);
+    expect(await conflicted.saveContactNote(bobId, "new note")).toEqual({
+      ok: false,
+      error: "not_a_contact",
+    });
+    expect(writes).toBe(1);
+    expect(conflicted.getSnapshot().contacts).toEqual({
+      [charlieId]: "Charlie",
+    });
+    expect(conflicted.getSnapshot().contactNotes).toEqual({
+      [charlieId]: "keep",
+    });
+    conflicted.stop();
   });
 
   it("rejects rename, note, and remove for missing contacts and unloaded books", async () => {
