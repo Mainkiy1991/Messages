@@ -55,7 +55,7 @@ suite("server authentication (PostgreSQL)", () => {
 
   beforeAll(async () => {
     await pool!.query(
-      "DROP TABLE IF EXISTS conversation_clears, presence, read_markers, contact_books, pin_settings, messages, devices, sessions, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS conversation_clears, presence, read_markers, contact_books, messages, devices, sessions, users, schema_migrations CASCADE",
     );
     await pool!.query("DROP SEQUENCE IF EXISTS messages_change_seq");
     await pool!.query(
@@ -140,12 +140,6 @@ suite("server authentication (PostgreSQL)", () => {
     await pool!.query(
       await readFile(
         join(import.meta.dirname, "..", "migrations", "010_devices.sql"),
-        "utf8",
-      ),
-    );
-    await pool!.query(
-      await readFile(
-        join(import.meta.dirname, "..", "migrations", "011_pin_settings.sql"),
         "utf8",
       ),
     );
@@ -3226,110 +3220,6 @@ suite("server authentication (PostgreSQL)", () => {
     expect(
       (await app.inject({ method: "GET", url: "/contacts" })).statusCode,
     ).toBe(401);
-  });
-
-  it("stores pin settings with optimistic locking, atomic conflicts, and user isolation", async () => {
-    const a = await createAccount();
-    const b = await createAccount();
-    const get = (token: string) =>
-      app.inject({
-        method: "GET",
-        url: "/pin-settings",
-        headers: { authorization: `Bearer ${token}` },
-      });
-    const put = (baseVersion: string, blob: string, token = a.token) =>
-      app.inject({
-        method: "PUT",
-        url: "/pin-settings",
-        headers: { authorization: `Bearer ${token}` },
-        payload: { baseVersion, blob },
-      });
-    const firstBlob = randomBytes(32).toString("base64");
-    const nextBlob = randomBytes(32).toString("base64");
-    expect((await get(a.token)).json()).toEqual({ version: "0", blob: null });
-    expect((await put("0", firstBlob)).json()).toEqual({ version: "1" });
-    const conflict = await put("0", nextBlob);
-    expect(conflict.statusCode).toBe(409);
-    expect(conflict.json()).toEqual({
-      error: "version_conflict",
-      version: "1",
-      blob: firstBlob,
-    });
-    expect((await put("1", nextBlob)).json()).toEqual({ version: "2" });
-    const concurrentBlobs = [
-      randomBytes(32).toString("base64"),
-      randomBytes(32).toString("base64"),
-    ];
-    const concurrent = await Promise.all([
-      put("2", concurrentBlobs[0]),
-      put("2", concurrentBlobs[1]),
-    ]);
-    expect(concurrent.map((response) => response.statusCode).sort()).toEqual([
-      200, 409,
-    ]);
-    expect((await get(a.token)).json()).toMatchObject({ version: "3" });
-    expect(concurrentBlobs).toContain((await get(a.token)).json().blob);
-    expect((await get(b.token)).json()).toEqual({ version: "0", blob: null });
-    const secondUserBlob = randomBytes(32).toString("base64");
-    expect((await put("0", secondUserBlob, b.token)).json()).toEqual({
-      version: "1",
-    });
-    expect((await get(b.token)).json()).toEqual({
-      version: "1",
-      blob: secondUserBlob,
-    });
-    expect(concurrentBlobs).toContain((await get(a.token)).json().blob);
-    expect((await get(a.token)).json().blob).not.toBe(secondUserBlob);
-    expect(
-      (await app.inject({ method: "GET", url: "/pin-settings" })).statusCode,
-    ).toBe(401);
-    expect((await get("invalid-token")).statusCode).toBe(401);
-  });
-
-  it("rejects invalid pin settings requests", async () => {
-    const account = await createAccount();
-    const headers = { authorization: `Bearer ${account.token}` };
-    const validBlob = randomBytes(32).toString("base64");
-    const invalidBodies: Array<Record<string, string | number | boolean>> = [
-      ...["-1", "abc", "1.5", ""].map((baseVersion) => ({
-        baseVersion,
-        blob: validBlob,
-      })),
-      { baseVersion: "9223372036854775807", blob: validBlob },
-      { baseVersion: "0", blob: 123 },
-      { baseVersion: "0", blob: "!!!" },
-      { baseVersion: "0", blob: "AAAAAAAAAAAAAAAAAAAAAAB=" },
-      { baseVersion: "0", blob: "" },
-      { baseVersion: "0", blob: randomBytes(15).toString("base64") },
-      { baseVersion: "0", blob: randomBytes(1025).toString("base64") },
-      { baseVersion: "0", blob: validBlob, extra: true },
-    ];
-    for (const payload of invalidBodies) {
-      const response = await app.inject({
-        method: "PUT",
-        url: "/pin-settings",
-        headers,
-        payload,
-      });
-      expect(response.statusCode).toBe(400);
-      expect(response.json()).toEqual({ error: "invalid_request" });
-    }
-    const oversized = await app.inject({
-      method: "PUT",
-      url: "/pin-settings",
-      headers,
-      payload: { baseVersion: "0", blob: "A".repeat(5000) },
-    });
-    expect(oversized.statusCode).toBe(413);
-    expect(
-      (
-        await app.inject({
-          method: "GET",
-          url: "/pin-settings",
-          headers,
-        })
-      ).json(),
-    ).toEqual({ version: "0", blob: null });
   });
 
   it("serves WebSocket messages as decryptable sender history and recipient ciphertext", async () => {

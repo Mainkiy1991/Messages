@@ -211,45 +211,6 @@ header {
 .devices-error {
   margin: 4px 0;
 }
-.pin-sync-notice,
-.pin-error {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid #c58a24;
-  border-radius: 8px;
-  background: #fff4d6;
-  color: #4b3509;
-  line-height: 1.4;
-}
-.pin-sync-notice button {
-  flex: 0 0 auto;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-}
-.pin-error {
-  display: block;
-  color: #8b1e1e;
-  background: #fff0f0;
-  border-color: #d88;
-}
-@media (prefers-color-scheme: dark) {
-  .pin-sync-notice,
-  .pin-error {
-    color: #ffe2a3;
-    background: #382c17;
-    border-color: #8f6d32;
-  }
-  .pin-error {
-    color: #ffb8b8;
-    background: #381d20;
-    border-color: #8b454b;
-  }
-}
 .device-row {
   display: grid;
   gap: 6px;
@@ -276,7 +237,7 @@ header {
 .devices-confirm button {
   max-width: 100%;
 }
-.pin-settings {
+.local-pin {
   display: grid;
   gap: 8px;
 }
@@ -1173,16 +1134,16 @@ button.primary.pin-action-incorrect:disabled {
   }
 }
 
-.pin-settings {
+.local-pin {
   display: grid;
   gap: 8px;
   padding: 10px 8px;
   border-top: 1px solid #e4e6ee;
 }
-.pin-settings small {
+.local-pin small {
   color: #687083;
   line-height: 1.4;
 }
-.pin-settings .error {
+.local-pin .error {
   margin: 0;
 }

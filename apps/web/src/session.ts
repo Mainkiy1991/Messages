@@ -78,46 +78,6 @@ async function putValues(
     db.close();
   }
 }
-const MAX_PIN_SYNC_VERSION = 9223372036854775807n;
-const PIN_SYNC_VERSION_PATTERN = /^\d{1,19}$/u;
-
-export async function getPinSyncVersion(): Promise<string> {
-  const value = await getValue<unknown>("pinSyncVersion");
-  return typeof value === "string" && PIN_SYNC_VERSION_PATTERN.test(value)
-    ? value
-    : "0";
-}
-
-export async function setPinSyncVersion(version: string): Promise<void> {
-  if (
-    typeof version !== "string" ||
-    !PIN_SYNC_VERSION_PATTERN.test(version) ||
-    BigInt(version) > MAX_PIN_SYNC_VERSION
-  )
-    throw new TypeError("Invalid PIN sync version");
-  const db = await openDatabase();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, "readwrite");
-      const store = tx.objectStore(STORE_NAME);
-      const request = store.get("pinSyncVersion");
-      request.onsuccess = () => {
-        const stored = request.result;
-        const current =
-          typeof stored === "string" && PIN_SYNC_VERSION_PATTERN.test(stored)
-            ? BigInt(stored)
-            : 0n;
-        if (BigInt(version) > current) store.put(version, "pinSyncVersion");
-      };
-      request.onerror = () => reject(request.error);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
-    });
-  } finally {
-    db.close();
-  }
-}
 export function packKeys(keys: AccountKeys): Uint8Array {
   const pair = (p: { privateKey: Uint8Array; publicKey: Uint8Array }) => ({
     privateKey: bytesToBase64(p.privateKey),
