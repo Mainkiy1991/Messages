@@ -866,7 +866,7 @@ function validateNote(value: unknown): asserts value is string {
     throw new TypeError("Invalid contact note");
 }
 
-export function validateNotes(
+function validateNotes(
   contacts: Record<string, string>,
   notes: Record<string, string>,
 ): void {

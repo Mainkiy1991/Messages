@@ -98,9 +98,29 @@ export type ChatControllerState = {
   contacts: Record<string, string>;
   contactNotes: Record<string, string>;
   contactsError: boolean;
+  contactsReady: boolean;
   waking: boolean;
   presence: Record<string, { online: boolean; lastSeenAt: string | null }>;
 };
+export type ContactError =
+  | "invalid_id"
+  | "own_id"
+  | "contacts_not_loaded"
+  | "name_required"
+  | "name_too_long"
+  | "name_invalid"
+  | "note_too_long"
+  | "note_invalid"
+  | "not_a_contact"
+  | "already_contact"
+  | "limit_reached"
+  | "book_too_large"
+  | "user_not_found"
+  | "bad_peer_key"
+  | "server_unavailable"
+  | "save_failed";
+export type ContactResult = { ok: true } | { ok: false; error: ContactError };
+const CONTACT_LIMIT = 1000;
 export type ChatError =
   | "invalid_id"
   | "user_not_found"
@@ -272,6 +292,7 @@ export class ChatController {
     contacts: {},
     contactNotes: {},
     contactsError: false,
+    contactsReady: false,
     waking: false,
     presence: {},
   };
@@ -580,7 +601,12 @@ export class ChatController {
         }));
       }
       this.contactsVersion = book.version;
-      this.update({ contacts, contactNotes, contactsError: false });
+      this.update({
+        contacts,
+        contactNotes,
+        contactsError: false,
+        contactsReady: true,
+      });
       this.contactsLoaded = true;
       this.accountDataFailuresAfterResponse.delete("contacts");
       this.resetAccountRetry("contacts");
@@ -1160,13 +1186,16 @@ export class ChatController {
     apply: (book: {
       contacts: Record<string, string>;
       notes: Record<string, string>;
-    }) => { contacts: Record<string, string>; notes: Record<string, string> },
-  ): Promise<boolean> {
+    }) =>
+      | { contacts: Record<string, string>; notes: Record<string, string> }
+      | ContactError,
+  ): Promise<ContactResult> {
     const initial = {
       contacts: { ...this.state.contacts },
       notes: { ...this.state.contactNotes },
     };
     let book = apply(initial);
+    if (typeof book === "string") return { ok: false, error: book };
     const save =
       this.deps.putContacts ??
       ((token, version, blob) =>
@@ -1179,22 +1208,26 @@ export class ChatController {
       let version = this.contactsVersion;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          const result = await save(
-            session.token,
-            version,
-            encryptContactBook({
+          let encrypted: string;
+          try {
+            encrypted = encryptContactBook({
               historyKey: this.keys.historyKey,
               contacts: book.contacts,
               notes: book.notes,
-            }),
-          );
+            });
+          } catch (error) {
+            if (error instanceof RangeError)
+              return { ok: false, error: "book_too_large" };
+            throw error;
+          }
+          const result = await save(session.token, version, encrypted);
           this.contactsVersion = result.version;
           this.update({
             contacts: book.contacts,
             contactNotes: book.notes,
             contactsError: false,
           });
-          return true;
+          return { ok: true };
         } catch (error) {
           if (
             !(error instanceof ApiError) ||
@@ -1210,20 +1243,44 @@ export class ChatController {
             (typeof conflict.blob === "string" || conflict.blob === null)
               ? { version: conflict.version, blob: conflict.blob }
               : await fetchBook(session.token);
-          const remote = latest.blob
-            ? decryptContactBookFull({
-                historyKey: this.keys.historyKey,
-                blob: latest.blob,
-              })
-            : { contacts: {}, notes: {} };
+          let remote: {
+            contacts: Record<string, string>;
+            notes: Record<string, string>;
+          };
+          try {
+            remote = latest.blob
+              ? decryptContactBookFull({
+                  historyKey: this.keys.historyKey,
+                  blob: latest.blob,
+                })
+              : { contacts: {}, notes: {} };
+          } catch {
+            return { ok: false, error: "save_failed" };
+          }
           book = apply(remote);
+          if (typeof book === "string") {
+            this.contactsVersion = latest.version;
+            this.update({
+              contacts: remote.contacts,
+              contactNotes: remote.notes,
+            });
+            return { ok: false, error: book };
+          }
           version = latest.version;
         }
       }
-    } catch {
+    } catch (error) {
       /* localized UI error is displayed by the caller */
+      if (error instanceof RangeError)
+        return { ok: false, error: "book_too_large" };
+      if (
+        error instanceof TypeError ||
+        (error instanceof ApiError &&
+          (error.status === 0 || error.code === "network_timeout"))
+      )
+        return { ok: false, error: "server_unavailable" };
     }
-    return false;
+    return { ok: false, error: "save_failed" };
   }
 
   async saveContactName(peerId: string, value: string): Promise<boolean> {
@@ -1231,14 +1288,128 @@ export class ChatController {
     if (peerId === this.userId) return true;
     const name = value.trim();
     if (Array.from(name).length > 64) return false;
+    return (
+      await this.mutateContactBook((book) => {
+        const contacts = { ...book.contacts };
+        const notes = { ...book.notes };
+        if (name) contacts[peerId] = name;
+        else {
+          delete contacts[peerId];
+          delete notes[peerId];
+        }
+        return { contacts, notes };
+      })
+    ).ok;
+  }
+
+  private validateContactName(value: string): { value: string } | ContactError {
+    const name = value.trim();
+    if (!name) return "name_required";
+    if (Array.from(name).length > 64) return "name_too_long";
+    if (/\p{Cc}/u.test(value)) return "name_invalid";
+    return { value: name };
+  }
+
+  private validateContactNote(value: string): { value: string } | ContactError {
+    const note = value.trim();
+    if (Array.from(note).length > 200) return "note_too_long";
+    if (/\p{Cc}/u.test(value)) return "note_invalid";
+    return { value: note };
+  }
+
+  private validateContactId(value: string): string | ContactError {
+    const id = value.trim();
+    return /^[0-9a-f]{64}$/u.test(id) ? id : "invalid_id";
+  }
+
+  private canEditContacts(): boolean {
+    return this.state.contactsReady && !this.state.contactsError;
+  }
+
+  async addContact(
+    peerIdInput: string,
+    nameInput: string,
+    noteInput = "",
+  ): Promise<ContactResult> {
+    const peerId = this.validateContactId(peerIdInput);
+    if (peerId === "invalid_id") return { ok: false, error: peerId };
+    if (peerId === this.userId) return { ok: false, error: "own_id" };
+    if (!this.canEditContacts())
+      return { ok: false, error: "contacts_not_loaded" };
+    const name = this.validateContactName(nameInput);
+    if (typeof name === "string") return { ok: false, error: name };
+    const note = this.validateContactNote(noteInput);
+    if (typeof note === "string") return { ok: false, error: note };
+    if (peerId in this.state.contacts)
+      return { ok: false, error: "already_contact" };
+    if (Object.keys(this.state.contacts).length >= CONTACT_LIMIT)
+      return { ok: false, error: "limit_reached" };
+    try {
+      await this.getVerifiedPeerKey(peerId);
+    } catch (error) {
+      return { ok: false, error: this.peerKeyError(error) as ContactError };
+    }
+    return this.mutateContactBook((book) => {
+      if (peerId in book.contacts) return "already_contact";
+      if (Object.keys(book.contacts).length >= CONTACT_LIMIT)
+        return "limit_reached";
+      const contacts = { ...book.contacts, [peerId]: name.value };
+      const notes = { ...book.notes };
+      if (note.value) notes[peerId] = note.value;
+      return { contacts, notes };
+    });
+  }
+
+  async renameContact(
+    peerIdInput: string,
+    nameInput: string,
+  ): Promise<ContactResult> {
+    const peerId = this.validateContactId(peerIdInput);
+    if (peerId === "invalid_id") return { ok: false, error: peerId };
+    if (!this.canEditContacts())
+      return { ok: false, error: "contacts_not_loaded" };
+    const name = this.validateContactName(nameInput);
+    if (typeof name === "string") return { ok: false, error: name };
+    return this.mutateContactBook((book) => {
+      if (!(peerId in book.contacts)) return "not_a_contact";
+      return {
+        contacts: { ...book.contacts, [peerId]: name.value },
+        notes: { ...book.notes },
+      };
+    });
+  }
+
+  async saveContactNote(
+    peerIdInput: string,
+    noteInput: string,
+  ): Promise<ContactResult> {
+    const peerId = this.validateContactId(peerIdInput);
+    if (peerId === "invalid_id") return { ok: false, error: peerId };
+    if (!this.canEditContacts())
+      return { ok: false, error: "contacts_not_loaded" };
+    const note = this.validateContactNote(noteInput);
+    if (typeof note === "string") return { ok: false, error: note };
+    return this.mutateContactBook((book) => {
+      if (!(peerId in book.contacts)) return "not_a_contact";
+      const notes = { ...book.notes };
+      if (note.value) notes[peerId] = note.value;
+      else delete notes[peerId];
+      return { contacts: { ...book.contacts }, notes };
+    });
+  }
+
+  async removeContact(peerIdInput: string): Promise<ContactResult> {
+    const peerId = this.validateContactId(peerIdInput);
+    if (peerId === "invalid_id") return { ok: false, error: peerId };
+    if (!this.canEditContacts())
+      return { ok: false, error: "contacts_not_loaded" };
+    if (!(peerId in this.state.contacts))
+      return { ok: false, error: "not_a_contact" };
     return this.mutateContactBook((book) => {
       const contacts = { ...book.contacts };
       const notes = { ...book.notes };
-      if (name) contacts[peerId] = name;
-      else {
-        delete contacts[peerId];
-        delete notes[peerId];
-      }
+      delete contacts[peerId];
+      delete notes[peerId];
       return { contacts, notes };
     });
   }
