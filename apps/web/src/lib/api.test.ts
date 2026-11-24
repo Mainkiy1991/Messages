@@ -24,8 +24,6 @@ import {
   loginWithKeys,
   DeviceRevokedError,
   getDevices,
-  getPinSettings,
-  putPinSettings,
   revokeDevice,
   revokeOtherDevices,
 } from "./api.js";
@@ -441,56 +439,6 @@ describe("devices API", () => {
         Response.json({ error: "current_device" }, { status: 409 }),
       ),
     ).rejects.toMatchObject({ status: 409, code: "current_device" });
-  });
-});
-
-describe("shared PIN settings API", () => {
-  it("gets PIN settings with bearer authentication", async () => {
-    let url = "";
-    let init: RequestInit | undefined;
-    await getPinSettings("pin-token", async (input, requestInit) => {
-      url = String(input);
-      init = requestInit;
-      return Response.json({ version: "2", blob: "ciphertext" });
-    });
-    expect(url).toBe("http://localhost:3000/pin-settings");
-    expect(new Headers(init?.headers).get("Authorization")).toBe(
-      "Bearer pin-token",
-    );
-  });
-
-  it("puts a versioned block and exposes conflict data", async () => {
-    let init: RequestInit | undefined;
-    const result = await putPinSettings(
-      "pin-token",
-      "2",
-      "ciphertext",
-      async (_input, requestInit) => {
-        init = requestInit;
-        return Response.json({ version: "3" });
-      },
-    );
-    expect(init?.method).toBe("PUT");
-    expect(new Headers(init?.headers).get("Authorization")).toBe(
-      "Bearer pin-token",
-    );
-    expect(JSON.parse(String(init?.body))).toEqual({
-      baseVersion: "2",
-      blob: "ciphertext",
-    });
-    expect(result).toEqual({ version: "3" });
-    await expect(
-      putPinSettings("pin-token", "2", "ciphertext", async () =>
-        Response.json(
-          { error: "version_conflict", version: "3", blob: "new-block" },
-          { status: 409 },
-        ),
-      ),
-    ).rejects.toMatchObject({
-      status: 409,
-      code: "version_conflict",
-      data: { version: "3", blob: "new-block" },
-    });
   });
 });
 

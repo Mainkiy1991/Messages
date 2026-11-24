@@ -20,8 +20,6 @@ import {
   restoreSession,
   restoreServerSession,
   getPinState,
-  getPinSyncVersion,
-  setPinSyncVersion,
   unlockWithPin,
   enablePin,
   changePin,
@@ -31,8 +29,6 @@ import {
   type AccountKeys,
 } from "./session.js";
 import { indexedDbOutbox } from "./lib/outbox.js";
-import { getPinSettings, putPinSettings } from "./lib/api.js";
-import { createPinSyncRunner } from "./lib/pin-sync-runner.js";
 import { copyText } from "./lib/clipboard.js";
 import { phraseMatchesAccount } from "./lib/seed-check.js";
 import {
@@ -115,18 +111,6 @@ function App() {
     "enable" | "change" | "disable" | "unlock" | null
   >(null);
   const [pinEnabled, setPinEnabled] = useState(false);
-  const [pinSyncNotice, setPinSyncNotice] = useState<
-    | "updated"
-    | "disabled"
-    | "existing"
-    | "deferred"
-    | "tooLong"
-    | "failed"
-    | null
-  >(null);
-  const [pinError, setPinError] = useState<
-    "network" | "changed" | "tooLong" | "tooShort" | "operation" | null
-  >(null);
   const [pinNextAttemptAt, setPinNextAttemptAt] = useState(0);
   const [pinCountdown, setPinCountdown] = useState(0);
   const [positions, setPositions] = useState<number[]>([]);
@@ -195,8 +179,6 @@ function App() {
   const hoverRevealTimerRef = useRef<number | null>(null);
   const pinInputRef = useRef<HTMLInputElement | null>(null);
   const controllerRef = useRef<ChatController | null>(null);
-  const syncPinRef = useRef<string | null>(null);
-  const pinSyncRunningRef = useRef(false);
   const registrationBusyRef = useRef(false);
   const messageListRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
@@ -391,7 +373,6 @@ function App() {
     await waitForPaint();
     try {
       const restored = await unlockWithPin(pin);
-      syncPinRef.current = pin;
       setKeys(restored);
       setPin("");
       setScreen("home");
@@ -425,14 +406,8 @@ function App() {
       }
     }
     setPinButtonError(null);
-    setPinError(null);
     if (action !== "disable") {
-      const normalizedPinLength = Array.from(pin.normalize("NFKC")).length;
-      if (normalizedPinLength > 64) {
-        setPinError("tooLong");
-        return;
-      }
-      if (normalizedPinLength < 6) {
+      if (Array.from(pin).length < 6) {
         showPinButtonError("tooShort");
         return;
       }
@@ -456,58 +431,16 @@ function App() {
     await waitForPaint();
     try {
       if (!keys) return;
-      const runner = createPinSyncRunner({
-        historyKey: keys.historyKey,
-        userId,
-        isPinEnabledLocally: async () => Boolean(await getPinState()),
-        getSyncedVersion: getPinSyncVersion,
-        setSyncedVersion: setPinSyncVersion,
-        getBlock: () =>
-          controllerRef.current!.withSession((token) => getPinSettings(token)),
-        putBlock: (baseVersion, blob) =>
-          controllerRef.current!.withSession((token) =>
-            putPinSettings(token, baseVersion, blob),
-          ),
-        queuedCount: async () => (await indexedDbOutbox.list(userId)).length,
-        verifyLocal: async (value) => unlockWithPin(value),
-        enableLocal: (value) => enablePin(keys, value),
-        changeLocal: async (oldValue, newValue) => {
-          await changePin(keys, oldValue, newValue);
-        },
-        disableLocal: async (value) => {
-          await disablePin(value);
-        },
-        now: () => Date.now(),
-      });
-      const result =
-        action === "enable"
-          ? await runner.enableShared({ pin })
-          : action === "change"
-            ? await runner.changeShared({ oldPin, newPin: pin })
-            : await runner.disableShared({ oldPin });
-      if (!result.ok) {
-        if (result.reason === "pin_invalid") {
-          await refreshPinCooldown();
-          showPinButtonError("incorrect");
-        } else if (result.reason === "too_short")
-          showPinButtonError("tooShort");
-        else if (result.reason === "too_long") setPinError("tooLong");
-        else
-          setPinError(
-            result.reason === "network"
-              ? "network"
-              : result.reason === "changed_elsewhere"
-                ? "changed"
-                : "operation",
-          );
-        return;
-      }
-      if (action !== "disable") {
+      if (action === "enable") {
+        await enablePin(keys, pin);
         setPinEnabled(true);
         setPinNextAttemptAt(0);
-      } else setPinEnabled(false);
-      if (action === "enable" && result.adoptedExisting)
-        setPinSyncNotice("existing");
+      } else if (action === "change") {
+        await changePin(keys, oldPin, pin);
+      } else {
+        await disablePin(oldPin);
+        setPinEnabled(false);
+      }
       setPin("");
       setPinConfirm("");
       setOldPin("");
@@ -539,7 +472,6 @@ function App() {
   }
   function togglePinForm(form: "enable" | "change" | "disable") {
     setPinButtonError(null);
-    setPinError(null);
     if (pinForm === form) {
       setPinForm(null);
       return;
@@ -938,51 +870,6 @@ function App() {
       });
       controllerRef.current = controller;
       controller.start();
-      const pendingPin = syncPinRef.current;
-      syncPinRef.current = null;
-      if (!pinSyncRunningRef.current) {
-        pinSyncRunningRef.current = true;
-        const runner = createPinSyncRunner({
-          historyKey: keys.historyKey,
-          userId,
-          isPinEnabledLocally: async () => Boolean(await getPinState()),
-          getSyncedVersion: getPinSyncVersion,
-          setSyncedVersion: setPinSyncVersion,
-          getBlock: () =>
-            controller.withSession((token) => getPinSettings(token)),
-          putBlock: (baseVersion, blob) =>
-            controller.withSession((token) =>
-              putPinSettings(token, baseVersion, blob),
-            ),
-          queuedCount: async () => (await indexedDbOutbox.list(userId)).length,
-          verifyLocal: async (value) => unlockWithPin(value),
-          enableLocal: (value) => enablePin(keys, value),
-          changeLocal: async (oldValue, newValue) => {
-            await changePin(keys, oldValue, newValue);
-          },
-          disableLocal: async (value) => {
-            await disablePin(value);
-          },
-          now: () => Date.now(),
-        });
-        void runner
-          .runPinSync({ pin: pendingPin })
-          .then(({ status }) => {
-            if (status === "pin_updated") {
-              setPinEnabled(true);
-              setPinSyncNotice("updated");
-            } else if (status === "pin_disabled") {
-              setPinEnabled(false);
-              setPinSyncNotice("disabled");
-            } else if (status === "deferred_outbox")
-              setPinSyncNotice("deferred");
-            else if (status === "pin_too_long") setPinSyncNotice("tooLong");
-            else if (status === "apply_failed") setPinSyncNotice("failed");
-          })
-          .finally(() => {
-            pinSyncRunningRef.current = false;
-          });
-      }
       const historyPeer = (window.history.state as { chat?: unknown } | null)
         ?.chat;
       if (
@@ -1195,41 +1082,6 @@ function App() {
   if (screen === "loading") return <main className="session-loading" />;
   return (
     <main className="shell">
-      {screen === "home" && pinSyncNotice && (
-        <div
-          className="pin-sync-notice"
-          role={
-            pinSyncNotice === "updated" ||
-            pinSyncNotice === "disabled" ||
-            pinSyncNotice === "existing"
-              ? "status"
-              : "alert"
-          }
-          data-testid="pin-sync-notice"
-        >
-          <span>
-            {pinSyncNotice === "updated"
-              ? t.pinSyncUpdated
-              : pinSyncNotice === "disabled"
-                ? t.pinSyncDisabled
-                : pinSyncNotice === "existing"
-                  ? t.pinSyncExisting
-                  : pinSyncNotice === "deferred"
-                    ? t.pinSyncDeferred
-                    : pinSyncNotice === "tooLong"
-                      ? t.pinSyncTooLongAccount
-                      : t.pinSyncApplyFailed}
-          </span>
-          <button
-            type="button"
-            data-testid="pin-sync-notice-close"
-            aria-label={t.dismiss}
-            onClick={() => setPinSyncNotice(null)}
-          >
-            ×
-          </button>
-        </div>
-      )}
       <header className={screen === "home" ? "app-header" : undefined}>
         <a
           className="brand"
@@ -1329,24 +1181,7 @@ function App() {
                     {t.pinTitle}
                   </button>
                   {profileSection === "pin" && (
-                    <div className="profile-section pin-settings">
-                      {pinError && (
-                        <div
-                          className="pin-error"
-                          role="alert"
-                          data-testid="pin-error"
-                        >
-                          {pinError === "network"
-                            ? t.pinSyncNetwork
-                            : pinError === "changed"
-                              ? t.pinSyncChanged
-                              : pinError === "tooLong"
-                                ? t.pinTooLong
-                                : pinError === "tooShort"
-                                  ? t.pinTooShort
-                                  : t.pinOperationFailed}
-                        </div>
-                      )}
+                    <div className="profile-section local-pin">
                       {!pinEnabled ? (
                         <>
                           <button

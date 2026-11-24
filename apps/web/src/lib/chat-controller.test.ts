@@ -2828,37 +2828,6 @@ describe("ChatController", () => {
   });
 });
 
-describe("ChatController.withSession", () => {
-  it("uses the current ensured session token", async () => {
-    const f = makeController({ initialSession: session("current-token") });
-    const request = vi.fn(async (token: string) => token);
-    await expect(f.controller.withSession(request)).resolves.toBe(
-      "current-token",
-    );
-    expect(request).toHaveBeenCalledWith("current-token");
-    f.controller.stop();
-  });
-
-  it("retries one unauthorized request with the refreshed token", async () => {
-    const f = makeController({
-      initialSession: session("expired-token"),
-      login: async () => session("refreshed-token"),
-    });
-    const request = vi.fn(async (token: string) => {
-      if (token === "expired-token") throw new ApiError(401, "unauthorized");
-      return token;
-    });
-    await expect(f.controller.withSession(request)).resolves.toBe(
-      "refreshed-token",
-    );
-    expect(request.mock.calls.map(([token]) => token)).toEqual([
-      "expired-token",
-      "refreshed-token",
-    ]);
-    f.controller.stop();
-  });
-});
-
 describe("ChatController edits in place", () => {
   afterEach(() => {
     vi.useRealTimers();

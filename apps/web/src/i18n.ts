@@ -175,24 +175,7 @@ export const strings = {
     pinConfirm: "Повторите PIN",
     pinCurrent: "Текущий PIN",
     pinHint:
-      "Рекомендуем 8 и больше символов, лучше с буквами. Короткий PIN можно подобрать. PIN общий для всех ваших устройств и не защищает от того, кто знает сид-фразу. Не используйте PIN от банка или других мест.",
-    pinTooLong: "PIN должен быть не длиннее 64 символов.",
-    pinSyncUpdated:
-      "PIN обновлён: он такой же, как на других ваших устройствах.",
-    pinSyncDisabled: "PIN отключён на другом устройстве.",
-    pinSyncExisting:
-      "PIN уже включён на другом устройстве: на этом установлен он, а не введённый вами.",
-    pinSyncNetwork:
-      "Нужна связь с сервером: проверьте подключение и повторите.",
-    pinSyncChanged:
-      "PIN уже изменён на другом устройстве. Перезагрузите страницу и введите прежний PIN: новый подтянется сам.",
-    pinSyncTooLongAccount:
-      "Ваш PIN длиннее 64 символов и не может действовать на всех устройствах: смените его в профиле (Профиль → PIN → Сменить PIN).",
-    pinSyncDeferred:
-      "Включение общего PIN ждёт отправки сообщений из очереди: дождитесь отправки и перезагрузите страницу.",
-    pinSyncApplyFailed:
-      "Не удалось обновить PIN на этом устройстве. Повторим при следующем запуске.",
-    dismiss: "Закрыть",
+      "Рекомендуем 8 и больше символов, лучше с буквами. Короткий PIN можно подобрать. PIN защищает ключи только на этом устройстве: на других устройствах задайте свой. Он не защищает от того, кто знает сид-фразу. Не используйте PIN от банка и других сервисов.",
     pinEnable: "Включить PIN",
     pinInstallSubmit: "Установить",
     pinChange: "Сменить PIN",
@@ -380,23 +363,7 @@ export const strings = {
     pinConfirm: "Confirm PIN",
     pinCurrent: "Current PIN",
     pinHint:
-      "We recommend 8 or more characters, preferably with letters. A short PIN can be guessed. Your PIN is shared across all your devices and does not protect against someone who knows your seed phrase. Do not reuse a PIN from your bank or elsewhere.",
-    pinTooLong: "The PIN must be no longer than 64 characters.",
-    pinSyncUpdated: "PIN updated: it now matches your other devices.",
-    pinSyncDisabled: "PIN disabled on another device.",
-    pinSyncExisting:
-      "PIN is already enabled on another device. It was set here instead of the PIN you entered.",
-    pinSyncNetwork:
-      "A server connection is required. Check your connection and try again.",
-    pinSyncChanged:
-      "PIN was changed on another device. Reload the page and enter your previous PIN; the new one will sync.",
-    pinSyncTooLongAccount:
-      "Your PIN is longer than 64 characters and cannot be shared across devices. Change it in Profile → PIN → Change PIN.",
-    pinSyncDeferred:
-      "Shared PIN setup is waiting for queued messages to send. Wait for them to send, then reload the page.",
-    pinSyncApplyFailed:
-      "Could not update the PIN on this device. It will be retried next time.",
-    dismiss: "Dismiss",
+      "We recommend 8 or more characters, preferably with letters. A short PIN can be guessed. The PIN protects the keys on this device only: set a separate one on your other devices. It does not protect against anyone who knows your seed phrase. Do not reuse a PIN from your bank or other services.",
     pinEnable: "Enable PIN",
     pinInstallSubmit: "Set PIN",
     pinChange: "Change PIN",
@@ -584,24 +551,7 @@ export const strings = {
     pinConfirm: "Повторіть PIN",
     pinCurrent: "Поточний PIN",
     pinHint:
-      "Рекомендуємо щонайменше 8 символів, бажано з літерами. Короткий PIN можна підібрати. PIN спільний для всіх ваших пристроїв і не захищає від того, хто знає seed-фразу. Не використовуйте PIN від банку чи інших місць.",
-    pinTooLong: "PIN має містити не більше ніж 64 символи.",
-    pinSyncUpdated:
-      "PIN оновлено: тепер він такий самий, як на інших ваших пристроях.",
-    pinSyncDisabled: "PIN вимкнено на іншому пристрої.",
-    pinSyncExisting:
-      "PIN уже ввімкнено на іншому пристрої: тут установлено його, а не введений вами.",
-    pinSyncNetwork:
-      "Потрібне з’єднання із сервером: перевірте підключення та повторіть.",
-    pinSyncChanged:
-      "PIN уже змінено на іншому пристрої. Перезавантажте сторінку та введіть попередній PIN: новий підтягнеться автоматично.",
-    pinSyncTooLongAccount:
-      "Ваш PIN довший за 64 символи й не може діяти на всіх пристроях: змініть його в профілі (Профіль → PIN → Змінити PIN).",
-    pinSyncDeferred:
-      "Увімкнення спільного PIN очікує надсилання повідомлень із черги: дочекайтеся надсилання та перезавантажте сторінку.",
-    pinSyncApplyFailed:
-      "Не вдалося оновити PIN на цьому пристрої. Повторимо під час наступного запуску.",
-    dismiss: "Закрити",
+      "Рекомендуємо щонайменше 8 символів, бажано з літерами. Короткий PIN можна підібрати. PIN захищає ключі лише на цьому пристрої: на інших пристроях задайте свій. Він не захищає від того, хто знає сід-фразу. Не використовуйте PIN від банку та інших сервісів.",
     pinEnable: "Увімкнути PIN",
     pinInstallSubmit: "Встановити",
     pinChange: "Змінити PIN",
