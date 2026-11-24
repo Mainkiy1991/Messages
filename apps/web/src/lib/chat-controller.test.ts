@@ -51,6 +51,39 @@ const session = (token: string): ServerSession => ({
   expiresAt: future(),
   userId: aliceId,
 });
+
+async function loadContactBook(
+  controller: ChatController,
+  token = "token",
+): Promise<void> {
+  await (
+    controller as unknown as { loadContacts(token: string): Promise<void> }
+  ).loadContacts(token);
+}
+
+function contactController(
+  contacts: Record<string, string> = {},
+  notes: Record<string, string> = {},
+  deps: Partial<ChatControllerDependencies> = {},
+) {
+  return new ChatController(alice, aliceId, session("token"), {
+    getContacts: async () => ({
+      version: "1",
+      blob: encryptContactBook({
+        historyKey: alice.historyKey,
+        contacts,
+        notes,
+      }),
+    }),
+    fetchPeerKeys: async (peerId) => {
+      if (peerId === bobId) return userKeys(bob);
+      if (peerId === charlieId) return userKeys(charlie);
+      throw new ApiError(404, "not_found");
+    },
+    putContacts: async () => ({ version: "2" }),
+    ...deps,
+  });
+}
 const legacyNonTextCiphertexts = {
   edit: "AgEBAQEBAQEBAQEBAQEBAQGWs+NWSWulnCPh1jBKTyyajaskYk+GViejcKwpEwTAw8A/HPT2Y+ftzYNVQUOw76y8Db1ijPQlaiy1TE1L+rV11EIXgnKXuRqBI/k8bsPLWje/+EscVo+5O2ulkC+GbN9xGILghFze93cduzSMiyEzb4jPHDdGypmY0hmhi3WFlZe+U2TjjDvVL24OmFloJTrwWZv+wvORKnAM3GEO8N3WNnSKXmlC1SXjEgJ6TW+x0NC0",
   delete_request:
@@ -5578,3 +5611,625 @@ class TestSocketWithRouter extends TestSocket {
     this.route(this, JSON.parse(frame) as Record<string, unknown>);
   }
 }
+
+describe("ChatController contact actions", () => {
+  it("marks contacts ready only after successful loading and stays not ready on failure", async () => {
+    const controller = contactController();
+    expect(controller.getSnapshot().contactsReady).toBe(false);
+    await loadContactBook(controller);
+    expect(controller.getSnapshot().contactsReady).toBe(true);
+    const failed = new ChatController(alice, aliceId, session("token"), {
+      getContacts: async () => {
+        throw new ApiError(500, "failed");
+      },
+    });
+    await loadContactBook(failed);
+    expect(failed.getSnapshot().contactsReady).toBe(false);
+    controller.stop();
+    failed.stop();
+  });
+
+  it("adds a contact after verifying the peer key and preserves chat state", async () => {
+    let keyRequests = 0;
+    let sent = "";
+    const controller = contactController(
+      {},
+      {},
+      {
+        fetchPeerKeys: async () => {
+          keyRequests++;
+          return userKeys(bob);
+        },
+        putContacts: async (_token, _version, blob) => {
+          sent = blob;
+          return { version: "2" };
+        },
+      },
+    );
+    await loadContactBook(controller);
+    const before = controller.getSnapshot();
+    expect(await controller.addContact(bobId, " Bob ", " colleague ")).toEqual({
+      ok: true,
+    });
+    expect(
+      decryptContactBookFull({ historyKey: alice.historyKey, blob: sent }),
+    ).toEqual({
+      contacts: { [bobId]: "Bob" },
+      notes: { [bobId]: "colleague" },
+    });
+    expect(controller.getSnapshot().contacts).toEqual({ [bobId]: "Bob" });
+    expect(controller.getSnapshot().contactNotes).toEqual({
+      [bobId]: "colleague",
+    });
+    expect(keyRequests).toBe(1);
+    expect(controller.getSnapshot().chats).toEqual(before.chats);
+    expect(controller.getSnapshot().activePeer).toBe(before.activePeer);
+    expect(controller.getSnapshot().error).toBe(before.error);
+    controller.stop();
+  });
+
+  it.each(["", "A".repeat(64), "A".repeat(65)])(
+    "rejects invalid contact ID %s without network",
+    async (id) => {
+      const fetchPeerKeys = vi.fn(async () => userKeys(bob));
+      const putContacts = vi.fn(async () => ({ version: "2" }));
+      const controller = contactController(
+        {},
+        {},
+        { fetchPeerKeys, putContacts },
+      );
+      await loadContactBook(controller);
+      expect(await controller.addContact(id, "Bob")).toEqual({
+        ok: false,
+        error: "invalid_id",
+      });
+      expect(fetchPeerKeys).not.toHaveBeenCalled();
+      expect(putContacts).not.toHaveBeenCalled();
+      controller.stop();
+    },
+  );
+
+  it("rejects own IDs, unloaded books, duplicate contacts, and full books synchronously", async () => {
+    const putContacts = vi.fn(async () => ({ version: "2" }));
+    const fetchPeerKeys = vi.fn(async () => userKeys(bob));
+    const unloaded = contactController({}, {}, { putContacts, fetchPeerKeys });
+    expect(await unloaded.addContact(bobId, "Bob")).toEqual({
+      ok: false,
+      error: "contacts_not_loaded",
+    });
+    expect(await unloaded.addContact(aliceId, "Alice")).toEqual({
+      ok: false,
+      error: "own_id",
+    });
+    const existing = contactController(
+      { [bobId]: "Bob" },
+      {},
+      { putContacts, fetchPeerKeys },
+    );
+    await loadContactBook(existing);
+    expect(await existing.addContact(bobId, "Bobby")).toEqual({
+      ok: false,
+      error: "already_contact",
+    });
+    const fullContacts = Object.fromEntries(
+      Array.from({ length: 1000 }, (_, i) => [
+        i.toString(16).padStart(64, "0"),
+        "X",
+      ]),
+    );
+    const full = contactController(
+      fullContacts,
+      {},
+      { putContacts, fetchPeerKeys },
+    );
+    await loadContactBook(full);
+    expect(await full.addContact(charlieId, "Charlie")).toEqual({
+      ok: false,
+      error: "limit_reached",
+    });
+    expect(putContacts).not.toHaveBeenCalled();
+    expect(fetchPeerKeys).not.toHaveBeenCalled();
+    unloaded.stop();
+    existing.stop();
+    full.stop();
+
+    const entries = Object.fromEntries(
+      Array.from({ length: 999 }, (_, i) => [
+        (i + 1).toString(16).padStart(64, "0"),
+        "X",
+      ]),
+    );
+    const nearLimit = contactController(entries);
+    await loadContactBook(nearLimit);
+    expect(await nearLimit.addContact(charlieId, "Charlie")).toEqual({
+      ok: true,
+    });
+    expect(Object.keys(nearLimit.getSnapshot().contacts)).toHaveLength(1000);
+    nearLimit.stop();
+  });
+
+  it("rejects contact actions while contactsError is set without network calls", async () => {
+    const putContacts = vi.fn(async () => ({ version: "2" }));
+    const controller = contactController({}, {}, { putContacts });
+    await loadContactBook(controller);
+    (
+      controller as unknown as { state: { contactsError: boolean } }
+    ).state.contactsError = true;
+    expect(await controller.addContact(bobId, "Bob")).toEqual({
+      ok: false,
+      error: "contacts_not_loaded",
+    });
+    expect(await controller.renameContact(bobId, "Bob")).toEqual({
+      ok: false,
+      error: "contacts_not_loaded",
+    });
+    expect(await controller.saveContactNote(bobId, "note")).toEqual({
+      ok: false,
+      error: "contacts_not_loaded",
+    });
+    expect(await controller.removeContact(bobId)).toEqual({
+      ok: false,
+      error: "contacts_not_loaded",
+    });
+    expect(putContacts).not.toHaveBeenCalled();
+    controller.stop();
+  });
+
+  it("validates names and descriptions by trimmed code points and controls", async () => {
+    const controller = contactController();
+    await loadContactBook(controller);
+    expect(await controller.addContact(bobId, "  ")).toEqual({
+      ok: false,
+      error: "name_required",
+    });
+    expect(await controller.addContact(bobId, "x".repeat(65))).toEqual({
+      ok: false,
+      error: "name_too_long",
+    });
+    expect(await controller.addContact(bobId, "Bob\u0001")).toEqual({
+      ok: false,
+      error: "name_invalid",
+    });
+    expect(await controller.addContact(bobId, "Bob", "x".repeat(201))).toEqual({
+      ok: false,
+      error: "note_too_long",
+    });
+    expect(await controller.addContact(bobId, "Bob", "line\nbreak")).toEqual({
+      ok: false,
+      error: "note_invalid",
+    });
+    expect(await controller.addContact(bobId, "Bob", "   ")).toEqual({
+      ok: true,
+    });
+    expect(controller.getSnapshot().contactNotes[bobId]).toBeUndefined();
+    const fresh = contactController();
+    await loadContactBook(fresh);
+    expect(await fresh.addContact(bobId, "Bob", "\n")).toEqual({ ok: true });
+    expect(fresh.getSnapshot().contactNotes[bobId]).toBeUndefined();
+    fresh.stop();
+    expect(
+      await controller.addContact(charlieId, "Bob", "x".repeat(200)),
+    ).toEqual({
+      ok: true,
+    });
+    controller.stop();
+
+    const edge = contactController();
+    await loadContactBook(edge);
+    expect(
+      await edge.addContact(bobId, "N".repeat(64), "😀".repeat(200)),
+    ).toEqual({ ok: true });
+    edge.stop();
+  });
+
+  it("trims edge control characters from contact names and notes", async () => {
+    const controller = contactController();
+    await loadContactBook(controller);
+    let saved = "";
+    (
+      controller as unknown as { deps: ChatControllerDependencies }
+    ).deps.putContacts = async (_token, _version, blob) => {
+      saved = blob;
+      return { version: "2" };
+    };
+    expect(await controller.addContact(bobId, "Bob\n", "note\n")).toEqual({
+      ok: true,
+    });
+    expect(
+      decryptContactBookFull({ historyKey: alice.historyKey, blob: saved }),
+    ).toEqual({
+      contacts: { [bobId]: "Bob" },
+      notes: { [bobId]: "note" },
+    });
+    expect(await controller.addContact(charlieId, "Bo\nb")).toEqual({
+      ok: false,
+      error: "name_invalid",
+    });
+    expect(await controller.renameContact(bobId, "Robert\n")).toEqual({
+      ok: true,
+    });
+    expect(await controller.saveContactNote(bobId, "no\nte")).toEqual({
+      ok: false,
+      error: "note_invalid",
+    });
+    expect(await controller.saveContactNote(bobId, "note\n")).toEqual({
+      ok: true,
+    });
+    expect(controller.getSnapshot().contactNotes[bobId]).toBe("note");
+    controller.stop();
+  });
+
+  it("maps peer key and save failures without changing contact state", async () => {
+    for (const [error, expected] of [
+      [new ApiError(404, "not_found"), "user_not_found"],
+      [new ApiError(0, "offline"), "server_unavailable"],
+      [new TypeError("offline"), "server_unavailable"],
+      [new ApiError(500, "failed"), "bad_peer_key"],
+    ] as const) {
+      const controller = contactController(
+        {},
+        {},
+        {
+          fetchPeerKeys: async () => {
+            throw error;
+          },
+        },
+      );
+      await loadContactBook(controller);
+      expect(await controller.addContact(bobId, "Bob")).toEqual({
+        ok: false,
+        error: expected,
+      });
+      controller.stop();
+    }
+    const wrongPeerKey = contactController(
+      {},
+      {},
+      {
+        fetchPeerKeys: async () => userKeys(charlie),
+      },
+    );
+    await loadContactBook(wrongPeerKey);
+    expect(await wrongPeerKey.addContact(bobId, "Bob")).toEqual({
+      ok: false,
+      error: "bad_peer_key",
+    });
+    wrongPeerKey.stop();
+    for (const [error, expected] of [
+      [new ApiError(500, "failed"), "save_failed"],
+      [new TypeError("offline"), "server_unavailable"],
+    ] as const) {
+      const controller = contactController(
+        {},
+        {},
+        {
+          putContacts: async () => {
+            throw error;
+          },
+        },
+      );
+      await loadContactBook(controller);
+      const before = controller.getSnapshot();
+      expect(await controller.addContact(bobId, "Bob")).toEqual({
+        ok: false,
+        error: expected,
+      });
+      expect(controller.getSnapshot().contacts).toEqual(before.contacts);
+      controller.stop();
+    }
+    const oversized = contactController();
+    await loadContactBook(oversized);
+    const encrypt = vi
+      .spyOn(cryptoModule, "encryptContactBook")
+      .mockImplementation(() => {
+        throw new RangeError("too large");
+      });
+    expect(await oversized.addContact(bobId, "Bob")).toEqual({
+      ok: false,
+      error: "book_too_large",
+    });
+    expect(encrypt).toHaveBeenCalled();
+    encrypt.mockRestore();
+    oversized.stop();
+  });
+
+  it("maps non-RangeError contact book encryption failures to save_failed", async () => {
+    const controller = contactController();
+    await loadContactBook(controller);
+    const encrypt = vi
+      .spyOn(cryptoModule, "encryptContactBook")
+      .mockImplementation(() => {
+        throw new TypeError("invalid");
+      });
+    expect(await controller.addContact(bobId, "Bob")).toEqual({
+      ok: false,
+      error: "save_failed",
+    });
+    expect(encrypt).toHaveBeenCalled();
+    encrypt.mockRestore();
+    controller.stop();
+  });
+
+  it("reapplies add to the fresh book after a conflict and rejects duplicates", async () => {
+    let writes = 0;
+    const controller = contactController(
+      {},
+      {},
+      {
+        getContacts: async () => ({ version: "1", blob: null }),
+        putContacts: async () => {
+          writes++;
+          throw new ApiError(409, "version_conflict", {
+            version: "2",
+            blob: encryptContactBook({
+              historyKey: alice.historyKey,
+              contacts: { [bobId]: "Remote" },
+            }),
+          });
+        },
+      },
+    );
+    await loadContactBook(controller);
+    expect(await controller.addContact(bobId, "Bob")).toEqual({
+      ok: false,
+      error: "already_contact",
+    });
+    expect(writes).toBe(1);
+    expect(controller.getSnapshot().contacts[bobId]).toBe("Remote");
+    controller.stop();
+
+    let mergeWrites = 0;
+    let retried = "";
+    const merges = contactController(
+      {},
+      {},
+      {
+        putContacts: async (_token, _version, blob) => {
+          mergeWrites++;
+          if (mergeWrites === 1)
+            throw new ApiError(409, "version_conflict", {
+              version: "2",
+              blob: encryptContactBook({
+                historyKey: alice.historyKey,
+                contacts: { [charlieId]: "Charlie" },
+              }),
+            });
+          retried = blob;
+          return { version: "3" };
+        },
+      },
+    );
+    await loadContactBook(merges);
+    expect(await merges.addContact(bobId, "Bob")).toEqual({ ok: true });
+    expect(
+      decryptContactBookFull({ historyKey: alice.historyKey, blob: retried })
+        .contacts,
+    ).toEqual({
+      [bobId]: "Bob",
+      [charlieId]: "Charlie",
+    });
+    merges.stop();
+  });
+
+  it("renames while retaining notes and reports conflicts against fresh removals", async () => {
+    const controller = contactController(
+      { [bobId]: "Bob" },
+      { [bobId]: "Note" },
+    );
+    await loadContactBook(controller);
+    let blob = "";
+    (
+      controller as unknown as { deps: ChatControllerDependencies }
+    ).deps.putContacts = async (_t, _v, value) => {
+      blob = value;
+      return { version: "2" };
+    };
+    expect(await controller.renameContact(bobId, "Robert")).toEqual({
+      ok: true,
+    });
+    expect(
+      decryptContactBookFull({ historyKey: alice.historyKey, blob }).notes[
+        bobId
+      ],
+    ).toBe("Note");
+    expect(await controller.renameContact(bobId, "R".repeat(65))).toEqual({
+      ok: false,
+      error: "name_too_long",
+    });
+    controller.stop();
+
+    let writes = 0;
+    const conflicted = contactController(
+      { [bobId]: "Bob" },
+      {},
+      {
+        putContacts: async () => {
+          writes++;
+          throw new ApiError(409, "version_conflict", {
+            version: "3",
+            blob: encryptContactBook({
+              historyKey: alice.historyKey,
+              contacts: { [charlieId]: "Charlie" },
+            }),
+          });
+        },
+      },
+    );
+    await loadContactBook(conflicted);
+    expect(await conflicted.renameContact(bobId, "Bobby")).toEqual({
+      ok: false,
+      error: "not_a_contact",
+    });
+    expect(conflicted.getSnapshot().contacts).toEqual({
+      [charlieId]: "Charlie",
+    });
+    expect(writes).toBe(1);
+    conflicted.stop();
+  });
+
+  it("saves and clears notes, removes contacts, and treats remote removal as success", async () => {
+    const controller = contactController(
+      { [bobId]: "Bob", [charlieId]: "Charlie" },
+      { [bobId]: "old", [charlieId]: "keep" },
+    );
+    await loadContactBook(controller);
+    expect(await controller.saveContactNote(bobId, "new")).toEqual({
+      ok: true,
+    });
+    expect(controller.getSnapshot().contactNotes[bobId]).toBe("new");
+    expect(await controller.saveContactNote(bobId, "  ")).toEqual({ ok: true });
+    expect(controller.getSnapshot().contactNotes[bobId]).toBeUndefined();
+    expect(await controller.removeContact(bobId)).toEqual({ ok: true });
+    expect(controller.getSnapshot().contacts).toEqual({
+      [charlieId]: "Charlie",
+    });
+    expect(controller.getSnapshot().contactNotes).toEqual({
+      [charlieId]: "keep",
+    });
+    expect(controller.getSnapshot().chats).toEqual([]);
+    expect(controller.getSnapshot().activePeer).toBe("");
+    controller.stop();
+
+    let removeWrites = 0;
+    const conflicted = contactController(
+      { [bobId]: "Bob" },
+      {},
+      {
+        putContacts: async () => {
+          removeWrites++;
+          if (removeWrites === 1)
+            throw new ApiError(409, "version_conflict", {
+              version: "2",
+              blob: encryptContactBook({
+                historyKey: alice.historyKey,
+                contacts: { [charlieId]: "Charlie" },
+              }),
+            });
+          return { version: "3" };
+        },
+      },
+    );
+    await loadContactBook(conflicted);
+    expect(await conflicted.removeContact(bobId)).toEqual({ ok: true });
+    expect(conflicted.getSnapshot().contacts).toEqual({
+      [charlieId]: "Charlie",
+    });
+    conflicted.stop();
+  });
+
+  it("keeps a remote rename when saving a note after a version conflict", async () => {
+    let writes = 0;
+    let saved = "";
+    const fresh = encryptContactBook({
+      historyKey: alice.historyKey,
+      contacts: { [bobId]: "Remote name" },
+      notes: { [bobId]: "remote note" },
+    });
+    const controller = contactController(
+      { [bobId]: "Bob" },
+      {},
+      {
+        putContacts: async (_token, _version, blob) => {
+          writes++;
+          if (writes === 1)
+            throw new ApiError(409, "version_conflict", {
+              version: "2",
+              blob: fresh,
+            });
+          saved = blob;
+          return { version: "3" };
+        },
+      },
+    );
+    await loadContactBook(controller);
+    expect(await controller.saveContactNote(bobId, "local note")).toEqual({
+      ok: true,
+    });
+    expect(
+      decryptContactBookFull({ historyKey: alice.historyKey, blob: saved }),
+    ).toEqual({
+      contacts: { [bobId]: "Remote name" },
+      notes: { [bobId]: "local note" },
+    });
+    controller.stop();
+  });
+
+  it("rejects saving a note for a missing contact before and after a conflict", async () => {
+    const putContacts = vi.fn(async () => ({ version: "2" }));
+    const missing = contactController({}, {}, { putContacts });
+    await loadContactBook(missing);
+    expect(await missing.saveContactNote(bobId, "valid note")).toEqual({
+      ok: false,
+      error: "not_a_contact",
+    });
+    expect(putContacts).not.toHaveBeenCalled();
+    missing.stop();
+
+    let writes = 0;
+    const freshBlob = encryptContactBook({
+      historyKey: alice.historyKey,
+      contacts: { [charlieId]: "Charlie" },
+      notes: { [charlieId]: "keep" },
+    });
+    const conflicted = contactController(
+      { [bobId]: "Bob" },
+      { [bobId]: "old" },
+      {
+        putContacts: async () => {
+          writes++;
+          throw new ApiError(409, "version_conflict", {
+            version: "2",
+            blob: freshBlob,
+          });
+        },
+      },
+    );
+    await loadContactBook(conflicted);
+    expect(await conflicted.saveContactNote(bobId, "new note")).toEqual({
+      ok: false,
+      error: "not_a_contact",
+    });
+    expect(writes).toBe(1);
+    expect(conflicted.getSnapshot().contacts).toEqual({
+      [charlieId]: "Charlie",
+    });
+    expect(conflicted.getSnapshot().contactNotes).toEqual({
+      [charlieId]: "keep",
+    });
+    conflicted.stop();
+  });
+
+  it("rejects rename, note, and remove for missing contacts and unloaded books", async () => {
+    const controller = contactController();
+    expect(await controller.renameContact(bobId, "Bob")).toEqual({
+      ok: false,
+      error: "contacts_not_loaded",
+    });
+    expect(await controller.saveContactNote(bobId, "note")).toEqual({
+      ok: false,
+      error: "contacts_not_loaded",
+    });
+    expect(await controller.removeContact(bobId)).toEqual({
+      ok: false,
+      error: "contacts_not_loaded",
+    });
+    await loadContactBook(controller);
+    expect(await controller.renameContact(bobId, " ")).toEqual({
+      ok: false,
+      error: "name_required",
+    });
+    expect(await controller.renameContact(aliceId, "Alice")).toEqual({
+      ok: false,
+      error: "not_a_contact",
+    });
+    expect(await controller.saveContactNote(bobId, "x".repeat(201))).toEqual({
+      ok: false,
+      error: "note_too_long",
+    });
+    expect(await controller.removeContact(bobId)).toEqual({
+      ok: false,
+      error: "not_a_contact",
+    });
+    controller.stop();
+  });
+});

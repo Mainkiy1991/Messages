@@ -147,6 +147,7 @@ function App() {
     contacts: {},
     contactNotes: {},
     contactsError: false,
+    contactsReady: false,
     waking: false,
     presence: {},
   });
@@ -319,6 +320,7 @@ function App() {
       contacts: {},
       contactNotes: {},
       contactsError: false,
+      contactsReady: false,
       waking: false,
       presence: {},
     });
@@ -580,6 +582,7 @@ function App() {
       contacts: {},
       contactNotes: {},
       contactsError: false,
+      contactsReady: false,
       waking: false,
       presence: {},
     });
@@ -864,6 +867,7 @@ function App() {
               contacts: {},
               contactNotes: {},
               contactsError: false,
+              contactsReady: false,
               waking: false,
               presence: {},
             });
