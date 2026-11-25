@@ -55,6 +55,7 @@ import {
   DeletedMessageText,
 } from "./components/message-delete.js";
 import { DevicesPanel } from "./components/devices-panel.js";
+import { ContactsScreen } from "./components/contacts-screen.js";
 import {
   canEditMessage,
   canSubmitEdit,
@@ -163,6 +164,7 @@ function App() {
   const [contactNameError, setContactNameError] = useState("");
   const [chatError, setChatError] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
+  const [contactsOpen, setContactsOpen] = useState(false);
   const [profileSection, setProfileSection] = useState<
     "language" | "pin" | "devices" | "id" | null
   >(null);
@@ -324,6 +326,7 @@ function App() {
       waking: false,
       presence: {},
     });
+    setContactsOpen(false);
     setPhrase("");
     clearChatHistoryEntry();
     setScreen("home");
@@ -586,6 +589,7 @@ function App() {
       waking: false,
       presence: {},
     });
+    setContactsOpen(false);
     setPhrase("");
     setLogoutPhrase("");
     setLogoutError(false);
@@ -871,6 +875,7 @@ function App() {
               waking: false,
               presence: {},
             });
+            setContactsOpen(false);
             showAuthScreen("welcome");
             setDeviceRevokedNotice(true);
           }
@@ -1356,6 +1361,18 @@ function App() {
                   )}
                   <button
                     className="secondary profile-item"
+                    data-testid="profile-contacts"
+                    onClick={() => {
+                      setProfileSection(null);
+                      setPinForm(null);
+                      setProfileOpen(false);
+                      setContactsOpen(true);
+                    }}
+                  >
+                    {t.contactsTitle}
+                  </button>
+                  <button
+                    className="secondary profile-item"
                     aria-expanded={profileSection === "id"}
                     onClick={() => toggleProfileSection("id")}
                   >
@@ -1661,6 +1678,24 @@ function App() {
         )}
         {screen === "home" && (
           <>
+            {contactsOpen && controllerRef.current && (
+              <ContactsScreen
+                controller={controllerRef.current}
+                contacts={chatState.contacts}
+                notes={chatState.contactNotes}
+                ready={chatState.contactsReady}
+                loadFailed={chatState.contactsError}
+                language={language}
+                strings={t}
+                chatErrorText={errorText}
+                onClose={() => setContactsOpen(false)}
+                onChatOpened={(peerId) => {
+                  setContactsOpen(false);
+                  setChatError("");
+                  setContactNameDraft(chatState.contacts[peerId] ?? "");
+                }}
+              />
+            )}
             <section className={`messenger ${activePeer ? "show-chat" : ""}`}>
               <aside className="chat-sidebar">
                 <button

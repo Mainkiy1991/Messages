@@ -205,6 +205,132 @@ header {
   min-width: 0;
   overflow-wrap: anywhere;
 }
+.contacts-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  height: 100dvh;
+  background: #f4f5f8;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+html:has(.contacts-overlay),
+body:has(.contacts-overlay) {
+  overflow: hidden;
+}
+.contacts-overlay button {
+  min-height: 40px;
+}
+.contacts-header {
+  flex: 0 0 auto;
+  min-height: 56px;
+  margin: 0;
+  padding: 8px 16px;
+  background: white;
+  border-bottom: 1px solid #e4e6ee;
+  gap: 12px;
+}
+.contacts-header h1 {
+  margin: 0 auto 0 0;
+  font-size: 1.15rem;
+}
+.contacts-body {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-width: 0;
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 16px;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  overflow-wrap: anywhere;
+}
+.contacts-form,
+.contacts-card {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.contacts-form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.contacts-form input,
+.contacts-card input {
+  min-width: 0;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px;
+}
+.contacts-form small {
+  color: #687083;
+}
+.contact-row {
+  min-width: 0;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px;
+  border: 1px solid #e4e6ee;
+  background: white;
+  color: inherit;
+  text-align: left;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  overflow: hidden;
+}
+.contact-row strong {
+  overflow-wrap: anywhere;
+}
+.contact-tail {
+  color: #687083;
+}
+.contact-row-note {
+  min-width: 0;
+  grid-column: 1 / -1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #687083;
+}
+.contacts-card > button,
+.contacts-card section > button,
+.contacts-card section div > button {
+  min-height: 40px;
+}
+.contacts-card code {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.contacts-card p {
+  overflow-wrap: anywhere;
+}
+@media (min-width: 768px) {
+  .contacts-overlay {
+    inset: 12px auto;
+    height: calc(100dvh - 24px);
+    width: min(560px, calc(100vw - 32px));
+    left: 50%;
+    transform: translateX(-50%);
+    border-radius: 14px;
+    box-shadow: 0 12px 40px #17192a40;
+  }
+}
+@media (max-width: 480px) {
+  .contacts-card > button,
+  .contacts-card section > button,
+  .contacts-card section div > button {
+    width: 100%;
+  }
+}
 .devices-hint,
 .devices-loading,
 .devices-notice,

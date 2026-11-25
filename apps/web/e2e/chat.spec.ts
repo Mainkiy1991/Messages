@@ -26,6 +26,7 @@ type User = {
   expectedContactsFailure: boolean;
   expectedDeleteFailure: boolean;
   expectedEditFailure: boolean;
+  expectedUserNotFoundFailure: boolean;
 };
 type Fixtures = {
   serverControl: { stop(): Promise<void>; start(): Promise<void> };
@@ -63,6 +64,7 @@ async function openUser(
     expectedContactsFailure: false,
     expectedDeleteFailure: false,
     expectedEditFailure: false,
+    expectedUserNotFoundFailure: false,
   };
   page.on("pageerror", (error) =>
     user.errors.push(`pageerror: ${error.message}`),
@@ -92,13 +94,19 @@ async function openUser(
     const expectedEditFailure =
       user.expectedEditFailure &&
       message.text() === "Failed to load resource: net::ERR_FAILED";
+    const expectedUserNotFoundFailure =
+      user.expectedUserNotFoundFailure &&
+      /Failed to load resource: the server responded with a status of 404/u.test(
+        message.text(),
+      );
     // Chromium emits this network diagnostic during the deliberately stopped-server window.
     if (
       !expectedSocketRefusal &&
       !expectedApiRefusal &&
       !expectedContactsFailure &&
       !expectedDeleteFailure &&
-      !expectedEditFailure
+      !expectedEditFailure &&
+      !expectedUserNotFoundFailure
     )
       user.errors.push(`console.error: ${message.text()}`);
   });
@@ -2667,5 +2675,193 @@ test.describe("real browser chat", () => {
       "The other person deleted this message",
     );
     expect(await b.page.content()).not.toContain("Erased while away");
+  });
+  test.describe("contacts screen", () => {
+    async function openContacts(page: Page) {
+      await page.getByTestId("profile").click();
+      await page.getByTestId("profile-contacts").click();
+      await expect(page.getByTestId("contacts-screen")).toBeVisible();
+    }
+    async function addContact(
+      page: Page,
+      id: string,
+      name: string,
+      note: string,
+    ) {
+      await page.getByTestId("contact-add-open").click();
+      await page.getByTestId("contact-add-id").fill(id);
+      await page.getByTestId("contact-add-name").fill(name);
+      await page.getByTestId("contact-add-note").fill(note);
+      await page.getByTestId("contact-add-submit").click();
+    }
+
+    test("adds, edits, copies, removes, and persists a contact", async ({
+      browser,
+    }) => {
+      const alice = await openUser(browser);
+      const bob = await openUser(browser);
+      const aliceAccount = await createAccount(alice.page);
+      const bobAccount = await createAccount(bob.page);
+      await alice.context.grantPermissions([
+        "clipboard-read",
+        "clipboard-write",
+      ]);
+      await openContacts(alice.page);
+      await expect(alice.page.getByText("No contacts yet.")).toBeVisible();
+      await addContact(alice.page, "bad-id", "Bob", "");
+      await expect(alice.page.getByTestId("contact-add-error")).toBeVisible();
+      await alice.page.getByTestId("contacts-back").click();
+      await addContact(alice.page, aliceAccount.id, "Me", "");
+      await expect(alice.page.getByTestId("contact-add-error")).toBeVisible();
+      await alice.page.getByTestId("contacts-back").click();
+      alice.expectedUserNotFoundFailure = true;
+      await addContact(alice.page, "f".repeat(64), "Unknown", "");
+      await expect(alice.page.getByTestId("contact-add-error")).toBeVisible();
+      alice.expectedUserNotFoundFailure = false;
+      await alice.page.getByTestId("contacts-back").click();
+      await addContact(alice.page, bobAccount.id, "", "");
+      await expect(alice.page.getByTestId("contact-add-error")).toBeVisible();
+      await alice.page.getByTestId("contact-add-name").fill("Bob Contact");
+      await alice.page
+        .getByTestId("contact-add-note")
+        .fill("Met at the station");
+      await alice.page.getByTestId("contact-add-submit").click();
+      const row = alice.page.locator(
+        `[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`,
+      );
+      await expect(row).toContainText("Bob Contact");
+      await expect(row).toContainText(bobAccount.id.slice(-10));
+      await expect(row).toContainText("Met at the station");
+      await row.click();
+      await expect(alice.page.getByTestId("contact-card-id")).toHaveText(
+        bobAccount.id,
+      );
+      await expect(alice.page.getByTestId("contact-card-note")).toHaveText(
+        "Met at the station",
+      );
+      await alice.page.getByRole("button", { name: "Edit name" }).click();
+      await alice.page.getByTestId("contact-name-input").fill("Robert");
+      await alice.page.getByTestId("contact-save-name").click();
+      await expect(alice.page.getByTestId("contact-card-name")).toHaveText(
+        "Robert",
+      );
+      await alice.page
+        .getByRole("button", { name: "Edit description" })
+        .click();
+      await alice.page
+        .getByTestId("contact-note-input")
+        .fill("Long-time friend");
+      await alice.page.getByTestId("contact-save-note").click();
+      await expect(alice.page.getByTestId("contact-card-note")).toHaveText(
+        "Long-time friend",
+      );
+      await alice.page.getByRole("button", { name: "Edit name" }).click();
+      await alice.page.getByTestId("contact-name-input").fill("");
+      await alice.page.getByTestId("contact-save-name").click();
+      await expect(alice.page.getByTestId("contact-name-error")).toBeVisible();
+      await expect(alice.page.getByTestId("contact-card-name")).toHaveText(
+        "Robert",
+      );
+      await alice.page.getByRole("button", { name: "Copy" }).click();
+      await expect
+        .poll(() => alice.page.evaluate(() => navigator.clipboard.readText()))
+        .toBe(bobAccount.id);
+      await alice.page.getByTestId("contact-remove").click();
+      await alice.page.getByTestId("contact-remove-confirm").click();
+      await expect(alice.page.getByText("No contacts yet.")).toBeVisible();
+      await addContact(
+        alice.page,
+        bobAccount.id,
+        "Robert",
+        "Keep after reload",
+      );
+      await alice.page.reload();
+      await openContacts(alice.page);
+      await row.click();
+      await expect(alice.page.getByTestId("contact-card-note")).toHaveText(
+        "Keep after reload",
+      );
+    });
+
+    test("writing opens the chat and deleting chat preserves contact", async ({
+      browser,
+    }) => {
+      const alice = await openUser(browser);
+      const bob = await openUser(browser);
+      await createAccount(alice.page);
+      const bobAccount = await createAccount(bob.page);
+      await openContacts(alice.page);
+      await addContact(alice.page, bobAccount.id, "Bob", "");
+      await alice.page
+        .locator(`[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`)
+        .click();
+      await alice.page.getByTestId("contact-write").click();
+      await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+      await expect(alice.page.locator(".conversation-head")).toContainText(
+        "Bob",
+      );
+      await send(alice.page, "Delete this chat");
+      await alice.page.getByTestId("chat-menu").click();
+      await alice.page.getByTestId("delete-chat").click();
+      await alice.page.getByTestId("confirm-delete-chat").click();
+      await expect(chatWith(alice.page, bobAccount.id)).toHaveCount(0);
+      await openContacts(alice.page);
+      await expect(
+        alice.page.locator(
+          `[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`,
+        ),
+      ).toBeVisible();
+    });
+
+    test("wraps the contact card at 360px", async ({ browser }) => {
+      const alice = await openUser(browser);
+      const bob = await openUser(browser);
+      await createAccount(alice.page);
+      const bobAccount = await createAccount(bob.page);
+      await alice.page.setViewportSize({ width: 360, height: 800 });
+      await openContacts(alice.page);
+      await addContact(
+        alice.page,
+        bobAccount.id,
+        "A".repeat(64),
+        "N".repeat(200),
+      );
+      const row = alice.page.locator(
+        `[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`,
+      );
+      await row.click();
+      const layout = await alice.page.evaluate(() => {
+        const overlay = document.querySelector<HTMLElement>(
+          "[data-testid=contacts-screen]",
+        )!;
+        const id = document.querySelector<HTMLElement>(
+          "[data-testid=contact-card-id]",
+        )!;
+        const buttons = [
+          ...document.querySelectorAll<HTMLElement>(".contacts-card button"),
+        ];
+        return {
+          rect: overlay.getBoundingClientRect().toJSON(),
+          position: getComputedStyle(overlay).position,
+          pageWidth: document.documentElement.scrollWidth,
+          idScroll: id.scrollWidth,
+          idClient: id.clientWidth,
+          buttons: buttons.map((b) => ({
+            height: b.getBoundingClientRect().height,
+            right: b.getBoundingClientRect().right,
+          })),
+        };
+      });
+      expect(layout.position).toBe("fixed");
+      expect(layout.rect.x).toBe(0);
+      expect(layout.rect.width).toBe(360);
+      expect(layout.pageWidth).toBeLessThanOrEqual(360);
+      expect(layout.idScroll).toBeLessThanOrEqual(layout.idClient);
+      expect(
+        layout.buttons.every(
+          (button) => button.height >= 40 && button.right <= 360,
+        ),
+      ).toBe(true);
+    });
   });
 });
