@@ -51,6 +51,48 @@ export const strings = {
     idCopied: "ID скопирован",
     idCopyFailed:
       "Не удалось скопировать автоматически. Выделите и скопируйте ID вручную:",
+    contactsTitle: "Контакты",
+    contactsAdd: "Добавить контакт",
+    contactsAdding: "Добавляем…",
+    contactsId: "ID контакта",
+    contactsName: "Имя",
+    contactsNotePlaceholder: "Описание: кто это и зачем добавлен",
+    contactsCount: (n: number) => `${n} из 200`,
+    contactsNoNote: "Описания нет",
+    contactsMyNote: "Моё описание",
+    contactsWrite: "Написать",
+    contactsEditName: "Изменить имя",
+    contactsEditNote: "Изменить описание",
+    contactsSave: "Сохранить",
+    contactsRemove: "Убрать из контактов",
+    contactsRemovePrompt:
+      "Убрать контакт из списка? Чат и сообщения останутся.",
+    contactsRemoveConfirm: "Убрать",
+    contactsEmpty: "Контактов пока нет. Добавьте контакт по ID.",
+    contactsLoading: "Загружаем контакты…",
+    contactsLoadFailed:
+      "Не удалось загрузить контакты. Проверьте соединение и откройте экран ещё раз.",
+    contactsErrorInvalidId:
+      "Неверный ID: нужно 64 символа (цифры 0–9 и буквы a–f).",
+    contactsErrorOwnId:
+      "Это ваш собственный ID. «Избранное» добавлять в контакты не нужно.",
+    contactsErrorNotLoaded:
+      "Контакты ещё не загрузились. Подождите или обновите страницу.",
+    contactsErrorNameRequired: "Введите имя.",
+    contactsErrorNameTooLong: "Имя длиннее 64 символов.",
+    contactsErrorNameInvalid: "В имени есть недопустимые символы.",
+    contactsErrorNoteTooLong: "Описание длиннее 200 символов.",
+    contactsErrorNoteInvalid: "В описании есть недопустимые символы.",
+    contactsErrorNotContact: "Этого контакта больше нет в списке.",
+    contactsErrorAlreadyContact: "Этот контакт уже есть в списке.",
+    contactsErrorLimit: "Достигнут предел: 1000 контактов.",
+    contactsErrorBookLarge:
+      "Список контактов заполнен, добавить больше нельзя. Уберите ненужные контакты.",
+    contactsErrorUserNotFound: "Пользователь с таким ID не найден.",
+    contactsErrorBadPeerKey:
+      "Не удалось проверить ключи этого пользователя. Проверьте ID.",
+    contactsErrorServer: "Сервер недоступен. Проверьте соединение и повторите.",
+    contactsErrorSave: "Не удалось сохранить. Повторите попытку.",
     logout: "Выйти",
     logoutCheckTitle: "Перед выходом проверим сид-фразу",
     logoutCheckHint:
@@ -240,6 +282,48 @@ export const strings = {
     idCopied: "ID copied",
     idCopyFailed:
       "Could not copy automatically. Select and copy the ID manually:",
+    contactsTitle: "Contacts",
+    contactsAdd: "Add contact",
+    contactsAdding: "Adding…",
+    contactsId: "Contact ID",
+    contactsName: "Name",
+    contactsNotePlaceholder: "Description: who they are and why you added them",
+    contactsCount: (n: number) => `${n} of 200`,
+    contactsNoNote: "No description",
+    contactsMyNote: "My description",
+    contactsWrite: "Message",
+    contactsEditName: "Edit name",
+    contactsEditNote: "Edit description",
+    contactsSave: "Save",
+    contactsRemove: "Remove from contacts",
+    contactsRemovePrompt:
+      "Remove this contact from the list? The chat and messages will remain.",
+    contactsRemoveConfirm: "Remove",
+    contactsEmpty: "No contacts yet. Add a contact by ID.",
+    contactsLoading: "Loading contacts…",
+    contactsLoadFailed:
+      "Could not load contacts. Check your connection and reopen this screen.",
+    contactsErrorInvalidId:
+      "Invalid ID: it must be 64 characters (digits 0–9 and letters a–f).",
+    contactsErrorOwnId:
+      "This is your own ID. You don't need to add Favorites to contacts.",
+    contactsErrorNotLoaded:
+      "Contacts have not loaded yet. Wait or refresh the page.",
+    contactsErrorNameRequired: "Enter a name.",
+    contactsErrorNameTooLong: "Name is longer than 64 characters.",
+    contactsErrorNameInvalid: "Name contains invalid characters.",
+    contactsErrorNoteTooLong: "Description is longer than 200 characters.",
+    contactsErrorNoteInvalid: "Description contains invalid characters.",
+    contactsErrorNotContact: "This contact is no longer in the list.",
+    contactsErrorAlreadyContact: "This contact is already in the list.",
+    contactsErrorLimit: "Contact limit reached: 1,000 contacts.",
+    contactsErrorBookLarge:
+      "The contact list is full. Remove contacts you no longer need.",
+    contactsErrorUserNotFound: "No user was found with this ID.",
+    contactsErrorBadPeerKey: "Could not verify this user's keys. Check the ID.",
+    contactsErrorServer:
+      "Server unavailable. Check your connection and try again.",
+    contactsErrorSave: "Could not save. Please try again.",
     logout: "Sign out",
     logoutCheckTitle: "Check your seed phrase before signing out",
     logoutCheckHint:
@@ -427,6 +511,49 @@ export const strings = {
     idCopied: "ID скопійовано",
     idCopyFailed:
       "Не вдалося скопіювати автоматично. Виділіть і скопіюйте ID вручну:",
+    contactsTitle: "Контакти",
+    contactsAdd: "Додати контакт",
+    contactsAdding: "Додаємо…",
+    contactsId: "ID контакту",
+    contactsName: "Ім’я",
+    contactsNotePlaceholder: "Опис: хто це і навіщо доданий",
+    contactsCount: (n: number) => `${n} з 200`,
+    contactsNoNote: "Опису немає",
+    contactsMyNote: "Мій опис",
+    contactsWrite: "Написати",
+    contactsEditName: "Змінити ім’я",
+    contactsEditNote: "Змінити опис",
+    contactsSave: "Зберегти",
+    contactsRemove: "Прибрати з контактів",
+    contactsRemovePrompt:
+      "Прибрати контакт зі списку? Чат і повідомлення залишаться.",
+    contactsRemoveConfirm: "Прибрати",
+    contactsEmpty: "Контактів поки немає. Додайте контакт за ID.",
+    contactsLoading: "Завантажуємо контакти…",
+    contactsLoadFailed:
+      "Не вдалося завантажити контакти. Перевірте з’єднання та відкрийте екран ще раз.",
+    contactsErrorInvalidId:
+      "Невірний ID: потрібно 64 символи (цифри 0–9 і літери a–f).",
+    contactsErrorOwnId:
+      "Це ваш власний ID. «Обране» не потрібно додавати до контактів.",
+    contactsErrorNotLoaded:
+      "Контакти ще не завантажилися. Зачекайте або оновіть сторінку.",
+    contactsErrorNameRequired: "Введіть ім’я.",
+    contactsErrorNameTooLong: "Ім’я довше за 64 символи.",
+    contactsErrorNameInvalid: "Ім’я містить недопустимі символи.",
+    contactsErrorNoteTooLong: "Опис довший за 200 символів.",
+    contactsErrorNoteInvalid: "Опис містить недопустимі символи.",
+    contactsErrorNotContact: "Цього контакту більше немає у списку.",
+    contactsErrorAlreadyContact: "Цей контакт уже є у списку.",
+    contactsErrorLimit: "Досягнуто межу: 1000 контактів.",
+    contactsErrorBookLarge:
+      "Список контактів заповнений. Приберіть непотрібні контакти.",
+    contactsErrorUserNotFound: "Користувача з таким ID не знайдено.",
+    contactsErrorBadPeerKey:
+      "Не вдалося перевірити ключі цього користувача. Перевірте ID.",
+    contactsErrorServer:
+      "Сервер недоступний. Перевірте з’єднання та повторіть.",
+    contactsErrorSave: "Не вдалося зберегти. Спробуйте ще раз.",
     logout: "Вийти",
     logoutCheckTitle: "Перед виходом перевіримо сід-фразу",
     logoutCheckHint:
