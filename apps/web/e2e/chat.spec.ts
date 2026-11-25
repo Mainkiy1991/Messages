@@ -2753,6 +2753,7 @@ test.describe("real browser chat", () => {
         .click();
       await alice.page.getByTestId("contact-note-input").press("Escape");
       await expect(alice.page.getByTestId("contact-card-id")).toBeVisible();
+      await alice.page.getByTestId("contacts-back").focus();
       await alice.page.keyboard.press("Escape");
       await expect(row).toBeVisible();
       await expect(alice.page.getByTestId("contacts-screen")).toBeVisible();
@@ -2763,6 +2764,7 @@ test.describe("real browser chat", () => {
       await expect(alice.page.getByTestId("contact-card-name")).toHaveText(
         "Robert",
       );
+      await alice.page.getByTestId("contacts-back").focus();
       await alice.page.keyboard.press("Escape");
       await expect(row).toBeVisible();
       await row.click();
@@ -2950,7 +2952,6 @@ test.describe("real browser chat", () => {
       ).not.toBe(true);
 
       await openContacts(alice.page);
-      await addContact(alice.page, bobAccount.id, "Bob", "");
       await alice.page
         .locator(`[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`)
         .click();
