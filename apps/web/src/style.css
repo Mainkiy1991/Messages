@@ -236,6 +236,17 @@ body:has(.contacts-overlay) {
   margin: 0 auto 0 0;
   font-size: 1.15rem;
 }
+.contacts-header .text-button {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  padding: 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  display: inline-grid;
+  place-items: center;
+}
 .contacts-body {
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -299,16 +310,72 @@ body:has(.contacts-overlay) {
   text-overflow: ellipsis;
   color: #687083;
 }
-.contacts-card > button,
-.contacts-card section > button,
-.contacts-card section div > button {
-  min-height: 40px;
+.contact-name-row,
+.contact-note-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
-.contacts-card code {
-  display: block;
+.contact-name-row strong,
+.contact-note-row p {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.contact-icon-button {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  padding: 10px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid #e4e6ee;
+  background: white;
+  color: inherit;
+}
+.contact-id-button {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #e4e6ee;
+  background: white;
+  color: inherit;
+  text-align: left;
+}
+.contact-id-button code {
+  flex: 1 1 auto;
+  min-width: 0;
   min-width: 0;
   overflow-wrap: anywhere;
   white-space: normal;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  text-align: left;
+}
+.contact-id-button svg {
+  flex: 0 0 auto;
+}
+.contacts-card h2 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+  font-weight: 700;
+}
+.contact-editor {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+  min-width: 0;
+}
+.contact-editor input {
+  grid-column: 1 / -1;
+}
+.contact-editor .error {
+  grid-column: 1 / -1;
 }
 .contacts-card p {
   overflow-wrap: anywhere;
@@ -325,9 +392,10 @@ body:has(.contacts-overlay) {
   }
 }
 @media (max-width: 480px) {
-  .contacts-card > button,
-  .contacts-card section > button,
-  .contacts-card section div > button {
+  .contacts-card > .primary,
+  .contacts-card > .danger,
+  .contacts-card > div > .danger,
+  .contacts-card > div > .secondary {
     width: 100%;
   }
 }

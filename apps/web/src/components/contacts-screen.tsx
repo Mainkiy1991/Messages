@@ -14,7 +14,9 @@ export type ContactsScreenStrings = {
   contactsAdding: string;
   contactsId: string;
   contactsName: string;
-  contactsNotePlaceholder: string;
+  contactsNoteLabel: string;
+  contactsNoteHint: string;
+  contactsCopyId: string;
   contactsCount: (count: number) => string;
   contactsNoNote: string;
   contactsMyNote: string;
@@ -177,7 +179,8 @@ export function ContactsScreen({
     setError(null);
     if (editing) setEditing(null);
     else if (confirmRemove) setConfirmRemove(false);
-    else if (view.view !== "list") setView({ view: "list" });
+    else if (view.view === "card" || view.view === "add")
+      setView({ view: "list" });
     else onClose();
   }
   async function add() {
@@ -281,12 +284,27 @@ export function ContactsScreen({
     >
       <header className="contacts-header">
         <button
-          className="secondary"
+          className="text-button"
           data-testid="contacts-back"
           disabled={busy}
           onClick={back}
+          aria-label={strings.back}
+          title={strings.back}
         >
-          {strings.back}
+          <svg
+            aria-hidden="true"
+            focusable="false"
+            viewBox="0 0 24 24"
+            width="24"
+            height="24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M19 12H5M12 19l-7-7 7-7" />
+          </svg>
         </button>
         <h1>{strings.contactsTitle}</h1>
       </header>
@@ -364,10 +382,11 @@ export function ContactsScreen({
               />
             </label>
             <label>
-              {strings.contactsNotePlaceholder}
+              {strings.contactsNoteLabel}
               <input
                 data-testid="contact-add-note"
                 value={note}
+                placeholder={strings.contactsNoteHint}
                 disabled={busy}
                 onChange={(e) => setNote(e.target.value)}
               />
@@ -390,22 +409,40 @@ export function ContactsScreen({
         {view.view === "card" && contacts[view.peerId] !== undefined && (
           <div className="contacts-card">
             <section>
-              <strong data-testid="contact-card-name">
-                {contacts[peerId]}
-              </strong>
-              <button
-                className="secondary"
-                disabled={busy}
-                onClick={() => {
-                  setName(contacts[peerId] ?? "");
-                  setError(null);
-                  setEditing("name");
-                }}
-              >
-                {strings.contactsEditName}
-              </button>
+              <div className="contact-name-row">
+                <strong data-testid="contact-card-name">
+                  {contacts[peerId]}
+                </strong>
+                <button
+                  className="contact-icon-button"
+                  type="button"
+                  disabled={busy}
+                  aria-label={strings.contactsEditName}
+                  title={strings.contactsEditName}
+                  onClick={() => {
+                    setName(contacts[peerId] ?? "");
+                    setError(null);
+                    setEditing("name");
+                  }}
+                >
+                  <svg
+                    aria-hidden="true"
+                    focusable="false"
+                    viewBox="0 0 24 24"
+                    width="20"
+                    height="20"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M17 3a2.828 2.828 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                  </svg>
+                </button>
+              </div>
               {editing === "name" && (
-                <div>
+                <div className="contact-editor">
                   <input
                     ref={editRef}
                     data-testid="contact-name-input"
@@ -453,14 +490,37 @@ export function ContactsScreen({
                 </div>
               )}
             </section>
-            <code data-testid="contact-card-id">{peerId}</code>
             <button
-              className="secondary"
+              type="button"
+              className="contact-id-button"
+              data-testid="contact-card-id"
+              aria-label={strings.contactsCopyId}
+              title={strings.contactsCopyId}
               disabled={busy}
               onClick={() => void copyId()}
             >
-              {copied ? strings.copied : strings.copy}
+              <code>{peerId}</code>
+              <svg
+                aria-hidden="true"
+                focusable="false"
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+              </svg>
             </button>
+            {copied && (
+              <span role="status" className="contact-copy-status">
+                {strings.copied}
+              </span>
+            )}
             {error?.place === "copy" && (
               <p
                 className="error"
@@ -473,7 +533,7 @@ export function ContactsScreen({
             <section>
               <h2>{strings.contactsMyNote}</h2>
               {editing !== "note" && (
-                <>
+                <div className="contact-note-row">
                   <p
                     data-testid="contact-card-note"
                     className={!notes[peerId] ? "muted" : ""}
@@ -481,20 +541,36 @@ export function ContactsScreen({
                     {notes[peerId] || strings.contactsNoNote}
                   </p>
                   <button
-                    className="secondary"
+                    className="contact-icon-button"
+                    type="button"
                     disabled={busy}
+                    aria-label={strings.contactsEditNote}
+                    title={strings.contactsEditNote}
                     onClick={() => {
                       setNote(notes[peerId] ?? "");
                       setError(null);
                       setEditing("note");
                     }}
                   >
-                    {strings.contactsEditNote}
+                    <svg
+                      aria-hidden="true"
+                      focusable="false"
+                      viewBox="0 0 24 24"
+                      width="20"
+                      height="20"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M17 3a2.828 2.828 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                    </svg>
                   </button>
-                </>
+                </div>
               )}
               {editing === "note" && (
-                <div>
+                <div className="contact-editor">
                   <input
                     ref={editRef}
                     data-testid="contact-note-input"
