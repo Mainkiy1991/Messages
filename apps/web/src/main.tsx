@@ -190,12 +190,39 @@ function App() {
   const previousPeerRef = useRef("");
   const preserveScrollRef = useRef(false);
   const chatHistoryRef = useRef(false);
+  const contactsOpenRef = useRef(false);
+  const contactsHistoryRef = useRef(false);
   const longPressHandlersRef = useRef(new Map<string, LongPressHandlers>());
   const chatPointerTypesRef = useRef(new Map<string, string>());
 
   function clearChatHistoryEntry() {
     window.history.replaceState(null, "", window.location.href);
     chatHistoryRef.current = false;
+  }
+
+  function openContacts() {
+    if (contactsOpenRef.current) return;
+    window.history.pushState(
+      { ...(window.history.state ?? {}), contacts: true },
+      "",
+      window.location.href,
+    );
+    contactsHistoryRef.current = true;
+    contactsOpenRef.current = true;
+    setContactsOpen(true);
+  }
+
+  function closeContacts() {
+    if (
+      contactsHistoryRef.current &&
+      (window.history.state as { contacts?: unknown } | null)?.contacts
+    ) {
+      window.history.back();
+      return;
+    }
+    contactsOpenRef.current = false;
+    contactsHistoryRef.current = false;
+    setContactsOpen(false);
   }
 
   useEffect(() => {
@@ -326,6 +353,8 @@ function App() {
       waking: false,
       presence: {},
     });
+    contactsOpenRef.current = false;
+    contactsHistoryRef.current = false;
     setContactsOpen(false);
     setPhrase("");
     clearChatHistoryEntry();
@@ -589,6 +618,8 @@ function App() {
       waking: false,
       presence: {},
     });
+    contactsOpenRef.current = false;
+    contactsHistoryRef.current = false;
     setContactsOpen(false);
     setPhrase("");
     setLogoutPhrase("");
@@ -692,6 +723,12 @@ function App() {
   useEffect(() => {
     if (screen !== "home") return;
     const onPopState = (event: PopStateEvent) => {
+      if (contactsOpenRef.current) {
+        contactsOpenRef.current = false;
+        contactsHistoryRef.current = false;
+        setContactsOpen(false);
+        return;
+      }
       const peerId = (event.state as { chat?: unknown } | null)?.chat;
       chatHistoryRef.current = false;
       if (typeof peerId === "string" && /^[0-9a-f]{64}$/u.test(peerId))
@@ -702,6 +739,19 @@ function App() {
     return () => window.removeEventListener("popstate", onPopState);
   }, [screen]);
   useEffect(() => {
+    if (
+      contactsOpenRef.current &&
+      (window.history.state as { contacts?: unknown } | null)?.contacts
+    ) {
+      window.history.replaceState(
+        { chat: activePeer },
+        "",
+        window.location.href,
+      );
+      contactsHistoryRef.current = false;
+      chatHistoryRef.current = true;
+      return;
+    }
     if (screen !== "home" || !activePeer) return;
     const state = window.history.state as { chat?: unknown } | null;
     if (state?.chat === activePeer) {
@@ -875,6 +925,8 @@ function App() {
               waking: false,
               presence: {},
             });
+            contactsOpenRef.current = false;
+            contactsHistoryRef.current = false;
             setContactsOpen(false);
             showAuthScreen("welcome");
             setDeviceRevokedNotice(true);
@@ -1366,7 +1418,7 @@ function App() {
                       setProfileSection(null);
                       setPinForm(null);
                       setProfileOpen(false);
-                      setContactsOpen(true);
+                      openContacts();
                     }}
                   >
                     {t.contactsTitle}
@@ -1688,9 +1740,9 @@ function App() {
                 language={language}
                 strings={t}
                 chatErrorText={errorText}
-                onClose={() => setContactsOpen(false)}
+                onClose={closeContacts}
                 onChatOpened={(peerId) => {
-                  setContactsOpen(false);
+                  closeContacts();
                   setChatError("");
                   setContactNameDraft(chatState.contacts[peerId] ?? "");
                 }}

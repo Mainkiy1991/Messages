@@ -2762,7 +2762,7 @@ test.describe("real browser chat", () => {
       await expect(alice.page.getByTestId("contact-card-name")).toHaveText(
         "Robert",
       );
-      await alice.page.getByRole("button", { name: "Copy" }).click();
+      await alice.page.getByRole("button", { name: "Copy ID" }).click();
       await expect
         .poll(() => alice.page.evaluate(() => navigator.clipboard.readText()))
         .toBe(bobAccount.id);
@@ -2854,7 +2854,7 @@ test.describe("real browser chat", () => {
         });
         document.execCommand = () => false;
       });
-      await alice.page.getByRole("button", { name: "Copy" }).click();
+      await alice.page.getByRole("button", { name: "Copy ID" }).click();
       await expect(alice.page.getByTestId("contact-copy-error")).toBeVisible();
       await expectOneCardAlert();
 
@@ -2883,6 +2883,154 @@ test.describe("real browser chat", () => {
       await alice.page.getByTestId("contact-remove").click();
       await alice.page.getByTestId("contact-remove-confirm").click();
       await expect(alice.page.getByText("No contacts yet.")).toBeVisible();
+    });
+
+    test("contacts window closes with the phone Back button", async ({
+      browser,
+    }) => {
+      const alice = await openUser(browser);
+      const bob = await openUser(browser);
+      await createAccount(alice.page);
+      const bobAccount = await createAccount(bob.page);
+      await alice.page.setViewportSize({ width: 360, height: 800 });
+      const url = alice.page.url();
+
+      await openContacts(alice.page);
+      await alice.page.goBack();
+      await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+      await expect(alice.page.getByTestId("profile")).toBeVisible();
+      await expect(alice.page.locator(".messenger")).not.toHaveClass(
+        /show-chat/u,
+      );
+      expect(alice.page.url()).toBe(url);
+
+      await openContacts(alice.page);
+      await alice.page.getByTestId("contacts-back").click();
+      await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+      expect(
+        await alice.page.evaluate(
+          () => (history.state as { contacts?: boolean } | null)?.contacts,
+        ),
+      ).not.toBe(true);
+
+      await openContacts(alice.page);
+      await addContact(alice.page, bobAccount.id, "Bob", "");
+      await alice.page
+        .locator(`[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`)
+        .click();
+      await alice.page.getByTestId("contact-write").click();
+      await expect(alice.page.locator(".conversation-head")).toContainText(
+        "Bob",
+      );
+      await openContacts(alice.page);
+      await alice.page.goBack();
+      await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+      await expect(alice.page.locator(".conversation-head")).toContainText(
+        "Bob",
+      );
+    });
+
+    test("chat opened from contacts goes back to the chat list", async ({
+      browser,
+    }) => {
+      const alice = await openUser(browser);
+      const bob = await openUser(browser);
+      await createAccount(alice.page);
+      const bobAccount = await createAccount(bob.page);
+      await alice.page.setViewportSize({ width: 360, height: 800 });
+      const url = alice.page.url();
+
+      await openContacts(alice.page);
+      await addContact(alice.page, bobAccount.id, "Bob", "");
+      await alice.page
+        .locator(`[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`)
+        .click();
+      await alice.page.getByTestId("contact-write").click();
+      await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+      await alice.page.goBack();
+      await expect(alice.page.locator(".messenger")).not.toHaveClass(
+        /show-chat/u,
+      );
+      await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+      expect(alice.page.url()).toBe(url);
+    });
+
+    test("contact card editor and name row do not stick together", async ({
+      browser,
+    }) => {
+      const alice = await openUser(browser);
+      const bob = await openUser(browser);
+      await createAccount(alice.page);
+      const bobAccount = await createAccount(bob.page);
+
+      for (const width of [360, 1280]) {
+        await alice.page.setViewportSize({ width, height: 800 });
+        await openContacts(alice.page);
+        await addContact(alice.page, bobAccount.id, "Bob", "Description");
+        await alice.page
+          .locator(
+            `[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`,
+          )
+          .click();
+        await alice.page
+          .getByRole("button", { name: "Edit description" })
+          .click();
+
+        const layout = await alice.page.evaluate(() => {
+          const field = document.querySelector<HTMLElement>(
+            "[data-testid=contact-note-input]",
+          )!;
+          const editor = field.parentElement!;
+          const buttons = [
+            ...editor.querySelectorAll<HTMLElement>("button"),
+          ].map((button) => button.getBoundingClientRect());
+          const name = document.querySelector<HTMLElement>(
+            "[data-testid=contact-card-name]",
+          )!;
+          const nameRow = name.parentElement!;
+          const nameButton = nameRow.querySelector<HTMLElement>("button")!;
+          const back = document.querySelector<HTMLElement>(
+            "[data-testid=contacts-back]",
+          )!;
+          const id = document.querySelector<HTMLElement>(
+            "[data-testid=contact-card-id]",
+          )!;
+          const body = document.querySelector<HTMLElement>(".contacts-body")!;
+          const fieldRect = field.getBoundingClientRect();
+          return {
+            fieldBottom: fieldRect.bottom,
+            buttonTops: buttons.map((rect) => rect.top),
+            buttonBottoms: buttons.map((rect) => rect.bottom),
+            nameGap:
+              nameButton.getBoundingClientRect().left -
+              name.getBoundingClientRect().right,
+            nameButtonSize: nameButton.getBoundingClientRect().toJSON(),
+            backSize: back.getBoundingClientRect().toJSON(),
+            idRight: id.getBoundingClientRect().right,
+            bodyScrollWidth: body.scrollWidth,
+            bodyClientWidth: body.clientWidth,
+          };
+        });
+
+        expect(
+          Math.min(...layout.buttonTops) - layout.fieldBottom,
+        ).toBeGreaterThanOrEqual(8);
+        expect(layout.buttonTops[0]).toBe(layout.buttonTops[1]);
+        expect(layout.buttonBottoms[0]).toBeGreaterThan(layout.fieldBottom);
+        expect(layout.nameGap).toBeGreaterThanOrEqual(8);
+        expect(layout.nameButtonSize.width).toBeGreaterThanOrEqual(40);
+        expect(layout.nameButtonSize.height).toBeGreaterThanOrEqual(40);
+        expect(layout.backSize.width).toBeGreaterThanOrEqual(40);
+        expect(layout.backSize.height).toBeGreaterThanOrEqual(40);
+        expect(layout.idRight).toBeLessThanOrEqual(width);
+        expect(layout.bodyScrollWidth).toBeLessThanOrEqual(
+          layout.bodyClientWidth,
+        );
+
+        await alice.page.getByTestId("contact-remove").click();
+        await alice.page.getByTestId("contact-remove-confirm").click();
+        await alice.page.reload();
+      }
     });
 
     test("wraps the contact card at 360px", async ({ browser }) => {

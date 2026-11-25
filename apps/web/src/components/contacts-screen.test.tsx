@@ -78,8 +78,34 @@ describe("contacts screen", () => {
       notes: { [id]: "Описание" },
       initialView: { view: "card", peerId: id },
     });
-    expect(html).toContain(`data-testid="contact-card-id">${id}</code>`);
+    expect(html).toContain(`data-testid="contact-card-id"`);
+    expect(html).toContain(`aria-label="Копировать ID"`);
+    expect(html).toContain(`<code>${id}</code>`);
+    expect(html).not.toContain(`>Копировать<`);
     expect(html).toContain("Описание");
+  });
+  it("renders the back button as an icon with an accessible label", () => {
+    const html = render({
+      initialView: { view: "card", peerId: id },
+      contacts: { [id]: "Алиса" },
+    });
+    expect(html).toContain('data-testid="contacts-back"');
+    expect(html).toContain('aria-label="Назад"');
+    expect(html).toContain("<svg");
+    expect(html).not.toContain(">Назад</button>");
+  });
+  it("renders icon-only name and note edit buttons", () => {
+    const html = render({
+      initialView: { view: "card", peerId: id },
+      contacts: { [id]: "Алиса" },
+    });
+    expect(html).toContain('aria-label="Изменить имя"');
+    expect(html).toContain('aria-label="Изменить описание"');
+    expect(html).not.toContain(">Изменить имя<");
+    expect(html).not.toContain(">Изменить описание<");
+  });
+  it("explains contact removal in the confirmation", () => {
+    expect(strings.ru.contactsRemovePrompt).toContain("имя в чате пропадёт");
   });
   it("shows empty note label", () =>
     expect(
@@ -97,6 +123,8 @@ describe("contacts screen", () => {
     expect(html).toContain("contact-add-id");
     expect(html).toContain("contact-add-name");
     expect(html).toContain("contact-add-note");
+    expect(html).toContain("Описание (необязательно)");
+    expect(html).toContain('placeholder="Кто это и зачем добавлен"');
   });
   it("disables add action until contacts are ready", () =>
     expect(render({ ready: false })).toContain(
