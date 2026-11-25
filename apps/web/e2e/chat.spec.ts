@@ -2785,6 +2785,7 @@ test.describe("real browser chat", () => {
       await expect(alice.page.getByTestId("contact-card-name")).toHaveText(
         "Robert",
       );
+      await alice.page.getByRole("button", { name: "Cancel" }).click();
       await alice.page.getByRole("button", { name: "Copy ID" }).click();
       await expect
         .poll(() => alice.page.evaluate(() => navigator.clipboard.readText()))
