@@ -2739,12 +2739,33 @@ test.describe("real browser chat", () => {
       await expect(alice.page.getByTestId("contact-card-note")).toHaveText(
         "Met at the station",
       );
+      await alice.page.getByTestId("contacts-back").click();
+      await expect(row).toBeVisible();
+      await expect(alice.page.getByTestId("contact-card-id")).toHaveCount(0);
+      await expect(alice.page.getByTestId("contacts-screen")).toBeVisible();
+      await alice.page.getByTestId("contact-add-open").click();
+      await alice.page.getByTestId("contacts-back").click();
+      await expect(row).toBeVisible();
+      await expect(alice.page.getByTestId("contacts-screen")).toBeVisible();
+      await row.click();
+      await alice.page
+        .getByRole("button", { name: "Edit description" })
+        .click();
+      await alice.page.getByTestId("contact-note-input").press("Escape");
+      await expect(alice.page.getByTestId("contact-card-id")).toBeVisible();
+      await alice.page.keyboard.press("Escape");
+      await expect(row).toBeVisible();
+      await expect(alice.page.getByTestId("contacts-screen")).toBeVisible();
+      await row.click();
       await alice.page.getByRole("button", { name: "Edit name" }).click();
       await alice.page.getByTestId("contact-name-input").fill("Robert");
       await alice.page.getByTestId("contact-save-name").click();
       await expect(alice.page.getByTestId("contact-card-name")).toHaveText(
         "Robert",
       );
+      await alice.page.keyboard.press("Escape");
+      await expect(row).toBeVisible();
+      await row.click();
       await alice.page
         .getByRole("button", { name: "Edit description" })
         .click();
@@ -2766,6 +2787,15 @@ test.describe("real browser chat", () => {
       await expect
         .poll(() => alice.page.evaluate(() => navigator.clipboard.readText()))
         .toBe(bobAccount.id);
+      await alice.page.getByTestId("contact-remove").click();
+      await expect(
+        alice.page.getByTestId("contact-remove-confirm"),
+      ).toBeVisible();
+      await alice.page.getByTestId("contacts-back").click();
+      await expect(
+        alice.page.getByTestId("contact-remove-confirm"),
+      ).toHaveCount(0);
+      await expect(alice.page.getByTestId("contact-card-id")).toBeVisible();
       await alice.page.getByTestId("contact-remove").click();
       await alice.page.getByTestId("contact-remove-confirm").click();
       await expect(alice.page.getByText("No contacts yet.")).toBeVisible();
@@ -2896,8 +2926,14 @@ test.describe("real browser chat", () => {
       const url = alice.page.url();
 
       await openContacts(alice.page);
+      await addContact(alice.page, bobAccount.id, "Bob", "");
+      await alice.page
+        .locator(`[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`)
+        .click();
       await alice.page.goBack();
       await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+      await expect(alice.page.getByTestId("contact-card-id")).toHaveCount(0);
+      await expect(alice.page.getByTestId("contact-row")).toHaveCount(0);
       await expect(alice.page.getByTestId("profile")).toBeVisible();
       await expect(alice.page.locator(".messenger")).not.toHaveClass(
         /show-chat/u,

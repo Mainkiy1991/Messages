@@ -740,6 +740,7 @@ function App() {
   }, [screen]);
   useEffect(() => {
     if (
+      activePeer &&
       contactsOpenRef.current &&
       (window.history.state as { contacts?: unknown } | null)?.contacts
     ) {

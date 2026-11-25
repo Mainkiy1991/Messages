@@ -177,7 +177,10 @@ export function ContactsScreen({
   }, [contacts, view]);
   function back() {
     setError(null);
-    if (view.view === "add") setView({ view: "list" });
+    if (editing) setEditing(null);
+    else if (confirmRemove) setConfirmRemove(false);
+    else if (view.view === "card" || view.view === "add")
+      setView({ view: "list" });
     else onClose();
   }
   async function add() {
@@ -275,7 +278,7 @@ export function ContactsScreen({
       onKeyDown={(e) => {
         if (e.key === "Escape") {
           e.preventDefault();
-          onClose();
+          back();
         }
       }}
     >
