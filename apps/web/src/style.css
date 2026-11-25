@@ -315,13 +315,27 @@ body:has(.contacts-overlay) {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-height: 40px;
   min-width: 0;
 }
 .contact-name-row strong,
 .contact-note-row p {
   flex: 1 1 auto;
   min-width: 0;
+  margin: 0;
   overflow-wrap: anywhere;
+}
+.contact-inline-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  height: 40px;
+  box-sizing: border-box;
+  margin: 0;
+  font: inherit;
+}
+.contact-name-input {
+  font-weight: 700;
 }
 .contact-icon-button {
   width: 40px;
@@ -363,19 +377,6 @@ body:has(.contacts-overlay) {
   margin: 0 0 8px;
   font-size: 1rem;
   font-weight: 700;
-}
-.contact-editor {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-top: 8px;
-  min-width: 0;
-}
-.contact-editor input {
-  grid-column: 1 / -1;
-}
-.contact-editor .error {
-  grid-column: 1 / -1;
 }
 .contacts-card p {
   overflow-wrap: anywhere;

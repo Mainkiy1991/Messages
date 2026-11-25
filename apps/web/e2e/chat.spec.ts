@@ -2753,7 +2753,9 @@ test.describe("real browser chat", () => {
         .click();
       await alice.page.getByTestId("contact-note-input").press("Escape");
       await expect(alice.page.getByTestId("contact-card-id")).toBeVisible();
-      await alice.page.getByTestId("contacts-back").focus();
+      await expect(
+        alice.page.getByRole("button", { name: "Edit description" }),
+      ).toBeFocused();
       await alice.page.keyboard.press("Escape");
       await expect(row).toBeVisible();
       await expect(alice.page.getByTestId("contacts-screen")).toBeVisible();
@@ -2764,7 +2766,9 @@ test.describe("real browser chat", () => {
       await expect(alice.page.getByTestId("contact-card-name")).toHaveText(
         "Robert",
       );
-      await alice.page.getByTestId("contacts-back").focus();
+      await expect(
+        alice.page.getByRole("button", { name: "Edit name" }),
+      ).toBeFocused();
       await alice.page.keyboard.press("Escape");
       await expect(row).toBeVisible();
       await row.click();
@@ -2782,10 +2786,11 @@ test.describe("real browser chat", () => {
       await alice.page.getByTestId("contact-name-input").fill("");
       await alice.page.getByTestId("contact-save-name").click();
       await expect(alice.page.getByTestId("contact-name-error")).toBeVisible();
+      await expect(alice.page.getByTestId("contact-name-input")).toBeVisible();
+      await alice.page.getByRole("button", { name: "Cancel" }).click();
       await expect(alice.page.getByTestId("contact-card-name")).toHaveText(
         "Robert",
       );
-      await alice.page.getByRole("button", { name: "Cancel" }).click();
       await alice.page.getByRole("button", { name: "Copy ID" }).click();
       await expect
         .poll(() => alice.page.evaluate(() => navigator.clipboard.readText()))
@@ -3010,59 +3015,135 @@ test.describe("real browser chat", () => {
             `[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`,
           )
           .click();
-        await alice.page
-          .getByRole("button", { name: "Edit description" })
-          .click();
+        const measureAnchors = () =>
+          alice.page.evaluate(() => {
+            const id = document.querySelector<HTMLElement>(
+              "[data-testid=contact-card-id]",
+            )!;
+            const write = document.querySelector<HTMLElement>(
+              "[data-testid=contact-write]",
+            )!;
+            return {
+              idY: id.getBoundingClientRect().top,
+              writeY: write.getBoundingClientRect().top,
+            };
+          });
+        const assertInlineEditor = async (
+          fieldTestId: string,
+          saveTestId: string,
+          cancelTestId: string,
+        ) => {
+          const before = await measureAnchors();
+          await alice.page
+            .getByRole("button", {
+              name:
+                fieldTestId === "contact-name-input"
+                  ? "Edit name"
+                  : "Edit description",
+            })
+            .click();
+          const field = alice.page.getByTestId(fieldTestId);
+          const saveButton = alice.page.getByTestId(saveTestId);
+          const cancelButton = alice.page.getByTestId(cancelTestId);
+          await expect(field).toBeVisible();
+          await expect(saveButton).toBeVisible();
+          await expect(cancelButton).toBeVisible();
+          const layout = await alice.page.evaluate(
+            ({ fieldTestId, saveTestId, cancelTestId }) => {
+              const field = document
+                .querySelector<HTMLElement>(`[data-testid=${fieldTestId}]`)!
+                .getBoundingClientRect();
+              const buttons = [saveTestId, cancelTestId].map((testId) =>
+                document
+                  .querySelector<HTMLElement>(`[data-testid=${testId}]`)!
+                  .getBoundingClientRect(),
+              );
+              const body =
+                document.querySelector<HTMLElement>(".contacts-body")!;
+              const id = document.querySelector<HTMLElement>(
+                "[data-testid=contact-card-id]",
+              )!;
+              const write = document.querySelector<HTMLElement>(
+                "[data-testid=contact-write]",
+              )!;
+              return {
+                fieldRight: field.right,
+                buttonRects: buttons.map((rect) => ({
+                  left: rect.left,
+                  right: rect.right,
+                  width: rect.width,
+                  height: rect.height,
+                })),
+                idY: id.getBoundingClientRect().top,
+                writeY: write.getBoundingClientRect().top,
+                bodyScrollWidth: body.scrollWidth,
+                bodyClientWidth: body.clientWidth,
+              };
+            },
+            { fieldTestId, saveTestId, cancelTestId },
+          );
+          expect(
+            layout.buttonRects.every(
+              (rect) => rect.width >= 40 && rect.height >= 40,
+            ),
+          ).toBe(true);
+          expect(
+            Math.min(...layout.buttonRects.map((rect) => rect.left)) -
+              layout.fieldRight,
+          ).toBeGreaterThanOrEqual(8);
+          expect(layout.buttonRects.at(-1)!.right).toBeLessThanOrEqual(width);
+          expect(Math.abs(layout.idY - before.idY)).toBeLessThanOrEqual(1);
+          expect(Math.abs(layout.writeY - before.writeY)).toBeLessThanOrEqual(
+            1,
+          );
+          expect(layout.bodyScrollWidth).toBeLessThanOrEqual(
+            layout.bodyClientWidth,
+          );
+          await cancelButton.click();
+          const after = await measureAnchors();
+          expect(Math.abs(after.idY - before.idY)).toBeLessThanOrEqual(1);
+          expect(Math.abs(after.writeY - before.writeY)).toBeLessThanOrEqual(1);
+        };
 
-        const layout = await alice.page.evaluate(() => {
-          const field = document.querySelector<HTMLElement>(
-            "[data-testid=contact-note-input]",
+        const controls = await alice.page.evaluate(() => {
+          const nameEdit = document.querySelector<HTMLElement>(
+            "[aria-label='Edit name']",
           )!;
-          const editor = field.parentElement!;
-          const buttons = [
-            ...editor.querySelectorAll<HTMLElement>("button"),
-          ].map((button) => button.getBoundingClientRect());
-          const name = document.querySelector<HTMLElement>(
-            "[data-testid=contact-card-name]",
+          const noteEdit = document.querySelector<HTMLElement>(
+            "[aria-label='Edit description']",
           )!;
-          const nameRow = name.parentElement!;
-          const nameButton = nameRow.querySelector<HTMLElement>("button")!;
           const back = document.querySelector<HTMLElement>(
             "[data-testid=contacts-back]",
           )!;
-          const id = document.querySelector<HTMLElement>(
-            "[data-testid=contact-card-id]",
-          )!;
           const body = document.querySelector<HTMLElement>(".contacts-body")!;
-          const fieldRect = field.getBoundingClientRect();
           return {
-            fieldBottom: fieldRect.bottom,
-            buttonTops: buttons.map((rect) => rect.top),
-            buttonBottoms: buttons.map((rect) => rect.bottom),
-            nameGap:
-              nameButton.getBoundingClientRect().left -
-              name.getBoundingClientRect().right,
-            nameButtonSize: nameButton.getBoundingClientRect().toJSON(),
-            backSize: back.getBoundingClientRect().toJSON(),
-            idRight: id.getBoundingClientRect().right,
+            nameEdit: nameEdit.getBoundingClientRect().toJSON(),
+            noteEdit: noteEdit.getBoundingClientRect().toJSON(),
+            back: back.getBoundingClientRect().toJSON(),
             bodyScrollWidth: body.scrollWidth,
             bodyClientWidth: body.clientWidth,
           };
         });
-
-        expect(
-          Math.min(...layout.buttonTops) - layout.fieldBottom,
-        ).toBeGreaterThanOrEqual(8);
-        expect(layout.buttonTops[0]).toBe(layout.buttonTops[1]);
-        expect(layout.buttonBottoms[0]).toBeGreaterThan(layout.fieldBottom);
-        expect(layout.nameGap).toBeGreaterThanOrEqual(8);
-        expect(layout.nameButtonSize.width).toBeGreaterThanOrEqual(40);
-        expect(layout.nameButtonSize.height).toBeGreaterThanOrEqual(40);
-        expect(layout.backSize.width).toBeGreaterThanOrEqual(40);
-        expect(layout.backSize.height).toBeGreaterThanOrEqual(40);
-        expect(layout.idRight).toBeLessThanOrEqual(width);
-        expect(layout.bodyScrollWidth).toBeLessThanOrEqual(
-          layout.bodyClientWidth,
+        for (const rect of [
+          controls.nameEdit,
+          controls.noteEdit,
+          controls.back,
+        ]) {
+          expect(rect.width).toBeGreaterThanOrEqual(40);
+          expect(rect.height).toBeGreaterThanOrEqual(40);
+        }
+        expect(controls.bodyScrollWidth).toBeLessThanOrEqual(
+          controls.bodyClientWidth,
+        );
+        await assertInlineEditor(
+          "contact-name-input",
+          "contact-save-name",
+          "contact-cancel-name",
+        );
+        await assertInlineEditor(
+          "contact-note-input",
+          "contact-save-note",
+          "contact-cancel-note",
         );
 
         await alice.page.getByTestId("contact-remove").click();
