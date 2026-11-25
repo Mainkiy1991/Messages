@@ -2751,7 +2751,7 @@ test.describe("real browser chat", () => {
       await alice.page
         .getByTestId("contact-note-input")
         .fill("Long-time friend");
-      await alice.page.getByTestId("contact-save-note").click();
+      await alice.page.getByTestId("contact-note-input").press("Enter");
       await expect(alice.page.getByTestId("contact-card-note")).toHaveText(
         "Long-time friend",
       );
@@ -2813,6 +2813,78 @@ test.describe("real browser chat", () => {
       ).toBeVisible();
     });
 
+    test("shows each contact card error once, in its own place", async ({
+      browser,
+      serverControl,
+    }) => {
+      const alice = await openUser(browser);
+      const bob = await openUser(browser);
+      const bobAccount = await createAccount(bob.page);
+      await createAccount(alice.page);
+      await openContacts(alice.page);
+      await addContact(alice.page, bobAccount.id, "Bob", "Description");
+      await alice.page
+        .locator(`[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`)
+        .click();
+
+      const card = alice.page.locator(".contacts-card");
+      const expectOneCardAlert = async () => {
+        await expect(card.locator('[role="alert"]:visible')).toHaveCount(1);
+      };
+
+      await alice.page
+        .getByRole("button", { name: "Edit description" })
+        .click();
+      await alice.page.getByTestId("contact-note-input").fill("x".repeat(201));
+      await alice.page.getByTestId("contact-save-note").click();
+      await expect(alice.page.getByTestId("contact-note-error")).toBeVisible();
+      await expectOneCardAlert();
+      await expect(alice.page.getByTestId("contact-write-error")).toHaveCount(
+        0,
+      );
+      await expect(alice.page.getByTestId("contact-remove-error")).toHaveCount(
+        0,
+      );
+      await alice.page.getByRole("button", { name: "Cancel" }).click();
+
+      await alice.page.evaluate(() => {
+        Object.defineProperty(navigator, "clipboard", {
+          configurable: true,
+          value: { writeText: () => Promise.reject(new Error("blocked")) },
+        });
+        document.execCommand = () => false;
+      });
+      await alice.page.getByRole("button", { name: "Copy" }).click();
+      await expect(alice.page.getByTestId("contact-copy-error")).toBeVisible();
+      await expectOneCardAlert();
+
+      alice.expectedDisconnect = true;
+      await serverControl.stop();
+      try {
+        await alice.page.getByTestId("contact-remove").click();
+        await alice.page.getByTestId("contact-remove-confirm").click();
+        await expect(
+          alice.page.getByTestId("contact-remove-error"),
+        ).toBeVisible();
+        await expectOneCardAlert();
+        await expect(alice.page.getByTestId("contact-write-error")).toHaveCount(
+          0,
+        );
+        await alice.page.getByTestId("contact-remove-cancel").click();
+      } finally {
+        await serverControl.start();
+      }
+      await expect(alice.page.getByTestId("connection-status")).toHaveAttribute(
+        "data-state",
+        "connected",
+        { timeout: 45_000 },
+      );
+      alice.expectedDisconnect = false;
+      await alice.page.getByTestId("contact-remove").click();
+      await alice.page.getByTestId("contact-remove-confirm").click();
+      await expect(alice.page.getByText("No contacts yet.")).toBeVisible();
+    });
+
     test("wraps the contact card at 360px", async ({ browser }) => {
       const alice = await openUser(browser);
       const bob = await openUser(browser);
@@ -2829,6 +2901,29 @@ test.describe("real browser chat", () => {
       const row = alice.page.locator(
         `[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`,
       );
+      const listLayout = await row.evaluate((element) => {
+        const body = document.querySelector<HTMLElement>(".contacts-body")!;
+        const name = element.querySelector<HTMLElement>("strong")!;
+        return {
+          row: element.getBoundingClientRect().toJSON(),
+          name: {
+            right: name.getBoundingClientRect().right,
+            scrollWidth: name.scrollWidth,
+            clientWidth: name.clientWidth,
+          },
+          bodyScrollWidth: body.scrollWidth,
+          bodyClientWidth: body.clientWidth,
+        };
+      });
+      expect(listLayout.row.height).toBeGreaterThanOrEqual(44);
+      expect(listLayout.row.right).toBeLessThanOrEqual(360);
+      expect(listLayout.name.scrollWidth).toBeLessThanOrEqual(
+        listLayout.name.clientWidth,
+      );
+      expect(listLayout.name.right).toBeLessThanOrEqual(360);
+      expect(listLayout.bodyScrollWidth).toBeLessThanOrEqual(
+        listLayout.bodyClientWidth,
+      );
       await row.click();
       const layout = await alice.page.evaluate(() => {
         const overlay = document.querySelector<HTMLElement>(
@@ -2837,6 +2932,13 @@ test.describe("real browser chat", () => {
         const id = document.querySelector<HTMLElement>(
           "[data-testid=contact-card-id]",
         )!;
+        const name = document.querySelector<HTMLElement>(
+          "[data-testid=contact-card-name]",
+        )!;
+        const note = document.querySelector<HTMLElement>(
+          "[data-testid=contact-card-note]",
+        )!;
+        const body = document.querySelector<HTMLElement>(".contacts-body")!;
         const buttons = [
           ...document.querySelectorAll<HTMLElement>(".contacts-card button"),
         ];
@@ -2846,6 +2948,14 @@ test.describe("real browser chat", () => {
           pageWidth: document.documentElement.scrollWidth,
           idScroll: id.scrollWidth,
           idClient: id.clientWidth,
+          bodyScrollWidth: body.scrollWidth,
+          bodyClientWidth: body.clientWidth,
+          nameRight: name.getBoundingClientRect().right,
+          nameScrollWidth: name.scrollWidth,
+          nameClientWidth: name.clientWidth,
+          noteRight: note.getBoundingClientRect().right,
+          noteScrollWidth: note.scrollWidth,
+          noteClientWidth: note.clientWidth,
           buttons: buttons.map((b) => ({
             height: b.getBoundingClientRect().height,
             right: b.getBoundingClientRect().right,
@@ -2856,7 +2966,18 @@ test.describe("real browser chat", () => {
       expect(layout.rect.x).toBe(0);
       expect(layout.rect.width).toBe(360);
       expect(layout.pageWidth).toBeLessThanOrEqual(360);
+      expect(layout.bodyScrollWidth).toBeLessThanOrEqual(
+        layout.bodyClientWidth,
+      );
       expect(layout.idScroll).toBeLessThanOrEqual(layout.idClient);
+      expect(layout.nameScrollWidth).toBeLessThanOrEqual(
+        layout.nameClientWidth,
+      );
+      expect(layout.nameRight).toBeLessThanOrEqual(360);
+      expect(layout.noteScrollWidth).toBeLessThanOrEqual(
+        layout.noteClientWidth,
+      );
+      expect(layout.noteRight).toBeLessThanOrEqual(360);
       expect(
         layout.buttons.every(
           (button) => button.height >= 40 && button.right <= 360,

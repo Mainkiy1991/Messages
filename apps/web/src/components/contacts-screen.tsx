@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatController,
   ChatError,
@@ -52,6 +52,19 @@ export type ContactsScreenStrings = {
 };
 export type ContactsInitialView =
   { view: "list" } | { view: "add" } | { view: "card"; peerId: string };
+type ContactScreenError = {
+  place: "add" | "name" | "note" | "write" | "remove" | "copy";
+  text: string;
+};
+const contactCollators = new Map<string, Intl.Collator>();
+function getContactCollator(locale: string): Intl.Collator {
+  let collator = contactCollators.get(locale);
+  if (!collator) {
+    collator = new Intl.Collator(locale, { sensitivity: "base" });
+    contactCollators.set(locale, collator);
+  }
+  return collator;
+}
 const contactErrorKeys: Record<ContactError, keyof ContactsScreenStrings> = {
   invalid_id: "contactsErrorInvalidId",
   own_id: "contactsErrorOwnId",
@@ -138,7 +151,7 @@ export function ContactsScreen({
   const [name, setName] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<ContactScreenError | null>(null);
   const [editing, setEditing] = useState<"name" | "note" | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -155,10 +168,13 @@ export function ContactsScreen({
   }, [editing]);
   useEffect(() => () => window.clearTimeout(copyTimer.current), []);
   useEffect(() => {
-    if (view.view === "card" && !Object.hasOwn(contacts, view.peerId))
+    if (view.view === "card" && !Object.hasOwn(contacts, view.peerId)) {
+      setError(null);
       setView({ view: "list" });
+    }
   }, [contacts, view]);
   function back() {
+    setError(null);
     if (editing) setEditing(null);
     else if (confirmRemove) setConfirmRemove(false);
     else if (view.view !== "list") setView({ view: "list" });
@@ -167,7 +183,7 @@ export function ContactsScreen({
   async function add() {
     if (busy) return;
     setBusy(true);
-    setError("");
+    setError(null);
     try {
       const r = await controller.addContact(id, name, note);
       if (r.ok) {
@@ -175,7 +191,8 @@ export function ContactsScreen({
         setName("");
         setNote("");
         setView({ view: "list" });
-      } else setError(contactErrorText(strings, r.error));
+      } else
+        setError({ place: "add", text: contactErrorText(strings, r.error) });
     } finally {
       setBusy(false);
     }
@@ -183,14 +200,18 @@ export function ContactsScreen({
   async function save(field: "name" | "note", value: string) {
     if (busy) return;
     setBusy(true);
-    setError("");
+    setError(null);
     try {
       const r =
         field === "name"
           ? await controller.renameContact(peerId, value)
           : await controller.saveContactNote(peerId, value);
       if (r.ok) setEditing(null);
-      else setError(contactErrorText(strings, r.error));
+      else
+        setError({
+          place: field,
+          text: contactErrorText(strings, r.error),
+        });
     } finally {
       setBusy(false);
     }
@@ -198,13 +219,14 @@ export function ContactsScreen({
   async function remove() {
     if (busy) return;
     setBusy(true);
-    setError("");
+    setError(null);
     try {
       const r = await controller.removeContact(peerId);
       if (r.ok) {
         setConfirmRemove(false);
         setView({ view: "list" });
-      } else setError(contactErrorText(strings, r.error));
+      } else
+        setError({ place: "remove", text: contactErrorText(strings, r.error) });
     } finally {
       setBusy(false);
     }
@@ -212,32 +234,37 @@ export function ContactsScreen({
   async function write() {
     if (busy) return;
     setBusy(true);
-    setError("");
+    setError(null);
     try {
       await controller.openChat(peerId);
       const snapshot = controller.getSnapshot();
       if (snapshot.activePeer === peerId && !snapshot.error)
         onChatOpened(peerId);
       else
-        setError(
-          snapshot.error ? chatErrorText(snapshot.error as ChatError) : "",
-        );
+        setError({
+          place: "write",
+          text: snapshot.error
+            ? chatErrorText(snapshot.error as ChatError)
+            : "",
+        });
     } finally {
       setBusy(false);
     }
   }
   async function copyId() {
+    setError(null);
     if (await copyText(peerId)) {
       setCopied(true);
       window.clearTimeout(copyTimer.current);
       copyTimer.current = window.setTimeout(() => setCopied(false), 1600);
-    } else setError(strings.idCopyFailed);
+    } else setError({ place: "copy", text: strings.idCopyFailed });
   }
-  const sorted = Object.entries(contacts).sort(
-    ([aId, a], [bId, b]) =>
-      new Intl.Collator(locale, { sensitivity: "base" }).compare(a, b) ||
-      aId.localeCompare(bId),
-  );
+  const sorted = useMemo(() => {
+    const collator = getContactCollator(locale);
+    return Object.entries(contacts).sort(
+      ([aId, a], [bId, b]) => collator.compare(a, b) || aId.localeCompare(bId),
+    );
+  }, [contacts, locale]);
   return (
     <div
       className="contacts-overlay"
@@ -272,7 +299,7 @@ export function ContactsScreen({
               data-testid="contact-add-open"
               disabled={!ready || busy}
               onClick={() => {
-                setError("");
+                setError(null);
                 setView({ view: "add" });
               }}
             >
@@ -296,7 +323,7 @@ export function ContactsScreen({
                   key={pid}
                   onClick={() => {
                     setPeerId(pid);
-                    setError("");
+                    setError(null);
                     setView({ view: "card", peerId: pid });
                   }}
                 >
@@ -353,9 +380,9 @@ export function ContactsScreen({
             >
               {busy ? strings.contactsAdding : strings.contactsAdd}
             </button>
-            {error && (
+            {error?.place === "add" && (
               <p className="error" role="alert" data-testid="contact-add-error">
-                {error}
+                {error.text}
               </p>
             )}
           </form>
@@ -371,7 +398,7 @@ export function ContactsScreen({
                 disabled={busy}
                 onClick={() => {
                   setName(contacts[peerId] ?? "");
-                  setError("");
+                  setError(null);
                   setEditing("name");
                 }}
               >
@@ -387,7 +414,11 @@ export function ContactsScreen({
                     onKeyDown={(e) => {
                       if (e.key === "Escape") {
                         e.stopPropagation();
+                        setError(null);
                         setEditing(null);
+                      } else if (e.key === "Enter" && !e.shiftKey && !busy) {
+                        e.preventDefault();
+                        void save("name", name);
                       }
                     }}
                     onChange={(e) => setName(e.target.value)}
@@ -403,17 +434,20 @@ export function ContactsScreen({
                   <button
                     className="secondary"
                     disabled={busy}
-                    onClick={() => setEditing(null)}
+                    onClick={() => {
+                      setError(null);
+                      setEditing(null);
+                    }}
                   >
                     {strings.cancel}
                   </button>
-                  {error && (
+                  {error?.place === "name" && (
                     <p
                       className="error"
                       role="alert"
                       data-testid="contact-name-error"
                     >
-                      {error}
+                      {error.text}
                     </p>
                   )}
                 </div>
@@ -427,9 +461,13 @@ export function ContactsScreen({
             >
               {copied ? strings.copied : strings.copy}
             </button>
-            {error === strings.idCopyFailed && (
-              <p className="error" role="alert">
-                {error}
+            {error?.place === "copy" && (
+              <p
+                className="error"
+                role="alert"
+                data-testid="contact-copy-error"
+              >
+                {error.text}
               </p>
             )}
             <section>
@@ -447,7 +485,7 @@ export function ContactsScreen({
                     disabled={busy}
                     onClick={() => {
                       setNote(notes[peerId] ?? "");
-                      setError("");
+                      setError(null);
                       setEditing("note");
                     }}
                   >
@@ -465,7 +503,11 @@ export function ContactsScreen({
                     onKeyDown={(e) => {
                       if (e.key === "Escape") {
                         e.stopPropagation();
+                        setError(null);
                         setEditing(null);
+                      } else if (e.key === "Enter" && !e.shiftKey && !busy) {
+                        e.preventDefault();
+                        void save("note", note);
                       }
                     }}
                     onChange={(e) => setNote(e.target.value)}
@@ -481,17 +523,20 @@ export function ContactsScreen({
                   <button
                     className="secondary"
                     disabled={busy}
-                    onClick={() => setEditing(null)}
+                    onClick={() => {
+                      setError(null);
+                      setEditing(null);
+                    }}
                   >
                     {strings.cancel}
                   </button>
-                  {error && (
+                  {error?.place === "note" && (
                     <p
                       className="error"
                       role="alert"
                       data-testid="contact-note-error"
                     >
-                      {error}
+                      {error.text}
                     </p>
                   )}
                 </div>
@@ -505,13 +550,13 @@ export function ContactsScreen({
             >
               {strings.contactsWrite}
             </button>
-            {error && !editing && error !== strings.idCopyFailed && (
+            {error?.place === "write" && (
               <p
                 className="error"
                 role="alert"
                 data-testid="contact-write-error"
               >
-                {error}
+                {error.text}
               </p>
             )}
             {!confirmRemove ? (
@@ -520,7 +565,7 @@ export function ContactsScreen({
                 data-testid="contact-remove"
                 disabled={busy}
                 onClick={() => {
-                  setError("");
+                  setError(null);
                   setConfirmRemove(true);
                 }}
               >
@@ -541,17 +586,20 @@ export function ContactsScreen({
                   className="secondary"
                   data-testid="contact-remove-cancel"
                   disabled={busy}
-                  onClick={() => setConfirmRemove(false)}
+                  onClick={() => {
+                    setError(null);
+                    setConfirmRemove(false);
+                  }}
                 >
                   {strings.cancel}
                 </button>
-                {error && (
+                {error?.place === "remove" && (
                   <p
                     className="error"
                     role="alert"
                     data-testid="contact-remove-error"
                   >
-                    {error}
+                    {error.text}
                   </p>
                 )}
               </div>
