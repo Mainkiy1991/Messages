@@ -159,6 +159,9 @@ export function ContactsScreen({
   const [copied, setCopied] = useState(false);
   const idRef = useRef<HTMLInputElement>(null);
   const editRef = useRef<HTMLInputElement>(null);
+  const nameEditButtonRef = useRef<HTMLButtonElement>(null);
+  const noteEditButtonRef = useRef<HTMLButtonElement>(null);
+  const focusEditButtonOnClose = useRef<"name" | "note" | null>(null);
   const copyTimer = useRef<number | undefined>(undefined);
   const locale =
     supportedLanguages.find((x) => x.code === language)?.locale ?? "en-US";
@@ -167,7 +170,18 @@ export function ContactsScreen({
   }, [view]);
   useEffect(() => {
     if (editing) editRef.current?.focus();
+    else if (focusEditButtonOnClose.current) {
+      const field = focusEditButtonOnClose.current;
+      focusEditButtonOnClose.current = null;
+      (field === "name"
+        ? nameEditButtonRef
+        : noteEditButtonRef
+      ).current?.focus();
+    }
   }, [editing]);
+  useEffect(() => {
+    if (editing && error?.place === editing) editRef.current?.focus();
+  }, [editing, error]);
   useEffect(() => () => window.clearTimeout(copyTimer.current), []);
   useEffect(() => {
     if (view.view === "card" && !Object.hasOwn(contacts, view.peerId)) {
@@ -209,8 +223,10 @@ export function ContactsScreen({
         field === "name"
           ? await controller.renameContact(peerId, value)
           : await controller.saveContactNote(peerId, value);
-      if (r.ok) setEditing(null);
-      else
+      if (r.ok) {
+        focusEditButtonOnClose.current = field;
+        setEditing(null);
+      } else
         setError({
           place: field,
           text: contactErrorText(strings, r.error),
@@ -410,84 +426,124 @@ export function ContactsScreen({
           <div className="contacts-card">
             <section>
               <div className="contact-name-row">
-                <strong data-testid="contact-card-name">
-                  {contacts[peerId]}
-                </strong>
-                <button
-                  className="contact-icon-button"
-                  type="button"
-                  disabled={busy}
-                  aria-label={strings.contactsEditName}
-                  title={strings.contactsEditName}
-                  onClick={() => {
-                    setName(contacts[peerId] ?? "");
-                    setError(null);
-                    setEditing("name");
-                  }}
-                >
-                  <svg
-                    aria-hidden="true"
-                    focusable="false"
-                    viewBox="0 0 24 24"
-                    width="20"
-                    height="20"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d="M17 3a2.828 2.828 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
-                  </svg>
-                </button>
-              </div>
-              {editing === "name" && (
-                <div className="contact-editor">
-                  <input
-                    ref={editRef}
-                    data-testid="contact-name-input"
-                    value={name}
-                    disabled={busy}
-                    onKeyDown={(e) => {
-                      if (e.key === "Escape") {
-                        e.stopPropagation();
+                {editing === "name" ? (
+                  <>
+                    <input
+                      ref={editRef}
+                      className="contact-inline-input contact-name-input"
+                      data-testid="contact-name-input"
+                      value={name}
+                      disabled={busy}
+                      onKeyDown={(e) => {
+                        if (e.key === "Escape") {
+                          e.stopPropagation();
+                          focusEditButtonOnClose.current = "name";
+                          setError(null);
+                          setEditing(null);
+                        } else if (e.key === "Enter" && !e.shiftKey && !busy) {
+                          e.preventDefault();
+                          void save("name", name);
+                        }
+                      }}
+                      onChange={(e) => setName(e.target.value)}
+                    />
+                    <button
+                      className="contact-icon-button"
+                      type="button"
+                      data-testid="contact-save-name"
+                      aria-label={strings.contactsSave}
+                      title={strings.contactsSave}
+                      disabled={busy}
+                      onClick={() => void save("name", name)}
+                    >
+                      <svg
+                        aria-hidden="true"
+                        focusable="false"
+                        viewBox="0 0 24 24"
+                        width="20"
+                        height="20"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="m5 12 4 4L19 6" />
+                      </svg>
+                    </button>
+                    <button
+                      className="contact-icon-button"
+                      type="button"
+                      data-testid="contact-cancel-name"
+                      aria-label={strings.cancel}
+                      title={strings.cancel}
+                      disabled={busy}
+                      onClick={() => {
+                        focusEditButtonOnClose.current = "name";
                         setError(null);
                         setEditing(null);
-                      } else if (e.key === "Enter" && !e.shiftKey && !busy) {
-                        e.preventDefault();
-                        void save("name", name);
-                      }
-                    }}
-                    onChange={(e) => setName(e.target.value)}
-                  />
-                  <button
-                    className="primary"
-                    data-testid="contact-save-name"
-                    disabled={busy}
-                    onClick={() => void save("name", name)}
-                  >
-                    {strings.contactsSave}
-                  </button>
-                  <button
-                    className="secondary"
-                    disabled={busy}
-                    onClick={() => {
-                      setError(null);
-                      setEditing(null);
-                    }}
-                  >
-                    {strings.cancel}
-                  </button>
-                  {error?.place === "name" && (
-                    <p
-                      className="error"
-                      role="alert"
-                      data-testid="contact-name-error"
+                      }}
                     >
-                      {error.text}
-                    </p>
-                  )}
-                </div>
+                      <svg
+                        aria-hidden="true"
+                        focusable="false"
+                        viewBox="0 0 24 24"
+                        width="20"
+                        height="20"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="m18 6-12 12M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <strong data-testid="contact-card-name">
+                      {contacts[peerId]}
+                    </strong>
+                    <button
+                      ref={nameEditButtonRef}
+                      className="contact-icon-button"
+                      type="button"
+                      disabled={busy}
+                      aria-label={strings.contactsEditName}
+                      title={strings.contactsEditName}
+                      onClick={() => {
+                        setName(contacts[peerId] ?? "");
+                        setError(null);
+                        setEditing("name");
+                      }}
+                    >
+                      <svg
+                        aria-hidden="true"
+                        focusable="false"
+                        viewBox="0 0 24 24"
+                        width="20"
+                        height="20"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M17 3a2.828 2.828 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                      </svg>
+                    </button>
+                  </>
+                )}
+              </div>
+              {error?.place === "name" && (
+                <p
+                  className="error"
+                  role="alert"
+                  data-testid="contact-name-error"
+                >
+                  {error.text}
+                </p>
               )}
             </section>
             <button
@@ -532,90 +588,128 @@ export function ContactsScreen({
             )}
             <section>
               <h2>{strings.contactsMyNote}</h2>
-              {editing !== "note" && (
-                <div className="contact-note-row">
-                  <p
-                    data-testid="contact-card-note"
-                    className={!notes[peerId] ? "muted" : ""}
-                  >
-                    {notes[peerId] || strings.contactsNoNote}
-                  </p>
-                  <button
-                    className="contact-icon-button"
-                    type="button"
-                    disabled={busy}
-                    aria-label={strings.contactsEditNote}
-                    title={strings.contactsEditNote}
-                    onClick={() => {
-                      setNote(notes[peerId] ?? "");
-                      setError(null);
-                      setEditing("note");
-                    }}
-                  >
-                    <svg
-                      aria-hidden="true"
-                      focusable="false"
-                      viewBox="0 0 24 24"
-                      width="20"
-                      height="20"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
+              <div className="contact-note-row">
+                {editing === "note" ? (
+                  <>
+                    <input
+                      ref={editRef}
+                      className="contact-inline-input contact-note-input"
+                      data-testid="contact-note-input"
+                      value={note}
+                      disabled={busy}
+                      onKeyDown={(e) => {
+                        if (e.key === "Escape") {
+                          e.stopPropagation();
+                          focusEditButtonOnClose.current = "note";
+                          setError(null);
+                          setEditing(null);
+                        } else if (e.key === "Enter" && !e.shiftKey && !busy) {
+                          e.preventDefault();
+                          void save("note", note);
+                        }
+                      }}
+                      onChange={(e) => setNote(e.target.value)}
+                    />
+                    <button
+                      className="contact-icon-button"
+                      type="button"
+                      data-testid="contact-save-note"
+                      aria-label={strings.contactsSave}
+                      title={strings.contactsSave}
+                      disabled={busy}
+                      onClick={() => void save("note", note)}
                     >
-                      <path d="M17 3a2.828 2.828 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
-                    </svg>
-                  </button>
-                </div>
-              )}
-              {editing === "note" && (
-                <div className="contact-editor">
-                  <input
-                    ref={editRef}
-                    data-testid="contact-note-input"
-                    value={note}
-                    disabled={busy}
-                    onKeyDown={(e) => {
-                      if (e.key === "Escape") {
-                        e.stopPropagation();
+                      <svg
+                        aria-hidden="true"
+                        focusable="false"
+                        viewBox="0 0 24 24"
+                        width="20"
+                        height="20"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="m5 12 4 4L19 6" />
+                      </svg>
+                    </button>
+                    <button
+                      className="contact-icon-button"
+                      type="button"
+                      data-testid="contact-cancel-note"
+                      aria-label={strings.cancel}
+                      title={strings.cancel}
+                      disabled={busy}
+                      onClick={() => {
+                        focusEditButtonOnClose.current = "note";
                         setError(null);
                         setEditing(null);
-                      } else if (e.key === "Enter" && !e.shiftKey && !busy) {
-                        e.preventDefault();
-                        void save("note", note);
-                      }
-                    }}
-                    onChange={(e) => setNote(e.target.value)}
-                  />
-                  <button
-                    className="primary"
-                    data-testid="contact-save-note"
-                    disabled={busy}
-                    onClick={() => void save("note", note)}
-                  >
-                    {strings.contactsSave}
-                  </button>
-                  <button
-                    className="secondary"
-                    disabled={busy}
-                    onClick={() => {
-                      setError(null);
-                      setEditing(null);
-                    }}
-                  >
-                    {strings.cancel}
-                  </button>
-                  {error?.place === "note" && (
-                    <p
-                      className="error"
-                      role="alert"
-                      data-testid="contact-note-error"
+                      }}
                     >
-                      {error.text}
+                      <svg
+                        aria-hidden="true"
+                        focusable="false"
+                        viewBox="0 0 24 24"
+                        width="20"
+                        height="20"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="m18 6-12 12M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <p
+                      data-testid="contact-card-note"
+                      className={!notes[peerId] ? "muted" : ""}
+                    >
+                      {notes[peerId] || strings.contactsNoNote}
                     </p>
-                  )}
-                </div>
+                    <button
+                      ref={noteEditButtonRef}
+                      className="contact-icon-button"
+                      type="button"
+                      disabled={busy}
+                      aria-label={strings.contactsEditNote}
+                      title={strings.contactsEditNote}
+                      onClick={() => {
+                        setNote(notes[peerId] ?? "");
+                        setError(null);
+                        setEditing("note");
+                      }}
+                    >
+                      <svg
+                        aria-hidden="true"
+                        focusable="false"
+                        viewBox="0 0 24 24"
+                        width="20"
+                        height="20"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="M17 3a2.828 2.828 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                      </svg>
+                    </button>
+                  </>
+                )}
+              </div>
+              {error?.place === "note" && (
+                <p
+                  className="error"
+                  role="alert"
+                  data-testid="contact-note-error"
+                >
+                  {error.text}
+                </p>
               )}
             </section>
             <button
