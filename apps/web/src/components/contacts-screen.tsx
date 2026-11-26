@@ -10,6 +10,9 @@ import { supportedLanguages } from "../i18n.js";
 
 export type ContactsScreenStrings = {
   contactsTitle: string;
+  contactsAddToContacts: string;
+  contactsNotInContacts: string;
+  contactsOpenCard: string;
   contactsAdd: string;
   contactsAdding: string;
   contactsId: string;
@@ -53,7 +56,43 @@ export type ContactsScreenStrings = {
   contactsErrorSave: string;
 };
 export type ContactsInitialView =
-  { view: "list" } | { view: "add" } | { view: "card"; peerId: string };
+  | { view: "list" }
+  | { view: "add" }
+  | { view: "card"; peerId: string }
+  | { view: "peer"; peerId: string }
+  | { view: "peerAdd"; peerId: string };
+type ContactsBackState = {
+  busy: boolean;
+  editing: boolean;
+  confirmRemove: boolean;
+  view: ContactsInitialView;
+  fromChat: boolean;
+};
+export function contactsBackAction({
+  busy,
+  editing,
+  confirmRemove,
+  view,
+  fromChat,
+}: ContactsBackState): "stay" | "edit" | "remove" | "peer" | "close" | "list" {
+  if (busy) return "stay";
+  if (editing) return "edit";
+  if (confirmRemove) return "remove";
+  if (view.view === "peerAdd") return "peer";
+  if (view.view === "peer") return "close";
+  if (view.view === "card") return fromChat ? "close" : "list";
+  if (view.view === "add") return "list";
+  return "close";
+}
+export function peerCardFromContacts(
+  view: ContactsInitialView,
+  contacts: Record<string, string>,
+): string | null {
+  return (view.view === "peer" || view.view === "peerAdd") &&
+    Object.hasOwn(contacts, view.peerId)
+    ? view.peerId
+    : null;
+}
 type ContactScreenError = {
   place: "add" | "name" | "note" | "write" | "remove" | "copy";
   text: string;
@@ -129,6 +168,7 @@ export type ContactsScreenProps = {
   onClose: () => void;
   onChatOpened: (peerId: string) => void;
   initialView?: ContactsInitialView;
+  chatPeerId?: string;
 };
 export function ContactsScreen({
   controller,
@@ -142,13 +182,15 @@ export function ContactsScreen({
   onClose,
   onChatOpened,
   initialView,
+  chatPeerId,
 }: ContactsScreenProps) {
   const [view, setView] = useState<ContactsInitialView>(
     initialView ?? { view: "list" },
   );
   const [peerId, setPeerId] = useState(
-    initialView?.view === "card" ? initialView.peerId : "",
+    initialView && "peerId" in initialView ? initialView.peerId : "",
   );
+  const [fromChat, setFromChat] = useState(chatPeerId !== undefined);
   const [id, setId] = useState("");
   const [name, setName] = useState("");
   const [note, setNote] = useState("");
@@ -158,6 +200,7 @@ export function ContactsScreen({
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [copied, setCopied] = useState(false);
   const idRef = useRef<HTMLInputElement>(null);
+  const addNameRef = useRef<HTMLInputElement>(null);
   const editRef = useRef<HTMLInputElement>(null);
   const nameEditButtonRef = useRef<HTMLButtonElement>(null);
   const noteEditButtonRef = useRef<HTMLButtonElement>(null);
@@ -167,6 +210,10 @@ export function ContactsScreen({
     supportedLanguages.find((x) => x.code === language)?.locale ?? "en-US";
   useEffect(() => {
     if (view.view === "add") idRef.current?.focus();
+    if (view.view === "peerAdd") addNameRef.current?.focus();
+  }, [view]);
+  useEffect(() => {
+    if (view.view === "list") setFromChat(false);
   }, [view]);
   useEffect(() => {
     if (editing) editRef.current?.focus();
@@ -182,7 +229,25 @@ export function ContactsScreen({
   useEffect(() => {
     if (editing && error?.place === editing) editRef.current?.focus();
   }, [editing, error]);
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      back();
+    };
+    document.addEventListener("keydown", handleEscape);
+    return () => document.removeEventListener("keydown", handleEscape);
+  }, [busy, editing, confirmRemove, view, fromChat]);
   useEffect(() => () => window.clearTimeout(copyTimer.current), []);
+  useEffect(() => {
+    const contactPeerId = peerCardFromContacts(view, contacts);
+    if (contactPeerId) {
+      setPeerId(contactPeerId);
+      setView({ view: "card", peerId: contactPeerId });
+      setName("");
+      setNote("");
+    }
+  }, [contacts, view]);
   useEffect(() => {
     if (view.view === "card" && !Object.hasOwn(contacts, view.peerId)) {
       setError(null);
@@ -190,12 +255,21 @@ export function ContactsScreen({
     }
   }, [contacts, view]);
   function back() {
+    if (busy) return;
     setError(null);
-    if (editing) setEditing(null);
-    else if (confirmRemove) setConfirmRemove(false);
-    else if (view.view === "card" || view.view === "add")
-      setView({ view: "list" });
-    else onClose();
+    const action = contactsBackAction({
+      busy,
+      editing: Boolean(editing),
+      confirmRemove,
+      view,
+      fromChat,
+    });
+    if (action === "edit") setEditing(null);
+    else if (action === "remove") setConfirmRemove(false);
+    else if (action === "peer" && view.view === "peerAdd")
+      setView({ view: "peer", peerId: view.peerId });
+    else if (action === "list") setView({ view: "list" });
+    else if (action === "close") onClose();
   }
   async function add() {
     if (busy) return;
@@ -209,6 +283,18 @@ export function ContactsScreen({
         setNote("");
         setView({ view: "list" });
       } else
+        setError({ place: "add", text: contactErrorText(strings, r.error) });
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function addPeer(targetPeerId: string) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await controller.addContact(targetPeerId, name, note);
+      if (!r.ok)
         setError({ place: "add", text: contactErrorText(strings, r.error) });
     } finally {
       setBusy(false);
@@ -270,13 +356,16 @@ export function ContactsScreen({
       setBusy(false);
     }
   }
-  async function copyId() {
+  async function copyPeerId(targetPeerId = peerId) {
     setError(null);
-    if (await copyText(peerId)) {
+    if (await copyText(targetPeerId)) {
       setCopied(true);
       window.clearTimeout(copyTimer.current);
       copyTimer.current = window.setTimeout(() => setCopied(false), 1600);
     } else setError({ place: "copy", text: strings.idCopyFailed });
+  }
+  async function copyId() {
+    return copyPeerId(peerId);
   }
   const sorted = useMemo(() => {
     const collator = getContactCollator(locale);
@@ -291,12 +380,6 @@ export function ContactsScreen({
       aria-modal="true"
       aria-label={strings.contactsTitle}
       data-testid="contacts-screen"
-      onKeyDown={(e) => {
-        if (e.key === "Escape") {
-          e.preventDefault();
-          back();
-        }
-      }}
     >
       <header className="contacts-header">
         <button
@@ -370,20 +453,71 @@ export function ContactsScreen({
               ))}
           </>
         )}
-        {view.view === "add" && (
+        {view.view === "peer" && (
+          <>
+            <p data-testid="contact-peer-title">
+              {strings.contactsNotInContacts}
+            </p>
+            <button
+              type="button"
+              className="contact-id-button"
+              data-testid="contact-card-id"
+              aria-label={strings.contactsCopyId}
+              title={strings.contactsCopyId}
+              disabled={busy}
+              onClick={() => void copyPeerId(view.peerId)}
+            >
+              <code>{view.peerId}</code>
+            </button>
+            {copied && (
+              <span role="status" className="contact-copy-status">
+                {strings.copied}
+              </span>
+            )}
+            {error?.place === "copy" && (
+              <p
+                className="error"
+                role="alert"
+                data-testid="contact-copy-error"
+              >
+                {error.text}
+              </p>
+            )}
+            {!ready && !loadFailed && <p>{strings.contactsLoading}</p>}
+            {loadFailed && (
+              <p className="error" role="alert">
+                {strings.contactsLoadFailed}
+              </p>
+            )}
+            <button
+              type="button"
+              className="primary"
+              data-testid="contact-peer-add"
+              disabled={!ready || busy}
+              onClick={() => {
+                setError(null);
+                setView({ view: "peerAdd", peerId: view.peerId });
+              }}
+            >
+              {strings.contactsAddToContacts}
+            </button>
+          </>
+        )}
+        {(view.view === "add" || view.view === "peerAdd") && (
           <form
             className="contacts-form"
             onSubmit={(e) => {
               e.preventDefault();
-              void add();
+              void (view.view === "peerAdd" ? addPeer(view.peerId) : add());
             }}
           >
             <label>
               {strings.contactsId}
               <input
-                ref={idRef}
+                ref={view.view === "add" ? idRef : undefined}
                 data-testid="contact-add-id"
-                value={id}
+                value={view.view === "peerAdd" ? view.peerId : id}
+                readOnly={view.view === "peerAdd"}
                 disabled={busy}
                 onChange={(e) => setId(e.target.value)}
               />
@@ -391,6 +525,7 @@ export function ContactsScreen({
             <label>
               {strings.contactsName}
               <input
+                ref={view.view === "peerAdd" ? addNameRef : undefined}
                 data-testid="contact-add-name"
                 value={name}
                 disabled={busy}
@@ -712,14 +847,16 @@ export function ContactsScreen({
                 </p>
               )}
             </section>
-            <button
-              className="primary"
-              data-testid="contact-write"
-              disabled={busy}
-              onClick={() => void write()}
-            >
-              {strings.contactsWrite}
-            </button>
+            {!fromChat && (
+              <button
+                className="primary"
+                data-testid="contact-write"
+                disabled={busy}
+                onClick={() => void write()}
+              >
+                {strings.contactsWrite}
+              </button>
+            )}
             {error?.place === "write" && (
               <p
                 className="error"

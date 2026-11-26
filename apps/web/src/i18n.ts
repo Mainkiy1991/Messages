@@ -52,6 +52,9 @@ export const strings = {
     idCopyFailed:
       "Не удалось скопировать автоматически. Выделите и скопируйте ID вручную:",
     contactsTitle: "Контакты",
+    contactsAddToContacts: "Добавить в контакты",
+    contactsNotInContacts: "Нет в ваших контактах",
+    contactsOpenCard: "Карточка контакта",
     contactsAdd: "Добавить контакт",
     contactsAdding: "Добавляем…",
     contactsId: "ID контакта",
@@ -185,7 +188,6 @@ export const strings = {
     you: "Вы",
     selectChat: "Выберите чат или создайте новый.",
     contactName: "Имя контакта (необязательно)",
-    saveName: "Сохранить имя",
     contactSaveFailed: "Не удалось сохранить имя",
     contactsDecryptError:
       "Не удалось загрузить контакты. Для чатов показаны ID.",
@@ -285,6 +287,9 @@ export const strings = {
     idCopyFailed:
       "Could not copy automatically. Select and copy the ID manually:",
     contactsTitle: "Contacts",
+    contactsAddToContacts: "Add to contacts",
+    contactsNotInContacts: "Not in your contacts",
+    contactsOpenCard: "Contact card",
     contactsAdd: "Add contact",
     contactsAdding: "Adding…",
     contactsId: "Contact ID",
@@ -419,7 +424,6 @@ export const strings = {
     you: "You",
     selectChat: "Select a chat or start a new one.",
     contactName: "Contact name (optional)",
-    saveName: "Save name",
     contactSaveFailed: "Could not save contact name",
     contactsDecryptError: "Could not load contacts. Chats are shown with IDs.",
     serverWaking: "The server is waking up, please wait up to a minute…",
@@ -516,6 +520,9 @@ export const strings = {
     idCopyFailed:
       "Не вдалося скопіювати автоматично. Виділіть і скопіюйте ID вручну:",
     contactsTitle: "Контакти",
+    contactsAddToContacts: "Додати до контактів",
+    contactsNotInContacts: "Немає у ваших контактах",
+    contactsOpenCard: "Картка контакту",
     contactsAdd: "Додати контакт",
     contactsAdding: "Додаємо…",
     contactsId: "ID контакту",
@@ -651,7 +658,6 @@ export const strings = {
     you: "Ви",
     selectChat: "Виберіть чат або створіть новий.",
     contactName: "Ім’я контакту (необов’язково)",
-    saveName: "Зберегти ім’я",
     contactSaveFailed: "Не вдалося зберегти ім’я контакту",
     contactsDecryptError:
       "Не вдалося завантажити контакти. У чатах показано ID.",

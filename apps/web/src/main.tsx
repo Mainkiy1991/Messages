@@ -55,7 +55,10 @@ import {
   DeletedMessageText,
 } from "./components/message-delete.js";
 import { DevicesPanel } from "./components/devices-panel.js";
-import { ContactsScreen } from "./components/contacts-screen.js";
+import {
+  ContactsScreen,
+  type ContactsInitialView,
+} from "./components/contacts-screen.js";
 import {
   canEditMessage,
   canSubmitEdit,
@@ -154,14 +157,12 @@ function App() {
   });
   const [peerInput, setPeerInput] = useState("");
   const [newContactName, setNewContactName] = useState("");
-  const [contactNameDraft, setContactNameDraft] = useState("");
   const [draft, setDraft] = useState("");
   const [editState, setEditState] = useState<MessageEditState | null>(null);
   const [activeEditId, setActiveEditId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState("");
   const [composerError, setComposerError] = useState("");
-  const [contactNameError, setContactNameError] = useState("");
   const [chatError, setChatError] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
   const [contactsOpen, setContactsOpen] = useState(false);
@@ -172,7 +173,10 @@ function App() {
     "enable" | "change" | "disable" | null
   >(null);
   const [newChatOpen, setNewChatOpen] = useState(false);
-  const [editingName, setEditingName] = useState(false);
+  const [contactsOptions, setContactsOptions] = useState<{
+    initialView?: ContactsInitialView;
+    chatPeerId?: string;
+  }>({});
   const [presenceClock, setPresenceClock] = useState(Date.now());
   const profileRef = useRef<HTMLDivElement | null>(null);
   const pinErrorTimerRef = useRef<number | null>(null);
@@ -200,8 +204,12 @@ function App() {
     chatHistoryRef.current = false;
   }
 
-  function openContacts() {
+  function openContacts(options?: {
+    initialView?: ContactsInitialView;
+    chatPeerId?: string;
+  }) {
     if (contactsOpenRef.current) return;
+    setContactsOptions(options ?? {});
     window.history.pushState(
       { ...(window.history.state ?? {}), contacts: true },
       "",
@@ -210,6 +218,16 @@ function App() {
     contactsHistoryRef.current = true;
     contactsOpenRef.current = true;
     setContactsOpen(true);
+  }
+
+  function openActivePeerContactCard() {
+    const peerId = activePeer;
+    openContacts({
+      initialView: Object.hasOwn(chatState.contacts, peerId)
+        ? { view: "card", peerId }
+        : { view: "peer", peerId },
+      chatPeerId: peerId,
+    });
   }
 
   function closeContacts() {
@@ -831,7 +849,6 @@ function App() {
     setDeleteConfirmId(null);
     setDeleteError("");
     setComposerError("");
-    setContactNameError("");
   }, [activePeer]);
   useLayoutEffect(() => {
     const list = messageListRef.current;
@@ -969,7 +986,6 @@ function App() {
       setPeerInput("");
       setNewContactName("");
       setNewChatOpen(false);
-      setContactNameDraft(chatState.contacts[next.activePeer] ?? "");
     }
   }
 
@@ -1127,7 +1143,6 @@ function App() {
       setChatConfirmation(null);
       setChatMenuOpen(false);
       if (origin === "menu" || peerId === activePeer) {
-        setEditingName(false);
         setDraft("");
       }
       setChatError("");
@@ -1742,10 +1757,11 @@ function App() {
                 strings={t}
                 chatErrorText={errorText}
                 onClose={closeContacts}
-                onChatOpened={(peerId) => {
+                initialView={contactsOptions.initialView}
+                chatPeerId={contactsOptions.chatPeerId}
+                onChatOpened={() => {
                   closeContacts();
                   setChatError("");
-                  setContactNameDraft(chatState.contacts[peerId] ?? "");
                 }}
               />
             )}
@@ -1865,9 +1881,6 @@ function App() {
                             }
                             setRevealedPeerId("");
                             controllerRef.current?.selectChat(chat.peerId);
-                            setContactNameDraft(
-                              chatState.contacts[chat.peerId] ?? "",
-                            );
                           }}
                         >
                           <span className="chat-item-copy">
@@ -1984,16 +1997,10 @@ function App() {
                         >
                           <strong>{t.savedMessages}</strong>
                         </div>
-                      ) : !editingName ? (
+                      ) : (
                         <button
                           className="contact-name-trigger"
-                          onClick={() => {
-                            setContactNameDraft(
-                              chatState.contacts[activePeer] ?? "",
-                            );
-                            setContactNameError("");
-                            setEditingName(true);
-                          }}
+                          onClick={openActivePeerContactCard}
                         >
                           <strong>
                             {contactLabel(activePeer, chatState.contacts)}
@@ -2005,57 +2012,7 @@ function App() {
                             language={language}
                             now={presenceClock}
                           />
-                          <span aria-hidden="true">✎</span>
                         </button>
-                      ) : (
-                        <form
-                          className="contact-name-form"
-                          onSubmit={async (event) => {
-                            event.preventDefault();
-                            const saved =
-                              await controllerRef.current?.saveContactName(
-                                activePeer,
-                                contactNameDraft,
-                              );
-                            if (!saved)
-                              setContactNameError(t.contactSaveFailed);
-                            else {
-                              setContactNameError("");
-                              setEditingName(false);
-                            }
-                          }}
-                        >
-                          <input
-                            aria-label={t.contactName}
-                            value={contactNameDraft}
-                            onChange={(event) =>
-                              setContactNameDraft(event.target.value)
-                            }
-                            onKeyDown={(event) => {
-                              if (event.key === "Escape") {
-                                setContactNameDraft(
-                                  chatState.contacts[activePeer] ?? "",
-                                );
-                                setEditingName(false);
-                              }
-                            }}
-                            placeholder={
-                              chatState.contacts[activePeer] ||
-                              activePeer.slice(-10)
-                            }
-                          />
-                          {contactNameDraft.trim() !==
-                            (chatState.contacts[activePeer] ?? "") && (
-                            <button className="secondary">{t.saveName}</button>
-                          )}
-                          <button
-                            type="button"
-                            className="text-button"
-                            onClick={() => setEditingName(false)}
-                          >
-                            {t.cancel}
-                          </button>
-                        </form>
                       )}
                       <div className="conversation-menu">
                         <button
@@ -2070,6 +2027,21 @@ function App() {
                         </button>
                         {chatMenuOpen && (
                           <div className="conversation-menu-panel">
+                            {!isSavedChat && (
+                              <button
+                                type="button"
+                                className="secondary"
+                                data-testid="chat-menu-contact"
+                                onClick={() => {
+                                  setChatMenuOpen(false);
+                                  openActivePeerContactCard();
+                                }}
+                              >
+                                {Object.hasOwn(chatState.contacts, activePeer)
+                                  ? t.contactsOpenCard
+                                  : t.contactsAddToContacts}
+                              </button>
+                            )}
                             {!isSavedChat && (
                               <button
                                 type="button"
@@ -2119,15 +2091,6 @@ function App() {
                         )}
                       </div>
                     </div>
-                    {contactNameError && (
-                      <p
-                        className="error"
-                        data-testid="contact-name-error"
-                        role="alert"
-                      >
-                        {contactNameError}
-                      </p>
-                    )}
                     {idCopyPeer === activePeer && idCopyStatus === "failed" && (
                       <p
                         className="error id-copy-failure"
