@@ -2144,11 +2144,15 @@ test.describe("real browser chat", () => {
     );
     await expect(a.page.getByTestId("new-chat-form")).toHaveCount(0);
     await a.page.getByRole("button", { name: /New chat/u }).click();
+    await expect(a.page.getByTestId("new-chat-screen")).toBeVisible();
+    await expect(a.page.getByRole("button", { name: "Cancel" })).toHaveCount(0);
     await expect(a.page.getByTestId("new-chat-form")).toHaveCount(0);
     await expect(a.page.getByTestId("new-chat-by-id")).toBeVisible();
     await expect(a.page.getByTestId("new-chat-from-contacts")).toBeVisible();
     await a.page.getByTestId("new-chat-by-id").click();
     await expect(a.page.getByTestId("new-chat-form")).toBeVisible();
+    await a.page.getByTestId("new-chat").click();
+    await expect(a.page.getByTestId("new-chat-error")).toBeVisible();
     await a.page.getByTestId("peer-id-input").fill(bob.id);
     await a.page.getByTestId("new-chat").click();
     await expect(a.page.getByTestId("new-chat-form")).toHaveCount(0);
@@ -3363,6 +3367,11 @@ test.describe("real browser chat", () => {
 
     await alice.page.setViewportSize({ width: 360, height: 640 });
     await alice.page.getByRole("button", { name: /New chat/u }).click();
+    const modalBounds = await alice.page
+      .getByTestId("new-chat-screen")
+      .boundingBox();
+    expect(modalBounds).not.toBeNull();
+    expect(Math.abs(modalBounds!.width - 360)).toBeLessThanOrEqual(1);
     const choices = [
       alice.page.getByTestId("new-chat-from-contacts"),
       alice.page.getByTestId("new-chat-by-id"),
@@ -3373,22 +3382,23 @@ test.describe("real browser chat", () => {
       expect(box!.height).toBeGreaterThanOrEqual(40);
       expect(box!.x + box!.width).toBeLessThanOrEqual(360);
     }
+    await expect(
+      alice.page.getByRole("button", { name: "Cancel" }),
+    ).toHaveCount(0);
     await alice.page.getByTestId("new-chat-from-contacts").click();
-    await expect(alice.page.getByTestId("contacts-screen")).toBeVisible();
+    await expect(alice.page.getByTestId("new-chat-screen")).toBeVisible();
     await expect(
       alice.page.getByRole("heading", { name: "Choose a contact" }),
     ).toBeVisible();
-    await expect(alice.page.getByTestId("contact-add-open")).toHaveCount(0);
     await alice.page.getByTestId("contact-row").click();
-    await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+    await expect(alice.page.getByTestId("new-chat-screen")).toHaveCount(0);
     await expect(alice.page.locator(".conversation-head")).toBeVisible();
     await expect(alice.page.locator(".contact-name-trigger")).toContainText(
       "Bob Contact",
     );
-    await expect(alice.page.getByTestId("new-chat-by-id")).toHaveCount(0);
     await alice.page.goBack();
     await expect(alice.page.locator(".chat-sidebar")).toBeVisible();
-    await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+    await expect(alice.page.getByTestId("new-chat-screen")).toHaveCount(0);
     await alice.page.setViewportSize({ width: 1280, height: 720 });
     await expect(alice.page.locator(".empty-chat")).toBeVisible();
   });
@@ -3400,22 +3410,97 @@ test.describe("real browser chat", () => {
     const bob = await openUser(browser);
     await createAccount(alice.page);
     const bobAccount = await createAccount(bob.page);
+    await alice.page.setViewportSize({ width: 360, height: 640 });
     await alice.page.getByRole("button", { name: /New chat/u }).click();
     await alice.page.getByTestId("new-chat-from-contacts").click();
     await expect(
       alice.page.getByText("No contacts yet. Start a chat by ID."),
     ).toBeVisible();
     await alice.page.keyboard.press("Escape");
-    await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
-    await expect(alice.page.getByTestId("new-chat-by-id")).toHaveCount(0);
+    await expect(alice.page.getByTestId("new-chat-by-id")).toBeVisible();
+    await alice.page.keyboard.press("Escape");
+    await expect(alice.page.getByTestId("new-chat-screen")).toHaveCount(0);
     await startNewChatById(alice.page);
-    await expect(alice.page.getByLabel(/saved to contacts/u)).toBeVisible();
+    await expect(alice.page.getByTestId("new-chat-name-hint")).toBeVisible();
+    const hintLayout = await alice.page
+      .getByTestId("new-chat-name-hint")
+      .evaluate((el) => ({
+        height: el.getBoundingClientRect().height,
+        line: Number.parseFloat(getComputedStyle(el).lineHeight),
+        scroll: el.scrollWidth,
+        client: el.clientWidth,
+      }));
+    expect(hintLayout.height).toBeGreaterThanOrEqual(hintLayout.line);
+    expect(hintLayout.scroll).toBeLessThanOrEqual(hintLayout.client);
     await alice.page.getByTestId("peer-id-input").fill(bobAccount.id);
-    await alice.page.getByLabel(/saved to contacts/u).fill("Zed");
+    await alice.page.getByLabel("Name (optional)").fill("Zed");
     await alice.page.getByTestId("new-chat").click();
     await expect(alice.page.locator(".conversation-head")).toBeVisible();
     await expect(alice.page.locator(".contact-name-trigger")).toContainText(
       "Zed",
     );
+  });
+
+  test("new chat window: arrow and phone Back go step by step", async ({
+    browser,
+  }) => {
+    const alice = await openUser(browser);
+    await createAccount(alice.page);
+    await alice.page.setViewportSize({ width: 360, height: 640 });
+    const open = () =>
+      alice.page.getByRole("button", { name: /New chat/u }).click();
+    await open();
+    const url = alice.page.url();
+    await alice.page.getByTestId("new-chat-by-id").click();
+    await alice.page.goBack();
+    await expect(alice.page.getByTestId("new-chat-form")).toHaveCount(0);
+    await expect(alice.page.getByTestId("new-chat-by-id")).toBeVisible();
+    await expect(alice.page.getByTestId("new-chat-screen")).toBeVisible();
+    expect(alice.page.url()).toBe(url);
+    await alice.page.goBack();
+    await expect(alice.page.getByTestId("new-chat-screen")).toHaveCount(0);
+    await expect(alice.page.getByTestId("chat-list")).toBeVisible();
+    await open();
+    await alice.page.getByTestId("new-chat-from-contacts").click();
+    await alice.page.getByTestId("new-chat-back").click();
+    await expect(alice.page.getByTestId("new-chat-by-id")).toBeVisible();
+    await alice.page.getByTestId("new-chat-back").click();
+    await expect(alice.page.getByTestId("new-chat-screen")).toHaveCount(0);
+    await open();
+    await alice.page.keyboard.press("Escape");
+    await expect(alice.page.getByTestId("new-chat-screen")).toHaveCount(0);
+  });
+
+  test("new chat window opens a chat and Back returns to the chat list", async ({
+    browser,
+  }) => {
+    const alice = await openUser(browser);
+    const bob = await openUser(browser);
+    await createAccount(alice.page);
+    const bobAccount = await createAccount(bob.page);
+    await alice.page.setViewportSize({ width: 360, height: 640 });
+    await startNewChatById(alice.page);
+    await alice.page.getByTestId("peer-id-input").fill(bobAccount.id);
+    await alice.page.getByLabel("Name (optional)").fill("Zed");
+    await alice.page.getByTestId("new-chat").click();
+    await expect(alice.page.getByTestId("new-chat-screen")).toHaveCount(0);
+    await expect(alice.page.locator(".contact-name-trigger")).toContainText(
+      "Zed",
+    );
+    await alice.page.goBack();
+    await expect(alice.page.locator(".chat-sidebar")).toBeVisible();
+    await expect(alice.page.getByTestId("new-chat-screen")).toHaveCount(0);
+    await alice.page.getByRole("button", { name: /New chat/u }).click();
+    await alice.page.getByTestId("new-chat-from-contacts").click();
+    await alice.page
+      .getByTestId("contact-row")
+      .filter({ hasText: "Zed" })
+      .click();
+    await expect(alice.page.locator(".contact-name-trigger")).toContainText(
+      "Zed",
+    );
+    await alice.page.goBack();
+    await expect(alice.page.locator(".chat-sidebar")).toBeVisible();
+    await expect(alice.page.getByTestId("new-chat-screen")).toHaveCount(0);
   });
 });

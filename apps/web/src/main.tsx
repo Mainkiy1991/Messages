@@ -60,6 +60,10 @@ import {
   type ContactsInitialView,
 } from "./components/contacts-screen.js";
 import {
+  NewChatScreen,
+  type NewChatView,
+} from "./components/new-chat-screen.js";
+import {
   canEditMessage,
   canSubmitEdit,
   draftAfterEdit,
@@ -155,8 +159,6 @@ function App() {
     waking: false,
     presence: {},
   });
-  const [peerInput, setPeerInput] = useState("");
-  const [newContactName, setNewContactName] = useState("");
   const [draft, setDraft] = useState("");
   const [editState, setEditState] = useState<MessageEditState | null>(null);
   const [activeEditId, setActiveEditId] = useState<string | null>(null);
@@ -172,11 +174,10 @@ function App() {
   const [pinForm, setPinForm] = useState<
     "enable" | "change" | "disable" | null
   >(null);
-  const [newChatMode, setNewChatMode] = useState<null | "choose" | "id">(null);
+  const [newChatView, setNewChatView] = useState<NewChatView | null>(null);
   const [contactsOptions, setContactsOptions] = useState<{
     initialView?: ContactsInitialView;
     chatPeerId?: string;
-    pickMode?: boolean;
   }>({});
   const [presenceClock, setPresenceClock] = useState(Date.now());
   const profileRef = useRef<HTMLDivElement | null>(null);
@@ -187,7 +188,6 @@ function App() {
   const idCopyPendingRef = useRef(false);
   const hoverRevealTimerRef = useRef<number | null>(null);
   const pinInputRef = useRef<HTMLInputElement | null>(null);
-  const newChatIdRef = useRef<HTMLInputElement | null>(null);
   const controllerRef = useRef<ChatController | null>(null);
   const registrationBusyRef = useRef(false);
   const messageListRef = useRef<HTMLDivElement | null>(null);
@@ -198,12 +198,16 @@ function App() {
   const chatHistoryRef = useRef(false);
   const contactsOpenRef = useRef(false);
   const contactsHistoryRef = useRef(false);
+  const newChatOpenRef = useRef(false);
+  const newChatViewRef = useRef<NewChatView | null>(null);
+  const newChatHistoryRef = useRef(false);
+  const newChatClosingRef = useRef(false);
   const longPressHandlersRef = useRef(new Map<string, LongPressHandlers>());
   const chatPointerTypesRef = useRef(new Map<string, string>());
 
   useEffect(() => {
-    if (newChatMode === "id") newChatIdRef.current?.focus();
-  }, [newChatMode]);
+    newChatViewRef.current = newChatView;
+  }, [newChatView]);
 
   function clearChatHistoryEntry() {
     window.history.replaceState(null, "", window.location.href);
@@ -213,7 +217,6 @@ function App() {
   function openContacts(options?: {
     initialView?: ContactsInitialView;
     chatPeerId?: string;
-    pickMode?: boolean;
   }) {
     if (contactsOpenRef.current) return;
     setContactsOptions(options ?? {});
@@ -248,6 +251,91 @@ function App() {
     contactsOpenRef.current = false;
     contactsHistoryRef.current = false;
     setContactsOpen(false);
+    newChatOpenRef.current = false;
+    newChatHistoryRef.current = false;
+    newChatClosingRef.current = false;
+    newChatViewRef.current = null;
+    setNewChatView(null);
+  }
+
+  function openNewChat() {
+    if (contactsOpenRef.current || newChatOpenRef.current) return;
+    window.history.pushState(
+      { ...(window.history.state ?? {}), newChat: true },
+      "",
+      window.location.href,
+    );
+    newChatHistoryRef.current = true;
+    newChatOpenRef.current = true;
+    newChatViewRef.current = "menu";
+    setNewChatView("menu");
+    setChatError("");
+  }
+
+  function closeNewChat() {
+    if (
+      newChatHistoryRef.current &&
+      (window.history.state as { newChat?: unknown } | null)?.newChat
+    ) {
+      newChatClosingRef.current = true;
+      window.history.back();
+      return;
+    }
+    newChatOpenRef.current = false;
+    newChatHistoryRef.current = false;
+    newChatClosingRef.current = false;
+    newChatViewRef.current = null;
+    setNewChatView(null);
+  }
+
+  function onBackNewChat() {
+    if (newChatViewRef.current !== "menu") {
+      newChatViewRef.current = "menu";
+      setNewChatView("menu");
+    } else closeNewChat();
+  }
+
+  async function startChatById(id: string, name: string): Promise<string> {
+    const controller = controllerRef.current;
+    if (!controller) return t.serverUnavailable;
+    try {
+      await controller.openChat(id);
+      const next = controller.getSnapshot();
+      if (next.activePeer !== id.trim() || next.error)
+        return errorText(next.error || "invalid_id");
+      if (name.trim() && next.activePeer !== userId) {
+        let saved = false;
+        try {
+          saved = await controller.saveContactName(
+            next.activePeer,
+            name.trim(),
+          );
+        } catch {
+          return t.contactSaveFailed;
+        }
+        if (!saved) return t.contactSaveFailed;
+      }
+      closeNewChat();
+      return "";
+    } catch {
+      return errorText("server_unavailable");
+    }
+  }
+
+  async function startChatWithContact(peerId: string): Promise<string> {
+    const controller = controllerRef.current;
+    if (!controller) return t.serverUnavailable;
+    try {
+      await controller.openChat(peerId);
+      const next = controller.getSnapshot();
+      if (next.activePeer === peerId && !next.error) {
+        closeNewChat();
+        return "";
+      }
+      return next.error ? errorText(next.error) : t.badPeerKey;
+    } catch {
+      return errorText("server_unavailable");
+    }
   }
 
   useEffect(() => {
@@ -381,6 +469,11 @@ function App() {
     contactsOpenRef.current = false;
     contactsHistoryRef.current = false;
     setContactsOpen(false);
+    newChatOpenRef.current = false;
+    newChatHistoryRef.current = false;
+    newChatClosingRef.current = false;
+    newChatViewRef.current = null;
+    setNewChatView(null);
     setPhrase("");
     clearChatHistoryEntry();
     setScreen("home");
@@ -646,6 +739,11 @@ function App() {
     contactsOpenRef.current = false;
     contactsHistoryRef.current = false;
     setContactsOpen(false);
+    newChatOpenRef.current = false;
+    newChatHistoryRef.current = false;
+    newChatClosingRef.current = false;
+    newChatViewRef.current = null;
+    setNewChatView(null);
     setPhrase("");
     setLogoutPhrase("");
     setLogoutError(false);
@@ -748,6 +846,24 @@ function App() {
   useEffect(() => {
     if (screen !== "home") return;
     const onPopState = (event: PopStateEvent) => {
+      if (newChatOpenRef.current) {
+        if (!newChatClosingRef.current && newChatViewRef.current !== "menu") {
+          window.history.pushState(
+            { ...(event.state ?? {}), newChat: true },
+            "",
+            window.location.href,
+          );
+          newChatViewRef.current = "menu";
+          setNewChatView("menu");
+          return;
+        }
+        newChatOpenRef.current = false;
+        newChatHistoryRef.current = false;
+        newChatClosingRef.current = false;
+        newChatViewRef.current = null;
+        setNewChatView(null);
+        return;
+      }
       if (contactsOpenRef.current) {
         contactsOpenRef.current = false;
         contactsHistoryRef.current = false;
@@ -764,10 +880,15 @@ function App() {
     return () => window.removeEventListener("popstate", onPopState);
   }, [screen]);
   useEffect(() => {
+    const state = window.history.state as {
+      contacts?: unknown;
+      newChat?: unknown;
+      chat?: unknown;
+    } | null;
     if (
       activePeer &&
-      contactsOpenRef.current &&
-      (window.history.state as { contacts?: unknown } | null)?.contacts
+      ((contactsOpenRef.current && state?.contacts) ||
+        (newChatOpenRef.current && state?.newChat))
     ) {
       window.history.replaceState(
         { chat: activePeer },
@@ -775,12 +896,13 @@ function App() {
         window.location.href,
       );
       contactsHistoryRef.current = false;
+      if (newChatOpenRef.current) newChatHistoryRef.current = false;
       chatHistoryRef.current = true;
       return;
     }
     if (screen !== "home" || !activePeer) return;
-    const state = window.history.state as { chat?: unknown } | null;
-    if (state?.chat === activePeer) {
+    const currentState = window.history.state as { chat?: unknown } | null;
+    if (currentState?.chat === activePeer) {
       chatHistoryRef.current = true;
       return;
     }
@@ -953,6 +1075,11 @@ function App() {
             contactsOpenRef.current = false;
             contactsHistoryRef.current = false;
             setContactsOpen(false);
+            newChatOpenRef.current = false;
+            newChatHistoryRef.current = false;
+            newChatClosingRef.current = false;
+            newChatViewRef.current = null;
+            setNewChatView(null);
             showAuthScreen("welcome");
             setDeviceRevokedNotice(true);
           }
@@ -976,25 +1103,6 @@ function App() {
       controllerRef.current = null;
     };
   }, [keys, screen, userId]);
-
-  async function openChat(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    await controllerRef.current?.openChat(peerInput);
-    const next = controllerRef.current?.getSnapshot();
-    setChatError(next?.error ? errorText(next.error) : "");
-    if (next?.activePeer) {
-      if (newContactName.trim() && next.activePeer !== userId) {
-        const saved = await controllerRef.current?.saveContactName(
-          next.activePeer,
-          newContactName,
-        );
-        if (!saved) setChatError(t.contactSaveFailed);
-      }
-      setPeerInput("");
-      setNewContactName("");
-      setNewChatMode(null);
-    }
-  }
 
   async function sendMessage(event?: React.FormEvent) {
     event?.preventDefault();
@@ -1766,101 +1874,39 @@ function App() {
                 onClose={closeContacts}
                 initialView={contactsOptions.initialView}
                 chatPeerId={contactsOptions.chatPeerId}
-                pickMode={contactsOptions.pickMode}
                 onChatOpened={() => {
                   closeContacts();
                   setChatError("");
                 }}
               />
             )}
+            {newChatView && (
+              <NewChatScreen
+                view={newChatView}
+                strings={t}
+                contacts={chatState.contacts}
+                contactsReady={chatState.contactsReady}
+                contactsLoadFailed={chatState.contactsError}
+                language={language}
+                onBack={onBackNewChat}
+                onChooseView={(view) => {
+                  newChatViewRef.current = view;
+                  setNewChatView(view);
+                  setChatError("");
+                }}
+                onPickContact={startChatWithContact}
+                onSubmitId={startChatById}
+              />
+            )}
             <section className={`messenger ${activePeer ? "show-chat" : ""}`}>
               <aside className="chat-sidebar">
                 <button
                   className="secondary new-chat-toggle"
-                  onClick={() => {
-                    if (newChatMode === null) setNewChatMode("choose");
-                    else {
-                      setNewChatMode(null);
-                      setPeerInput("");
-                      setNewContactName("");
-                    }
-                    setChatError("");
-                  }}
+                  data-testid="new-chat-toggle"
+                  onClick={openNewChat}
                 >
-                  {newChatMode !== null ? t.cancel : `＋ ${t.newChat}`}
+                  ＋ {t.newChat}
                 </button>
-                {newChatMode === "choose" && (
-                  <div
-                    className="new-chat-choices"
-                    onKeyDown={(event) => {
-                      if (event.key === "Escape") setNewChatMode(null);
-                    }}
-                  >
-                    <button
-                      type="button"
-                      className="secondary"
-                      data-testid="new-chat-from-contacts"
-                      onClick={() => {
-                        setNewChatMode(null);
-                        openContacts({ pickMode: true });
-                      }}
-                    >
-                      {t.newChatFromContacts}
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary"
-                      data-testid="new-chat-by-id"
-                      onClick={() => setNewChatMode("id")}
-                    >
-                      {t.newChatById}
-                    </button>
-                  </div>
-                )}
-                {newChatMode === "id" && (
-                  <form
-                    onSubmit={(event) => void openChat(event)}
-                    className="new-chat"
-                    data-testid="new-chat-form"
-                  >
-                    <input
-                      ref={newChatIdRef}
-                      aria-label={t.peerId}
-                      data-testid="peer-id-input"
-                      value={peerInput}
-                      onKeyDown={(event) => {
-                        if (event.key === "Escape") setNewChatMode(null);
-                      }}
-                      onChange={(event) => setPeerInput(event.target.value)}
-                      placeholder={t.peerId}
-                    />
-                    <input
-                      aria-label={t.contactName}
-                      value={newContactName}
-                      onChange={(event) =>
-                        setNewContactName(event.target.value)
-                      }
-                      placeholder={t.contactName}
-                    />
-                    {chatError && <p className="error">{chatError}</p>}
-                    <div className="new-chat-actions">
-                      <button data-testid="new-chat" className="primary">
-                        {t.createChat}
-                      </button>
-                      <button
-                        type="button"
-                        className="secondary"
-                        onClick={() => {
-                          setNewChatMode(null);
-                          setPeerInput("");
-                          setNewContactName("");
-                        }}
-                      >
-                        {t.cancel}
-                      </button>
-                    </div>
-                  </form>
-                )}
                 <div data-testid="chat-list">
                   {chats.map((chat) => {
                     const longPress = longPressHandlersFor(chat.peerId);
