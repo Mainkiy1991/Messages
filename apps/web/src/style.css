@@ -727,6 +727,15 @@ select {
   min-height: 36px;
   margin-bottom: 8px;
 }
+.new-chat-choices {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0;
+}
+.new-chat-choices button {
+  width: 100%;
+  min-height: 40px;
+}
 .new-chat {
   display: grid;
   gap: 7px;

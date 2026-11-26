@@ -10,6 +10,8 @@ import { supportedLanguages } from "../i18n.js";
 
 export type ContactsScreenStrings = {
   contactsTitle: string;
+  contactsPickTitle: string;
+  contactsPickEmpty: string;
   contactsAddToContacts: string;
   contactsNotInContacts: string;
   contactsOpenCard: string;
@@ -169,6 +171,7 @@ export type ContactsScreenProps = {
   onChatOpened: (peerId: string) => void;
   initialView?: ContactsInitialView;
   chatPeerId?: string;
+  pickMode?: boolean;
 };
 export function ContactsScreen({
   controller,
@@ -183,9 +186,10 @@ export function ContactsScreen({
   onChatOpened,
   initialView,
   chatPeerId,
+  pickMode = false,
 }: ContactsScreenProps) {
   const [view, setView] = useState<ContactsInitialView>(
-    initialView ?? { view: "list" },
+    pickMode ? { view: "list" } : (initialView ?? { view: "list" }),
   );
   const [peerId, setPeerId] = useState(
     initialView && "peerId" in initialView ? initialView.peerId : "",
@@ -337,14 +341,17 @@ export function ContactsScreen({
     }
   }
   async function write() {
+    return openChatWith(peerId);
+  }
+  async function openChatWith(targetPeerId: string) {
     if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      await controller.openChat(peerId);
+      await controller.openChat(targetPeerId);
       const snapshot = controller.getSnapshot();
-      if (snapshot.activePeer === peerId && !snapshot.error)
-        onChatOpened(peerId);
+      if (snapshot.activePeer === targetPeerId && !snapshot.error)
+        onChatOpened(targetPeerId);
       else
         setError({
           place: "write",
@@ -352,6 +359,12 @@ export function ContactsScreen({
             ? chatErrorText(snapshot.error as ChatError)
             : "",
         });
+    } catch (cause) {
+      setError({
+        place: "write",
+        text:
+          cause instanceof Error ? cause.message : strings.contactsErrorSave,
+      });
     } finally {
       setBusy(false);
     }
@@ -378,7 +391,7 @@ export function ContactsScreen({
       className="contacts-overlay"
       role="dialog"
       aria-modal="true"
-      aria-label={strings.contactsTitle}
+      aria-label={pickMode ? strings.contactsPickTitle : strings.contactsTitle}
       data-testid="contacts-screen"
     >
       <header className="contacts-header">
@@ -405,23 +418,25 @@ export function ContactsScreen({
             <path d="M19 12H5M12 19l-7-7 7-7" />
           </svg>
         </button>
-        <h1>{strings.contactsTitle}</h1>
+        <h1>{pickMode ? strings.contactsPickTitle : strings.contactsTitle}</h1>
       </header>
       <main className="contacts-body">
         {(view.view === "list" ||
           (view.view === "card" && !Object.hasOwn(contacts, view.peerId))) && (
           <>
-            <button
-              className="primary"
-              data-testid="contact-add-open"
-              disabled={!ready || busy}
-              onClick={() => {
-                setError(null);
-                setView({ view: "add" });
-              }}
-            >
-              {strings.contactsAdd}
-            </button>
+            {!pickMode && (
+              <button
+                className="primary"
+                data-testid="contact-add-open"
+                disabled={!ready || busy}
+                onClick={() => {
+                  setError(null);
+                  setView({ view: "add" });
+                }}
+              >
+                {strings.contactsAdd}
+              </button>
+            )}
             {!ready && !loadFailed && <p>{strings.contactsLoading}</p>}
             {loadFailed && (
               <p className="error" role="alert">
@@ -429,7 +444,9 @@ export function ContactsScreen({
               </p>
             )}
             {ready && !loadFailed && !sorted.length && (
-              <p>{strings.contactsEmpty}</p>
+              <p>
+                {pickMode ? strings.contactsPickEmpty : strings.contactsEmpty}
+              </p>
             )}
             {ready &&
               sorted.map(([pid, label]) => (
@@ -438,7 +455,12 @@ export function ContactsScreen({
                   data-testid="contact-row"
                   data-peer-id={pid}
                   key={pid}
+                  disabled={busy}
                   onClick={() => {
+                    if (pickMode) {
+                      void openChatWith(pid);
+                      return;
+                    }
                     setPeerId(pid);
                     setError(null);
                     setView({ view: "card", peerId: pid });
@@ -451,6 +473,15 @@ export function ContactsScreen({
                   )}
                 </button>
               ))}
+            {pickMode && error?.place === "write" && (
+              <p
+                className="error"
+                role="alert"
+                data-testid="contact-pick-error"
+              >
+                {error.text}
+              </p>
+            )}
           </>
         )}
         {view.view === "peer" && (
