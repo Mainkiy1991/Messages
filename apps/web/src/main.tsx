@@ -172,10 +172,11 @@ function App() {
   const [pinForm, setPinForm] = useState<
     "enable" | "change" | "disable" | null
   >(null);
-  const [newChatOpen, setNewChatOpen] = useState(false);
+  const [newChatMode, setNewChatMode] = useState<null | "choose" | "id">(null);
   const [contactsOptions, setContactsOptions] = useState<{
     initialView?: ContactsInitialView;
     chatPeerId?: string;
+    pickMode?: boolean;
   }>({});
   const [presenceClock, setPresenceClock] = useState(Date.now());
   const profileRef = useRef<HTMLDivElement | null>(null);
@@ -186,6 +187,7 @@ function App() {
   const idCopyPendingRef = useRef(false);
   const hoverRevealTimerRef = useRef<number | null>(null);
   const pinInputRef = useRef<HTMLInputElement | null>(null);
+  const newChatIdRef = useRef<HTMLInputElement | null>(null);
   const controllerRef = useRef<ChatController | null>(null);
   const registrationBusyRef = useRef(false);
   const messageListRef = useRef<HTMLDivElement | null>(null);
@@ -199,6 +201,10 @@ function App() {
   const longPressHandlersRef = useRef(new Map<string, LongPressHandlers>());
   const chatPointerTypesRef = useRef(new Map<string, string>());
 
+  useEffect(() => {
+    if (newChatMode === "id") newChatIdRef.current?.focus();
+  }, [newChatMode]);
+
   function clearChatHistoryEntry() {
     window.history.replaceState(null, "", window.location.href);
     chatHistoryRef.current = false;
@@ -207,6 +213,7 @@ function App() {
   function openContacts(options?: {
     initialView?: ContactsInitialView;
     chatPeerId?: string;
+    pickMode?: boolean;
   }) {
     if (contactsOpenRef.current) return;
     setContactsOptions(options ?? {});
@@ -985,7 +992,7 @@ function App() {
       }
       setPeerInput("");
       setNewContactName("");
-      setNewChatOpen(false);
+      setNewChatMode(null);
     }
   }
 
@@ -1759,6 +1766,7 @@ function App() {
                 onClose={closeContacts}
                 initialView={contactsOptions.initialView}
                 chatPeerId={contactsOptions.chatPeerId}
+                pickMode={contactsOptions.pickMode}
                 onChatOpened={() => {
                   closeContacts();
                   setChatError("");
@@ -1770,24 +1778,58 @@ function App() {
                 <button
                   className="secondary new-chat-toggle"
                   onClick={() => {
-                    setNewChatOpen(!newChatOpen);
+                    if (newChatMode === null) setNewChatMode("choose");
+                    else {
+                      setNewChatMode(null);
+                      setPeerInput("");
+                      setNewContactName("");
+                    }
                     setChatError("");
                   }}
                 >
-                  {newChatOpen ? t.cancel : `＋ ${t.newChat}`}
+                  {newChatMode !== null ? t.cancel : `＋ ${t.newChat}`}
                 </button>
-                {newChatOpen && (
+                {newChatMode === "choose" && (
+                  <div
+                    className="new-chat-choices"
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setNewChatMode(null);
+                    }}
+                  >
+                    <button
+                      type="button"
+                      className="secondary"
+                      data-testid="new-chat-from-contacts"
+                      onClick={() => {
+                        setNewChatMode(null);
+                        openContacts({ pickMode: true });
+                      }}
+                    >
+                      {t.newChatFromContacts}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      data-testid="new-chat-by-id"
+                      onClick={() => setNewChatMode("id")}
+                    >
+                      {t.newChatById}
+                    </button>
+                  </div>
+                )}
+                {newChatMode === "id" && (
                   <form
                     onSubmit={(event) => void openChat(event)}
                     className="new-chat"
                     data-testid="new-chat-form"
                   >
                     <input
+                      ref={newChatIdRef}
                       aria-label={t.peerId}
                       data-testid="peer-id-input"
                       value={peerInput}
                       onKeyDown={(event) => {
-                        if (event.key === "Escape") setNewChatOpen(false);
+                        if (event.key === "Escape") setNewChatMode(null);
                       }}
                       onChange={(event) => setPeerInput(event.target.value)}
                       placeholder={t.peerId}
@@ -1809,7 +1851,7 @@ function App() {
                         type="button"
                         className="secondary"
                         onClick={() => {
-                          setNewChatOpen(false);
+                          setNewChatMode(null);
                           setPeerInput("");
                           setNewContactName("");
                         }}

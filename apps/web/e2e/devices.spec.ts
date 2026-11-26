@@ -1,4 +1,5 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
+import { startNewChatById } from "./chat-helpers.js";
 
 async function setEnglish(page: Page) {
   await page.addInitScript(() => {
@@ -195,7 +196,7 @@ test("does not reopen the previous account chat after the device is ended", asyn
   await first.page.getByRole("button", { name: "User ID" }).click();
   const accountAId = await first.page.getByTestId("user-id").innerText();
   await profileButton.click();
-  await first.page.getByRole("button", { name: /New chat/u }).click();
+  await startNewChatById(first.page);
   await first.page.getByTestId("peer-id-input").fill(accountAId);
   await first.page.getByTestId("new-chat").click();
   await expect(first.page.getByTestId("saved-chat-title")).toBeVisible();

@@ -9,6 +9,7 @@ import {
 } from "@playwright/test";
 import { createRequire } from "node:module";
 import { strings } from "../src/i18n.js";
+import { startNewChatById } from "./chat-helpers.js";
 
 const require = createRequire(import.meta.url);
 const { Pool } = require("../../server/node_modules/pg") as {
@@ -218,7 +219,7 @@ async function expectStackedButtons(
 }
 
 async function openChat(page: Page, peerId: string): Promise<void> {
-  await page.getByRole("button", { name: /New chat/u }).click();
+  await startNewChatById(page);
   await page.getByTestId("peer-id-input").fill(peerId);
   await page.getByTestId("new-chat").click();
   await expect(page.locator(".conversation-head")).toContainText(
@@ -233,6 +234,10 @@ async function send(page: Page, message: string): Promise<void> {
 
 function chatWith(page: Page, peerId: string) {
   return page.locator(`[data-testid="chat-item"][data-peer-id="${peerId}"]`);
+}
+
+function startsWithText(text: string): RegExp {
+  return new RegExp(`^${text}`, "u");
 }
 
 test.describe("real browser chat", () => {
@@ -465,14 +470,14 @@ test.describe("real browser chat", () => {
     await expect(
       b.page
         .locator(".message-list .message-text")
-        .filter({ hasText: "Read this after reconnecting" }),
+        .filter({ hasText: startsWithText("Read this after reconnecting") }),
     ).toBeVisible();
     expect(await signIn(a.page, alice.phrase)).toBe(alice.id);
     await chatWith(a.page, bob.id).click();
     await expect(
       a.page
         .locator('[data-testid="message"][data-direction="out"]')
-        .filter({ hasText: "Read this after reconnecting" }),
+        .filter({ hasText: startsWithText("Read this after reconnecting") }),
     ).toHaveAttribute("data-status", "read");
   });
 
@@ -645,7 +650,7 @@ test.describe("real browser chat", () => {
     const user = await openUser(browser);
     const alice = await createAccount(user.page);
     await user.context.grantPermissions(["clipboard-read", "clipboard-write"]);
-    await user.page.getByRole("button", { name: /New chat/u }).click();
+    await startNewChatById(user.page);
     await user.page.getByTestId("peer-id-input").fill(alice.id);
     await user.page.getByTestId("new-chat").click();
     await expect(user.page.getByTestId("saved-chat-title")).toBeVisible();
@@ -1340,7 +1345,7 @@ test.describe("real browser chat", () => {
     const a = await openUser(browser);
     const alice = await createAccount(a.page);
 
-    await a.page.getByRole("button", { name: /New chat/u }).click();
+    await startNewChatById(a.page);
     await a.page.getByTestId("peer-id-input").fill(alice.id);
     await a.page.getByTestId("new-chat").click();
     await expect(a.page.getByTestId("saved-chat-title")).toHaveText(
@@ -1385,7 +1390,7 @@ test.describe("real browser chat", () => {
     const a = await openUser(browser);
     const alice = await createAccount(a.page);
 
-    await a.page.getByRole("button", { name: /New chat/u }).click();
+    await startNewChatById(a.page);
     await a.page.getByTestId("peer-id-input").fill(alice.id);
     await a.page.getByTestId("new-chat").click();
     await expect(a.page.getByTestId("saved-chat-title")).toHaveText(
@@ -1396,7 +1401,7 @@ test.describe("real browser chat", () => {
     await send(a.page, messageText);
     const row = a.page
       .getByTestId("message-row")
-      .filter({ hasText: messageText });
+      .filter({ hasText: startsWithText(messageText) });
     const edit = row.getByTestId("edit-message");
     const remove = row.getByTestId("delete-message");
     await expect(edit).toBeVisible();
@@ -1497,7 +1502,7 @@ test.describe("real browser chat", () => {
     await expect(
       a.page
         .locator(".message-list .message-text")
-        .filter({ hasText: "Hi Alice" }),
+        .filter({ hasText: startsWithText("Hi Alice") }),
     ).toBeVisible();
   });
 
@@ -1516,7 +1521,7 @@ test.describe("real browser chat", () => {
       await expect(
         a.page
           .locator(".message-list .message-text")
-          .filter({ hasText: `Long history message ${index}` }),
+          .filter({ hasText: startsWithText(`Long history message ${index}`) }),
       ).toBeVisible();
     }
 
@@ -1536,7 +1541,7 @@ test.describe("real browser chat", () => {
     await expect(
       a.page
         .locator('[data-testid="message"][data-direction="out"]')
-        .filter({ hasText: "Long history message 15" }),
+        .filter({ hasText: startsWithText("Long history message 15") }),
     ).toHaveAttribute("data-status", /^(sent|delivered)$/u);
 
     await a.page.setViewportSize({ width: 1440, height: 900 });
@@ -1572,12 +1577,14 @@ test.describe("real browser chat", () => {
       const sender = index % 2 ? a.page : b.page;
       await send(sender, text);
       await expect(
-        sender.locator(".message-list .message-text").filter({ hasText: text }),
+        sender
+          .locator(".message-list .message-text")
+          .filter({ hasText: startsWithText(text) }),
       ).toBeVisible();
       await expect(
         sender
           .locator('[data-testid="message"][data-direction="out"]')
-          .filter({ hasText: text }),
+          .filter({ hasText: startsWithText(text) }),
       ).toHaveAttribute("data-status", /^(sent|delivered|read)$/u);
       expected.push(text);
     }
@@ -1709,6 +1716,13 @@ test.describe("real browser chat", () => {
     await expect(a.page.locator(".conversation-head")).toContainText(
       "Bob Contact",
     );
+    await a.page.goBack();
+    await expect(a.page.locator(".chat-sidebar")).toBeVisible();
+    await expect(a.page.locator(".empty-chat")).toBeVisible();
+    await chatWith(a.page, bob.id).click();
+    await expect(a.page.locator(".conversation-head")).toContainText(
+      "Bob Contact",
+    );
     await a.page.addInitScript(() => {
       const descriptor = Object.getOwnPropertyDescriptor(
         IDBRequest.prototype,
@@ -1790,7 +1804,7 @@ test.describe("real browser chat", () => {
     await restoredChat.click();
     const restoredMessage = a.page
       .locator('[data-testid="message"]')
-      .filter({ hasText: "Persisted outgoing history" });
+      .filter({ hasText: startsWithText("Persisted outgoing history") });
     await expect(restoredMessage).toBeVisible();
     await expect(restoredMessage).toHaveAttribute(
       "data-status",
@@ -1818,7 +1832,7 @@ test.describe("real browser chat", () => {
     await expect(
       b.page
         .locator(".message-list .message-text")
-        .filter({ hasText: "Before outage" }),
+        .filter({ hasText: startsWithText("Before outage") }),
     ).toBeVisible();
 
     a.expectedDisconnect = true;
@@ -1871,19 +1885,19 @@ test.describe("real browser chat", () => {
     await expect(
       a.page
         .locator(".message-list .message-text")
-        .filter({ hasText: "During outage" }),
+        .filter({ hasText: startsWithText("During outage") }),
     ).toBeVisible({
       timeout: 45_000,
     });
     await expect(
       a.page
         .locator(".message-list .message-text")
-        .filter({ hasText: "Before outage" }),
+        .filter({ hasText: startsWithText("Before outage") }),
     ).toBeVisible();
     await expect(
       b.page
         .locator(".message-list .message-text")
-        .filter({ hasText: "Before outage" }),
+        .filter({ hasText: startsWithText("Before outage") }),
     ).toBeVisible();
   });
 
@@ -1897,10 +1911,10 @@ test.describe("real browser chat", () => {
     const bob = await createAccount(b.page);
     const charlie = await createAccount(c.page);
     await openChat(a.page, bob.id);
-    await b.page.getByRole("button", { name: /New chat/u }).click();
+    await startNewChatById(b.page);
     await b.page.getByTestId("peer-id-input").fill(alice.id);
     await b.page.getByTestId("new-chat").click();
-    await c.page.getByRole("button", { name: /New chat/u }).click();
+    await startNewChatById(c.page);
     await c.page.getByTestId("peer-id-input").fill(alice.id);
     await c.page.getByTestId("new-chat").click();
     await send(c.page, "Hello Alice from Charlie");
@@ -2103,9 +2117,9 @@ test.describe("real browser chat", () => {
     await openChat(a.page, bob.id);
     await send(a.page, "Keep the chat in the conversation list");
     await expect(
-      a.page
-        .locator('[data-testid="message"][data-direction="out"]')
-        .filter({ hasText: "Keep the chat in the conversation list" }),
+      a.page.locator('[data-testid="message"][data-direction="out"]').filter({
+        hasText: startsWithText("Keep the chat in the conversation list"),
+      }),
     ).toHaveAttribute("data-status", /^(sent|delivered)$/u);
     await logout(a.page, alice.phrase);
     await a.page.setViewportSize({ width: 360, height: 640 });
@@ -2130,6 +2144,10 @@ test.describe("real browser chat", () => {
     );
     await expect(a.page.getByTestId("new-chat-form")).toHaveCount(0);
     await a.page.getByRole("button", { name: /New chat/u }).click();
+    await expect(a.page.getByTestId("new-chat-form")).toHaveCount(0);
+    await expect(a.page.getByTestId("new-chat-by-id")).toBeVisible();
+    await expect(a.page.getByTestId("new-chat-from-contacts")).toBeVisible();
+    await a.page.getByTestId("new-chat-by-id").click();
     await expect(a.page.getByTestId("new-chat-form")).toBeVisible();
     await a.page.getByTestId("peer-id-input").fill(bob.id);
     await a.page.getByTestId("new-chat").click();
@@ -2321,8 +2339,12 @@ test.describe("real browser chat", () => {
     // Both users see the new text instead of the old one.
     await expect(a.page.getByTestId("edit-banner")).toHaveCount(0);
     await expect(a.page.getByTestId("message-input")).toHaveValue("");
-    await expect(bobText.filter({ hasText: "First version" })).toHaveCount(0);
-    await expect(bobText.filter({ hasText: "Width compare" })).toHaveCount(2);
+    await expect(
+      bobText.filter({ hasText: rowStart("First version") }),
+    ).toHaveCount(0);
+    await expect(
+      bobText.filter({ hasText: rowStart("Width compare") }),
+    ).toHaveCount(2);
     await expect(a.page.locator(".message-text")).toHaveCount(2);
     await expect(a.page.getByTestId("edited-mark")).toHaveCount(1);
     await expect(b.page.getByTestId("edited-mark")).toHaveCount(1);
@@ -2602,7 +2624,7 @@ test.describe("real browser chat", () => {
   }) => {
     const a = await openUser(browser);
     const alice = await createAccount(a.page);
-    await a.page.getByRole("button", { name: /New chat/u }).click();
+    await startNewChatById(a.page);
     await a.page.getByTestId("peer-id-input").fill(alice.id);
     await a.page.getByTestId("new-chat").click();
     await expect(a.page.getByTestId("saved-chat-title")).toHaveText(
@@ -3318,5 +3340,81 @@ test.describe("real browser chat", () => {
         ),
       ).toBe(true);
     });
+  });
+
+  test("new chat from contacts opens the chosen contact", async ({
+    browser,
+  }) => {
+    const alice = await openUser(browser);
+    const bob = await openUser(browser);
+    await createAccount(alice.page);
+    const bobAccount = await createAccount(bob.page);
+    await alice.page.getByTestId("profile").click();
+    await alice.page.getByTestId("profile-contacts").click();
+    await expect(alice.page.getByTestId("contacts-screen")).toBeVisible();
+    await alice.page.getByTestId("contact-add-open").click();
+    await alice.page.getByTestId("contact-add-id").fill(bobAccount.id);
+    await alice.page.getByTestId("contact-add-name").fill("Bob Contact");
+    await alice.page.getByTestId("contact-add-submit").click();
+    await expect(alice.page.getByTestId("contact-row")).toContainText(
+      "Bob Contact",
+    );
+    await alice.page.getByTestId("contacts-back").click();
+
+    await alice.page.setViewportSize({ width: 360, height: 640 });
+    await alice.page.getByRole("button", { name: /New chat/u }).click();
+    const choices = [
+      alice.page.getByTestId("new-chat-from-contacts"),
+      alice.page.getByTestId("new-chat-by-id"),
+    ];
+    for (const choice of choices) {
+      const box = await choice.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.height).toBeGreaterThanOrEqual(40);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(360);
+    }
+    await alice.page.getByTestId("new-chat-from-contacts").click();
+    await expect(alice.page.getByTestId("contacts-screen")).toBeVisible();
+    await expect(
+      alice.page.getByRole("heading", { name: "Choose a contact" }),
+    ).toBeVisible();
+    await expect(alice.page.getByTestId("contact-add-open")).toHaveCount(0);
+    await alice.page.getByTestId("contact-row").click();
+    await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+    await expect(alice.page.locator(".conversation-head")).toBeVisible();
+    await expect(alice.page.locator(".contact-name-trigger")).toContainText(
+      "Bob Contact",
+    );
+    await expect(alice.page.getByTestId("new-chat-by-id")).toHaveCount(0);
+    await alice.page.goBack();
+    await expect(alice.page.locator(".chat-sidebar")).toBeVisible();
+    await expect(alice.page.locator(".empty-chat")).toBeVisible();
+    await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+  });
+
+  test("new chat from contacts shows a hint when there are no contacts", async ({
+    browser,
+  }) => {
+    const alice = await openUser(browser);
+    const bob = await openUser(browser);
+    await createAccount(alice.page);
+    const bobAccount = await createAccount(bob.page);
+    await alice.page.getByRole("button", { name: /New chat/u }).click();
+    await alice.page.getByTestId("new-chat-from-contacts").click();
+    await expect(
+      alice.page.getByText("No contacts yet. Start a chat by ID."),
+    ).toBeVisible();
+    await alice.page.keyboard.press("Escape");
+    await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+    await expect(alice.page.getByTestId("new-chat-by-id")).toHaveCount(0);
+    await startNewChatById(alice.page);
+    await expect(alice.page.getByLabel(/saved to contacts/u)).toBeVisible();
+    await alice.page.getByTestId("peer-id-input").fill(bobAccount.id);
+    await alice.page.getByLabel(/saved to contacts/u).fill("Zed");
+    await alice.page.getByTestId("new-chat").click();
+    await expect(alice.page.locator(".conversation-head")).toBeVisible();
+    await expect(alice.page.locator(".contact-name-trigger")).toContainText(
+      "Zed",
+    );
   });
 });
