@@ -3388,8 +3388,9 @@ test.describe("real browser chat", () => {
     await expect(alice.page.getByTestId("new-chat-by-id")).toHaveCount(0);
     await alice.page.goBack();
     await expect(alice.page.locator(".chat-sidebar")).toBeVisible();
-    await expect(alice.page.locator(".empty-chat")).toBeVisible();
     await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+    await alice.page.setViewportSize({ width: 1280, height: 720 });
+    await expect(alice.page.locator(".empty-chat")).toBeVisible();
   });
 
   test("new chat from contacts shows a hint when there are no contacts", async ({
