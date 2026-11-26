@@ -1693,24 +1693,19 @@ test.describe("real browser chat", () => {
     await expect(
       a.page
         .locator('[data-testid="message"]')
-        .filter({ hasText: "History survives a reload" }),
+        .filter({ hasText: /^History survives a reload/u }),
     ).toBeVisible();
-    await a.page
-      .locator(".conversation-head")
-      .locator(".contact-name-trigger")
-      .click();
-    await a.page
-      .locator(".conversation-head")
-      .getByLabel("Contact name (optional)")
-      .fill("Bob Contact");
-    await a.page.getByRole("button", { name: "Save name" }).click();
-    await expect(a.page.locator(".conversation-head")).toContainText(
+    await a.page.locator(".contact-name-trigger").click();
+    await expect(a.page.getByTestId("contact-peer-title")).toHaveText(
+      "Not in your contacts",
+    );
+    await a.page.getByTestId("contact-peer-add").click();
+    await a.page.getByTestId("contact-add-name").fill("Bob Contact");
+    await a.page.getByTestId("contact-add-submit").click();
+    await expect(a.page.getByTestId("contact-card-name")).toHaveText(
       "Bob Contact",
     );
-    await a.page.goBack();
-    await expect(a.page.locator(".chat-sidebar")).toBeVisible();
-    await expect(a.page.locator(".empty-chat")).toBeVisible();
-    await chatWith(a.page, bob.id).click();
+    await a.page.getByTestId("contacts-back").click();
     await expect(a.page.locator(".conversation-head")).toContainText(
       "Bob Contact",
     );
@@ -2143,15 +2138,15 @@ test.describe("real browser chat", () => {
       bob.id.slice(-10),
     );
 
-    const nameButton = a.page.locator(".contact-name-trigger");
-    await expect(a.page.getByRole("button", { name: "Save name" })).toHaveCount(
-      0,
-    );
-    await nameButton.click();
-    await a.page.getByLabel("Contact name (optional)").fill("Bob named");
-    await expect(
-      a.page.getByRole("button", { name: "Save name" }),
-    ).toBeVisible();
+    await a.page.setViewportSize({ width: 360, height: 640 });
+    await a.page.locator(".contact-name-trigger").click();
+    const contactsBounds = await a.page
+      .getByTestId("contacts-screen")
+      .boundingBox();
+    expect(contactsBounds).not.toBeNull();
+    expect(contactsBounds!.x + contactsBounds!.width).toBeLessThanOrEqual(360);
+    await a.page.keyboard.press("Escape");
+    await expect(a.page.locator(".contact-name-trigger")).toBeVisible();
 
     await a.page.setViewportSize({ width: 1280, height: 720 });
     await expect(a.page.getByTestId("message-input")).toBeInViewport();
@@ -2174,33 +2169,25 @@ test.describe("real browser chat", () => {
     await a.page.setViewportSize({ width: 360, height: 640 });
     await expect(a.page.locator(".chat-sidebar")).toBeHidden();
     await expect(a.page.getByTestId("message-input")).toBeInViewport();
-    const mobileNameInput = a.page.getByLabel("Contact name (optional)");
-    await expect(mobileNameInput).toBeInViewport();
-    const inputBox = await mobileNameInput.boundingBox();
-    const saveBox = await a.page
-      .getByRole("button", { name: "Save name" })
-      .boundingBox();
-    expect(inputBox).not.toBeNull();
-    expect(saveBox).not.toBeNull();
-    expect(inputBox!.width).toBeGreaterThan(250);
-    expect(saveBox!.y).toBeGreaterThan(inputBox!.y);
     expect(
       await a.page
         .locator(".conversation-head")
         .evaluate((el) => el.getBoundingClientRect().right),
     ).toBeLessThanOrEqual(360);
-    await a.page.getByRole("button", { name: "Cancel" }).click();
     await a.page.getByTestId("profile").click();
     await a.page.getByRole("button", { name: "Language", exact: true }).click();
     await a.page.getByLabel("Language").selectOption("ru");
     await expect(a.page.locator("html")).toHaveAttribute("lang", "ru");
     await a.page.getByTestId("profile").click();
-    await a.page.locator(".contact-name-trigger").click();
-    await a.page.getByLabel("Имя контакта (необязательно)").fill("Боб");
-    await expect(
-      a.page.getByRole("button", { name: "Сохранить имя" }),
-    ).toBeVisible();
-    await a.page.getByRole("button", { name: "Отмена" }).click();
+    await a.page.getByTestId("chat-menu").click();
+    await expect(a.page.getByTestId("chat-menu-contact")).toHaveText(
+      "Добавить в контакты",
+    );
+    await a.page.getByTestId("chat-menu-contact").click();
+    await expect(a.page.getByTestId("contact-peer-title")).toHaveText(
+      "Нет в ваших контактах",
+    );
+    await a.page.keyboard.press("Escape");
     await a.page.getByTestId("profile").click();
     await a.page.getByRole("button", { name: "Язык", exact: true }).click();
     await a.page.getByLabel("Язык").selectOption("en");
@@ -2971,6 +2958,86 @@ test.describe("real browser chat", () => {
       await expect(alice.page.locator(".conversation-head")).toContainText(
         "Bob",
       );
+    });
+
+    test("chat header opens contact card, menu item and Back keep the chat", async ({
+      browser,
+    }) => {
+      const alice = await openUser(browser);
+      const bob = await openUser(browser);
+      await createAccount(alice.page);
+      const bobAccount = await createAccount(bob.page);
+      await alice.page.setViewportSize({ width: 360, height: 800 });
+      await openChat(alice.page, bobAccount.id);
+
+      await alice.page.getByTestId("chat-menu").click();
+      await expect(alice.page.getByTestId("chat-menu-contact")).toHaveText(
+        "Add to contacts",
+      );
+      await alice.page.getByTestId("chat-menu-contact").click();
+      await expect(alice.page.getByTestId("contact-peer-title")).toHaveText(
+        "Not in your contacts",
+      );
+      await expect(alice.page.getByTestId("contact-write")).toHaveCount(0);
+      await alice.page.getByTestId("contact-peer-add").click();
+      await alice.page.getByTestId("contact-add-submit").click();
+      await expect(alice.page.getByTestId("contact-add-error")).toBeVisible();
+      await alice.page.getByTestId("contact-add-name").fill("Bob Contact");
+      await alice.page.getByTestId("contact-add-submit").click();
+      await expect(alice.page.getByTestId("contact-card-name")).toHaveText(
+        "Bob Contact",
+      );
+      await expect(alice.page.getByTestId("contact-write")).toHaveCount(0);
+      await alice.page.getByTestId("contacts-back").click();
+      await expect(alice.page.locator(".contact-name-trigger")).toContainText(
+        "Bob Contact",
+      );
+
+      await alice.page.getByTestId("chat-menu").click();
+      await expect(alice.page.getByTestId("chat-menu-contact")).toHaveText(
+        "Contact card",
+      );
+      await alice.page.getByTestId("chat-menu-contact").click();
+      await expect(alice.page.getByTestId("contact-card-name")).toHaveText(
+        "Bob Contact",
+      );
+      await alice.page.goBack();
+      await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+      await expect(alice.page.locator(".contact-name-trigger")).toBeVisible();
+      await expect(alice.page.locator(".chat-sidebar")).toBeHidden();
+    });
+
+    test("contact card from the header closes with Escape and shows no Write button", async ({
+      browser,
+    }) => {
+      const alice = await openUser(browser);
+      const bob = await openUser(browser);
+      await createAccount(alice.page);
+      const bobAccount = await createAccount(bob.page);
+      await openChat(alice.page, bobAccount.id);
+      await openContacts(alice.page);
+      await addContact(alice.page, bobAccount.id, "Bob Contact", "");
+      await alice.page.getByTestId("contacts-back").click();
+
+      await alice.page.locator(".contact-name-trigger").click();
+      await expect(alice.page.getByTestId("contact-card-name")).toHaveText(
+        "Bob Contact",
+      );
+      await expect(alice.page.getByTestId("contact-write")).toHaveCount(0);
+      await alice.page.keyboard.press("Escape");
+      await expect(alice.page.getByTestId("contacts-screen")).toHaveCount(0);
+      await expect(alice.page.locator(".conversation-head")).toBeVisible();
+
+      await openContacts(alice.page);
+      await alice.page
+        .locator(`[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`)
+        .click();
+      await expect(alice.page.getByTestId("contact-card-name")).toHaveText(
+        "Bob Contact",
+      );
+      await expect(alice.page.getByTestId("contact-write")).toBeVisible();
+      await alice.page.getByTestId("contacts-back").click();
+      await expect(alice.page.getByTestId("contact-row")).toBeVisible();
     });
 
     test("chat opened from contacts goes back to the chat list", async ({

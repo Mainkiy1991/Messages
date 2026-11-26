@@ -4,6 +4,8 @@ import { strings, type Language } from "../i18n.js";
 import {
   ContactsScreen,
   contactErrorText,
+  contactsBackAction,
+  peerCardFromContacts,
   type ContactsScreenProps,
 } from "./contacts-screen.js";
 import type { ContactError } from "../lib/chat-controller.js";
@@ -138,5 +140,72 @@ describe("contacts screen", () => {
       expect(values.every(Boolean)).toBe(true);
       expect(new Set(values).size).toBe(errors.length);
     }
+  });
+  it("shows the peer view and its add action", () => {
+    const html = render({ initialView: { view: "peer", peerId: id } });
+    expect(html).toContain("Нет в ваших контактах");
+    expect(html).toContain('data-testid="contact-peer-add"');
+    expect(html).toContain(`<code>${id}</code>`);
+  });
+  it("renders peer add with a read-only peer ID", () => {
+    const html = render({ initialView: { view: "peerAdd", peerId: id } });
+    expect(html).toContain(`readOnly="" value="${id}"`);
+    expect(html).toContain('data-testid="contact-add-name"');
+    expect(html).toContain('data-testid="contact-add-note"');
+    expect(html).toContain('data-testid="contact-add-submit"');
+  });
+  it("moves from peer views to a card when updated contacts include the peer", () => {
+    expect(
+      peerCardFromContacts({ view: "peerAdd", peerId: id }, { [id]: "Bob" }),
+    ).toBe(id);
+    expect(peerCardFromContacts({ view: "peer", peerId: id }, {})).toBeNull();
+  });
+  it("routes Back from peer, peer add, and chat cards correctly", () => {
+    const state = {
+      busy: false,
+      editing: false,
+      confirmRemove: false,
+      fromChat: true,
+    };
+    expect(
+      contactsBackAction({ ...state, view: { view: "peer", peerId: id } }),
+    ).toBe("close");
+    expect(
+      contactsBackAction({ ...state, view: { view: "peerAdd", peerId: id } }),
+    ).toBe("peer");
+    expect(
+      contactsBackAction({ ...state, view: { view: "card", peerId: id } }),
+    ).toBe("close");
+    expect(
+      contactsBackAction({
+        ...state,
+        fromChat: false,
+        view: { view: "card", peerId: id },
+      }),
+    ).toBe("list");
+  });
+  it("does not route Back while busy", () => {
+    expect(
+      contactsBackAction({
+        busy: true,
+        editing: false,
+        confirmRemove: false,
+        fromChat: true,
+        view: { view: "peerAdd", peerId: id },
+      }),
+    ).toBe("stay");
+  });
+  it("hides Write for chat cards and keeps it for profile contacts", () => {
+    const chat = render({
+      initialView: { view: "card", peerId: id },
+      contacts: { [id]: "Bob" },
+      chatPeerId: id,
+    });
+    const profile = render({
+      initialView: { view: "card", peerId: id },
+      contacts: { [id]: "Bob" },
+    });
+    expect(chat).not.toContain('data-testid="contact-write"');
+    expect(profile).toContain('data-testid="contact-write"');
   });
 });

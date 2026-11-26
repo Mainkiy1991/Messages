@@ -888,26 +888,6 @@ select {
   color: #21834d;
   font-size: 0.78rem;
 }
-.contact-name-trigger span {
-  grid-column: 2;
-  grid-row: 1/3;
-  color: #70778a;
-}
-.contact-name-form {
-  display: flex;
-  gap: 6px;
-  flex: 1;
-  min-width: 0;
-}
-.contact-name-form input {
-  min-width: 0;
-  min-height: 36px;
-}
-.contact-name-form button {
-  flex: 0 0 auto;
-  margin: 0;
-  white-space: nowrap;
-}
 .conversation-menu {
   position: relative;
   flex: 0 0 auto;
@@ -1264,17 +1244,6 @@ button.primary.pin-action-incorrect:disabled {
     gap: 7px;
     flex-wrap: wrap;
     min-width: 0;
-  }
-  .conversation-head > .contact-name-form {
-    order: 3;
-    flex: 1 0 100%;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    min-width: 0;
-  }
-  .contact-name-form input {
-    grid-column: 1 / -1;
-    width: 100%;
   }
   .conversation-head > .conversation-menu {
     margin-left: auto;
