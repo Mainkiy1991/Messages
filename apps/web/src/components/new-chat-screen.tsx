@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { Language } from "../i18n.js";
 import { supportedLanguages } from "../i18n.js";
 import { sortContactEntries } from "./contacts-screen.js";
+import { SingleLineField } from "./single-line-field.js";
 
 export type NewChatView = "menu" | "pick" | "id";
 export type NewChatScreenStrings = {
@@ -183,7 +184,7 @@ export function NewChatScreen(props: NewChatScreenProps) {
               void run(() => onSubmitId(id, name));
             }}
           >
-            <input
+            <SingleLineField
               aria-label={t.peerId}
               placeholder={t.peerId}
               data-testid="peer-id-input"
@@ -198,7 +199,7 @@ export function NewChatScreen(props: NewChatScreenProps) {
               disabled={busy}
               onChange={(event) => setId(event.target.value)}
             />
-            <input
+            <SingleLineField
               aria-label={t.contactName}
               placeholder={t.contactName}
               autoComplete="off"

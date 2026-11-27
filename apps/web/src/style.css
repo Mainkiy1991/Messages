@@ -774,9 +774,17 @@ select {
   gap: 12px;
   min-width: 0;
 }
-.new-chat-screen-form input {
+.new-chat-screen-form input,
+.new-chat-screen-form .single-line-field {
   width: 100%;
   min-width: 0;
+}
+.single-line-field {
+  height: 40px;
+  min-height: 40px;
+  resize: none;
+  overflow: hidden;
+  white-space: nowrap;
 }
 .new-chat-name-hint,
 .hint {
