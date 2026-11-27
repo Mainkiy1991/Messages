@@ -4,35 +4,51 @@ export function stripLineBreaks(value: string): string {
   return value.replace(/[\r\n]/gu, "");
 }
 
-type SingleLineFieldProps = Omit<ComponentProps<"textarea">, "rows" | "wrap">;
+export function lineBreakWasTyped(raw: string, inputType: string): boolean {
+  return /[\r\n]/u.test(raw) && !inputType.startsWith("insertFrom");
+}
+
+type SingleLineFieldProps = Omit<
+  ComponentProps<"textarea">,
+  "rows" | "wrap"
+> & {
+  onEnter?: () => void;
+};
 
 export function SingleLineField({
   className,
   enterKeyHint = "go",
+  onEnter,
   onChange,
   onKeyDown,
   ...props
 }: SingleLineFieldProps) {
   function handleChange(event: ChangeEvent<HTMLTextAreaElement>) {
-    const value = stripLineBreaks(event.currentTarget.value);
-    event.currentTarget.value = value;
+    const raw = event.currentTarget.value;
+    const value = stripLineBreaks(raw);
+    const inputType = (event.nativeEvent as InputEvent).inputType ?? "";
+    const form = event.currentTarget.form;
+    if (raw !== value) event.currentTarget.value = value;
     onChange?.(event);
-    if ((event.nativeEvent as InputEvent).inputType === "insertLineBreak") {
-      const form = event.currentTarget.form;
-      window.setTimeout(() => form?.requestSubmit(), 0);
+    if (lineBreakWasTyped(raw, inputType)) {
+      window.setTimeout(() => (onEnter ? onEnter() : form?.requestSubmit()), 0);
     }
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    onKeyDown?.(event);
+    if (event.defaultPrevented) return;
     if (
       event.key === "Enter" &&
       !event.shiftKey &&
-      !event.nativeEvent.isComposing
+      !event.nativeEvent.isComposing &&
+      event.nativeEvent.keyCode !== 229
     ) {
       event.preventDefault();
-      event.currentTarget.form?.requestSubmit();
+      const form = event.currentTarget.form;
+      if (onEnter) onEnter();
+      else form?.requestSubmit();
     }
-    onKeyDown?.(event);
   }
 
   return (

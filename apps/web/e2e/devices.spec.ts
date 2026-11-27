@@ -16,7 +16,7 @@ async function createAccount(page: Page): Promise<string> {
     .getByTestId("seed-phrase")
     .locator("li > span:last-child")
     .allTextContents();
-  const inputs = page.locator('form input[autocomplete="off"]');
+  const inputs = page.locator('[data-testid^="seed-answer-"]');
   for (let i = 0; i < (await inputs.count()); i++) {
     const prompt = await inputs.nth(i).locator("xpath=..").innerText();
     const position = Number(prompt.match(/#(\d+)/)?.[1]);
@@ -224,7 +224,7 @@ test("does not reopen the previous account chat after the device is ended", asyn
     .getByTestId("seed-phrase")
     .locator("li > span:last-child")
     .allTextContents();
-  const inputs = first.page.locator('form input[autocomplete="off"]');
+  const inputs = first.page.locator('[data-testid^="seed-answer-"]');
   for (let i = 0; i < (await inputs.count()); i++) {
     const prompt = await inputs.nth(i).locator("xpath=..").innerText();
     const position = Number(prompt.match(/#(\d+)/)?.[1]);

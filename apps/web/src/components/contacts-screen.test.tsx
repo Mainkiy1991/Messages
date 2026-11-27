@@ -154,7 +154,8 @@ describe("contacts screen", () => {
   });
   it("renders peer add with a read-only peer ID", () => {
     const html = render({ initialView: { view: "peerAdd", peerId: id } });
-    expect(html).toContain(`readOnly="" value="${id}"`);
+    expect(html).toContain('readOnly=""');
+    expect(html).toContain(`>${id}</textarea>`);
     expect(html).toContain('data-testid="contact-add-name"');
     expect(html).toContain('data-testid="contact-add-note"');
     expect(html).toContain('data-testid="contact-add-submit"');
