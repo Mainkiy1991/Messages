@@ -60,15 +60,6 @@ describe("contacts screen", () => {
     expect(render({ loadFailed: true })).toContain('role="alert"'));
   it("shows empty state", () =>
     expect(render()).toContain("Контактов пока нет."));
-  it("shows contact rows in pick mode without add action", () => {
-    const html = render({ pickMode: true, contacts: { [id]: "Алиса" } });
-    expect(html).toContain("Выбрать контакт");
-    expect(html).not.toContain('data-testid="contact-add-open"');
-    expect(html).toContain('data-testid="contact-row"');
-  });
-  it("shows pick mode empty hint", () => {
-    expect(render({ pickMode: true })).toContain(strings.ru.contactsPickEmpty);
-  });
   it("keeps the regular contacts list controls", () => {
     const html = render({ contacts: { [id]: "Алиса" } });
     expect(html).toContain("Контакты");

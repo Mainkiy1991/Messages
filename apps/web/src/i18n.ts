@@ -191,7 +191,8 @@ export const strings = {
     clearedChatNotice: "Вы очистили чат",
     you: "Вы",
     selectChat: "Выберите чат или создайте новый.",
-    contactName: "Имя (необязательно, сохранится в контактах)",
+    contactName: "Имя (необязательно)",
+    newChatNameHint: "Если указать имя, контакт сохранится в ваших контактах.",
     contactSaveFailed: "Не удалось сохранить имя",
     contactsDecryptError:
       "Не удалось загрузить контакты. Для чатов показаны ID.",
@@ -431,7 +432,9 @@ export const strings = {
     clearedChatNotice: "You cleared this chat",
     you: "You",
     selectChat: "Select a chat or start a new one.",
-    contactName: "Name (optional, saved to contacts)",
+    contactName: "Name (optional)",
+    newChatNameHint:
+      "If you add a name, the contact is saved to your contacts.",
     contactSaveFailed: "Could not save contact name",
     contactsDecryptError: "Could not load contacts. Chats are shown with IDs.",
     serverWaking: "The server is waking up, please wait up to a minute…",
@@ -669,7 +672,9 @@ export const strings = {
     clearedChatNotice: "Ви очистили чат",
     you: "Ви",
     selectChat: "Виберіть чат або створіть новий.",
-    contactName: "Ім’я (необов’язково, збережеться в контактах)",
+    contactName: "Ім’я (необов’язково)",
+    newChatNameHint:
+      "Якщо вказати ім’я, контакт збережеться у ваших контактах.",
     contactSaveFailed: "Не вдалося зберегти ім’я контакту",
     contactsDecryptError:
       "Не вдалося завантажити контакти. У чатах показано ID.",
