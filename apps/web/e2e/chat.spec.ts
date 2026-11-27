@@ -3409,7 +3409,7 @@ test.describe("real browser chat", () => {
     const alice = await openUser(browser);
     await createAccount(alice.page);
     await alice.page.setViewportSize({ width: 360, height: 640 });
-    await alice.page.getByRole("button", { name: /^New chat/u }).click();
+    await alice.page.getByRole("button", { name: /^＋ New chat/u }).click();
     const idChoice = alice.page.getByRole("button", { name: /^By ID/u });
     const textCenterDifference = await idChoice.evaluate((button) => {
       const range = document.createRange();
