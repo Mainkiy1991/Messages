@@ -7,6 +7,7 @@ import type {
 import { copyText } from "../lib/clipboard.js";
 import type { Language } from "../i18n.js";
 import { supportedLanguages } from "../i18n.js";
+import { SingleLineField } from "./single-line-field.js";
 
 export type ContactsScreenStrings = {
   contactsTitle: string;
@@ -210,7 +211,7 @@ export function ContactsScreen({
   const [editing, setEditing] = useState<"name" | "note" | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [copied, setCopied] = useState(false);
-  const editRef = useRef<HTMLInputElement>(null);
+  const editRef = useRef<HTMLTextAreaElement>(null);
   const nameEditButtonRef = useRef<HTMLButtonElement>(null);
   const noteEditButtonRef = useRef<HTMLButtonElement>(null);
   const focusEditButtonOnClose = useRef<"name" | "note" | null>(null);
@@ -522,7 +523,7 @@ export function ContactsScreen({
           >
             <label>
               {strings.contactsId}
-              <input
+              <SingleLineField
                 data-testid="contact-add-id"
                 value={view.view === "peerAdd" ? view.peerId : id}
                 readOnly={view.view === "peerAdd"}
@@ -532,7 +533,7 @@ export function ContactsScreen({
             </label>
             <label>
               {strings.contactsName}
-              <input
+              <SingleLineField
                 data-testid="contact-add-name"
                 value={name}
                 disabled={busy}
@@ -541,7 +542,7 @@ export function ContactsScreen({
             </label>
             <label>
               {strings.contactsNoteLabel}
-              <input
+              <SingleLineField
                 data-testid="contact-add-note"
                 value={note}
                 placeholder={strings.contactsNoteHint}
@@ -570,7 +571,7 @@ export function ContactsScreen({
               <div className="contact-name-row">
                 {editing === "name" ? (
                   <>
-                    <input
+                    <SingleLineField
                       ref={editRef}
                       className="contact-inline-input contact-name-input"
                       data-testid="contact-name-input"
@@ -733,7 +734,7 @@ export function ContactsScreen({
               <div className="contact-note-row">
                 {editing === "note" ? (
                   <>
-                    <input
+                    <SingleLineField
                       ref={editRef}
                       className="contact-inline-input contact-note-input"
                       data-testid="contact-note-input"

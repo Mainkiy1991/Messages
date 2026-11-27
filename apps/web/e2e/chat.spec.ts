@@ -135,7 +135,7 @@ async function createAccount(
       .allTextContents()
   ).map((word) => word.trim());
   const phrase = words.join(" ");
-  const verificationInputs = page.locator('form input[autocomplete="off"]');
+  const verificationInputs = page.locator('[data-testid^="seed-answer-"]');
   const count = await verificationInputs.count();
   for (let index = 0; index < count; index++) {
     const labelText = await verificationInputs
@@ -3527,6 +3527,61 @@ test.describe("real browser chat", () => {
     await idField.press("Enter");
     expect(await idField.inputValue()).not.toMatch(/[\r\n]/u);
     await expect(alice.page.locator(".conversation-head")).toBeVisible();
+  });
+
+  test("phone keyboard line break submits the new chat ID", async ({
+    browser,
+  }) => {
+    const alice = await openUser(browser);
+    const bob = await openUser(browser);
+    await createAccount(alice.page);
+    const bobAccount = await createAccount(bob.page);
+    await alice.page.setViewportSize({ width: 360, height: 640 });
+    await startNewChatById(alice.page);
+    await alice.page.getByTestId("peer-id-input").evaluate((element, id) => {
+      const field = element as HTMLTextAreaElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(field, `${id}\n`);
+      field.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          inputType: "insertCompositionText",
+          data: "\n",
+        }),
+      );
+    }, bobAccount.id);
+    await expect(alice.page.locator(".conversation-head")).toBeVisible();
+  });
+
+  test("pasted line breaks are stripped without submitting the new chat ID", async ({
+    browser,
+  }) => {
+    const alice = await openUser(browser);
+    await createAccount(alice.page);
+    await alice.page.setViewportSize({ width: 360, height: 640 });
+    await startNewChatById(alice.page);
+    const field = alice.page.getByTestId("peer-id-input");
+    await field.evaluate((element) => {
+      const textarea = element as HTMLTextAreaElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(textarea, "ab\ncd");
+      textarea.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          inputType: "insertFromPaste",
+          data: "ab\ncd",
+        }),
+      );
+    });
+    await expect(field).toBeVisible();
+    await expect(field).toHaveValue("abcd");
+    await expect(alice.page.locator(".conversation-head")).toHaveCount(0);
   });
 
   test("contact add forms open without focusing their fields", async ({

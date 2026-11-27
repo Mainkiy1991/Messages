@@ -273,7 +273,9 @@ body:has(.contacts-overlay) {
   min-width: 0;
 }
 .contacts-form input,
-.contacts-card input {
+.contacts-card input,
+.contacts-form .single-line-field,
+.contacts-card .single-line-field {
   min-width: 0;
   width: 100%;
   min-height: 40px;
@@ -581,6 +583,7 @@ label {
   font-weight: 550;
 }
 input:not([type="checkbox"]),
+.single-line-field,
 textarea,
 select {
   width: 100%;

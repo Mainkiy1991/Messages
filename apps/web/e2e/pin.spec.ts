@@ -10,7 +10,7 @@ async function createAccount(page: Page): Promise<string> {
       .locator("li > span:last-child")
       .allTextContents()
   ).map((word) => word.trim());
-  const inputs = page.locator('form input[autocomplete="off"]');
+  const inputs = page.locator('[data-testid^="seed-answer-"]');
   for (let i = 0; i < (await inputs.count()); i++) {
     const prompt = await inputs.nth(i).locator("xpath=..").innerText();
     const position = Number(prompt.match(/#(\d+)/)?.[1]);
@@ -26,6 +26,14 @@ async function enablePin(page: Page) {
   await page.getByRole("button", { name: "PIN", exact: true }).click();
   await page.getByRole("button", { name: "Enable PIN" }).click();
   await page.getByPlaceholder("New PIN").first().fill("secure123");
+  await expect
+    .poll(() =>
+      page
+        .getByPlaceholder("New PIN")
+        .first()
+        .evaluate((field) => getComputedStyle(field).webkitTextSecurity),
+    )
+    .toBe("disc");
   await page.getByPlaceholder("Confirm PIN").first().fill("secure123");
   await page.getByRole("button", { name: "Set PIN" }).click();
   await expect(page.getByRole("button", { name: "Change PIN" })).toBeVisible();
@@ -94,7 +102,7 @@ test("PIN locks the page on reload and unlocks after a wrong attempt", async ({
   await expect(page.getByRole("button", { name: "Unlock" })).toBeVisible();
   await page.getByLabel("PIN").click();
   await page.getByLabel("PIN").fill("secure123");
-  await page.getByRole("button", { name: "Unlock" }).click();
+  await page.getByLabel("PIN").press("Enter");
   await expect(page.getByTestId("profile")).toBeVisible();
 });
 

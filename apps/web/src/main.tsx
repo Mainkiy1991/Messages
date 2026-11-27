@@ -56,6 +56,7 @@ import {
   DeletedMessageText,
 } from "./components/message-delete.js";
 import { DevicesPanel } from "./components/devices-panel.js";
+import { SingleLineField } from "./components/single-line-field.js";
 import {
   ContactsScreen,
   type ContactsInitialView,
@@ -190,7 +191,7 @@ function App() {
   const idCopyRequestRef = useRef(0);
   const idCopyPendingRef = useRef(false);
   const hoverRevealTimerRef = useRef<number | null>(null);
-  const pinInputRef = useRef<HTMLInputElement | null>(null);
+  const pinInputRef = useRef<HTMLTextAreaElement | null>(null);
   const controllerRef = useRef<ChatController | null>(null);
   const registrationBusyRef = useRef(false);
   const messageListRef = useRef<HTMLDivElement | null>(null);
@@ -1403,10 +1404,9 @@ function App() {
                           </button>
                           {pinForm === "enable" && (
                             <>
-                              <input
+                              <SingleLineField
                                 aria-label={t.pinNew}
                                 className="pin-input"
-                                type="text"
                                 inputMode="text"
                                 autoComplete="off"
                                 data-lpignore="true"
@@ -1415,10 +1415,9 @@ function App() {
                                 onChange={(e) => setPin(e.target.value)}
                                 placeholder={t.pinNew}
                               />
-                              <input
+                              <SingleLineField
                                 aria-label={t.pinConfirm}
                                 className="pin-input"
-                                type="text"
                                 inputMode="text"
                                 autoComplete="off"
                                 data-lpignore="true"
@@ -1451,11 +1450,10 @@ function App() {
                           </button>
                           {pinForm === "change" && (
                             <>
-                              <input
+                              <SingleLineField
                                 aria-label={t.pinCurrent}
                                 ref={pinInputRef}
                                 className={`pin-input${pinInputIncorrect ? " pin-input-incorrect" : ""}`}
-                                type="text"
                                 inputMode="text"
                                 autoComplete="off"
                                 data-lpignore="true"
@@ -1464,10 +1462,9 @@ function App() {
                                 onChange={(e) => setOldPin(e.target.value)}
                                 placeholder={t.pinCurrent}
                               />
-                              <input
+                              <SingleLineField
                                 aria-label={t.pinNew}
                                 className="pin-input"
-                                type="text"
                                 inputMode="text"
                                 autoComplete="off"
                                 data-lpignore="true"
@@ -1476,10 +1473,9 @@ function App() {
                                 onChange={(e) => setPin(e.target.value)}
                                 placeholder={t.pinNew}
                               />
-                              <input
+                              <SingleLineField
                                 aria-label={t.pinConfirm}
                                 className="pin-input"
-                                type="text"
                                 inputMode="text"
                                 autoComplete="off"
                                 data-lpignore="true"
@@ -1509,11 +1505,10 @@ function App() {
                           </button>
                           {pinForm === "disable" && (
                             <>
-                              <input
+                              <SingleLineField
                                 aria-label={t.pinCurrent}
                                 ref={pinInputRef}
                                 className={`pin-input${pinInputIncorrect ? " pin-input-incorrect" : ""}`}
-                                type="text"
                                 inputMode="text"
                                 autoComplete="off"
                                 data-lpignore="true"
@@ -1630,32 +1625,20 @@ function App() {
         className={`card${["welcome", "create", "verify", "login"].includes(screen) ? " auth-card" : ""}${screen === "welcome" ? " welcome-card" : ""}`}
       >
         {screen === "locked" && (
-          <div
-            className="pin-lock-screen"
-            aria-label={t.pinUnlock}
-            onKeyDown={(event) => {
-              if (
-                event.key === "Enter" &&
-                event.target instanceof HTMLInputElement
-              ) {
-                event.preventDefault();
-                void submitPin();
-              }
-            }}
-          >
+          <div className="pin-lock-screen" aria-label={t.pinUnlock}>
             <h1>{t.pinUnlockTitle}</h1>
             <label>
-              <input
+              <SingleLineField
                 ref={pinInputRef}
                 aria-label={t.pinTitle}
                 className={`pin-input${pinInputIncorrect ? " pin-input-incorrect" : ""}`}
-                type="text"
                 inputMode="text"
                 autoComplete="off"
                 data-lpignore="true"
                 data-1p-ignore="true"
                 value={pin}
                 onChange={(e) => setPin(e.target.value)}
+                onEnter={() => void submitPin()}
               />
             </label>
             <button
@@ -1782,7 +1765,8 @@ function App() {
             {positions.map((position, i) => (
               <label key={position}>
                 {t.enterWord(position + 1)}
-                <input
+                <SingleLineField
+                  data-testid={`seed-answer-${i}`}
                   value={answers[i]}
                   onChange={(e) =>
                     setAnswers(

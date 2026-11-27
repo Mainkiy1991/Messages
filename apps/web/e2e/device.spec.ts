@@ -18,7 +18,7 @@ async function createAccount(page: Page): Promise<string> {
     .getByTestId("seed-phrase")
     .locator("li > span:last-child")
     .allTextContents();
-  const inputs = page.locator('form input[autocomplete="off"]');
+  const inputs = page.locator('[data-testid^="seed-answer-"]');
   for (let i = 0; i < (await inputs.count()); i++) {
     const prompt = await inputs.nth(i).locator("xpath=..").innerText();
     const position = Number(prompt.match(/#(\d+)/)?.[1]);
@@ -161,7 +161,7 @@ test("429 registration error is visible and no keys are saved", async ({
     .getByTestId("seed-phrase")
     .locator("li > span:last-child")
     .allTextContents();
-  const inputs = page.locator('form input[autocomplete="off"]');
+  const inputs = page.locator('[data-testid^="seed-answer-"]');
   for (let i = 0; i < (await inputs.count()); i++) {
     const prompt = await inputs.nth(i).locator("xpath=..").innerText();
     const position = Number(prompt.match(/#(\d+)/)?.[1]);
