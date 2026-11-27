@@ -2088,6 +2088,63 @@ test.describe("real browser chat", () => {
     expect(overflow).toEqual([]);
   });
 
+  test("new chat button fits the mobile viewport", async ({ browser }) => {
+    const user = await openUser(browser);
+    await user.page.setViewportSize({ width: 360, height: 640 });
+    await createAccount(user.page);
+    const fab = user.page.getByTestId("new-chat-toggle");
+    await expect(fab).toBeVisible();
+    const bounds = await fab.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.width).toBeGreaterThanOrEqual(40);
+    expect(bounds!.height).toBeGreaterThanOrEqual(40);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360 - 8);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(640 - 8);
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+  });
+
+  test("new chat button hides while scrolling down and returns while scrolling up", async ({
+    browser,
+  }) => {
+    const user = await openUser(browser);
+    await user.page.setViewportSize({ width: 360, height: 640 });
+    await createAccount(user.page);
+    const fab = user.page.getByTestId("new-chat-toggle");
+    const sidebar = user.page.locator(".chat-sidebar");
+    await expect(fab).toBeVisible();
+    await user.page.evaluate(() => {
+      const sidebar = document.querySelector(".chat-sidebar");
+      const spacer = document.createElement("div");
+      spacer.style.height = "2000px";
+      sidebar?.append(spacer);
+    });
+    await sidebar.evaluate((element) => {
+      element.scrollTop = 600;
+    });
+    await expect(fab).toBeHidden();
+    await sidebar.evaluate((element) => {
+      element.scrollTop = 450;
+    });
+    await expect(fab).toBeVisible();
+    await sidebar.evaluate((element) => {
+      element.scrollTop = 0;
+    });
+    await expect(fab).toBeVisible();
+  });
+
+  test("new chat button stays in the desktop sidebar", async ({ browser }) => {
+    const user = await openUser(browser);
+    await user.page.setViewportSize({ width: 1280, height: 720 });
+    await createAccount(user.page);
+    const fab = user.page.getByTestId("new-chat-toggle");
+    await expect(fab).toBeVisible();
+    const bounds = await fab.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x + bounds!.width / 2).toBeLessThan(320);
+    expect(bounds!.y).toBeGreaterThan(720 / 2);
+  });
+
   test("chat layout, compact forms, profile controls and responsive navigation", async ({
     browser,
   }, testInfo) => {
@@ -3409,7 +3466,7 @@ test.describe("real browser chat", () => {
     const alice = await openUser(browser);
     await createAccount(alice.page);
     await alice.page.setViewportSize({ width: 360, height: 640 });
-    await alice.page.getByRole("button", { name: /^＋ New chat/u }).click();
+    await alice.page.getByRole("button", { name: /New chat/u }).click();
     const idChoice = alice.page.getByRole("button", { name: /^By ID/u });
     const textCenterDifference = await idChoice.evaluate((button) => {
       const range = document.createRange();

@@ -719,13 +719,47 @@ select {
   background: #f8f9fc;
   border-right: 1px solid #e4e6ee;
   padding: 10px;
+  padding-bottom: 88px;
   min-height: 0;
   overflow-y: auto;
 }
 .new-chat-toggle {
-  width: auto;
-  min-height: 36px;
-  margin-bottom: 8px;
+  position: fixed;
+  z-index: 5;
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 4px 14px #252a4040;
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  right: calc(16px + env(safe-area-inset-right));
+  transition:
+    opacity 150ms,
+    transform 150ms;
+}
+.new-chat-toggle svg {
+  width: 24px;
+  height: 24px;
+}
+.new-chat-toggle-hidden {
+  visibility: hidden;
+  opacity: 0;
+  transform: translateY(80px);
+  pointer-events: none;
+}
+@media (min-width: 768px) {
+  .new-chat-toggle {
+    right: auto;
+    left: 248px;
+    bottom: 16px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .new-chat-toggle {
+    transition: none;
+  }
 }
 .new-chat-screen-body {
   align-content: start;
@@ -1270,6 +1304,7 @@ button.primary.pin-action-incorrect:disabled {
   .chat-sidebar {
     padding-left: max(10px, env(safe-area-inset-left));
     padding-right: max(10px, env(safe-area-inset-right));
+    padding-bottom: calc(88px + env(safe-area-inset-bottom));
   }
 }
 @media (max-width: 520px) {
