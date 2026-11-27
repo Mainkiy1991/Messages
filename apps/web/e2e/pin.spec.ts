@@ -67,9 +67,11 @@ test("PIN locks the page on reload and unlocks after a wrong attempt", async ({
     page.getByRole("heading", { name: "Enter your PIN to unlock" }),
   ).toBeVisible();
   await expect(page.getByLabel("PIN")).toBeVisible();
+  await expect(page.getByLabel("PIN")).not.toBeFocused();
   await expect(page.getByText("PIN", { exact: true })).toHaveCount(0);
   await expect(page.getByTestId("profile")).toHaveCount(0);
   await page.clock.install();
+  await page.getByLabel("PIN").click();
   await page.getByLabel("PIN").fill("wrong000");
   await page.getByRole("button", { name: "Unlock" }).click();
   const unlockButton = page.getByRole("button", { name: "Incorrect PIN" });
@@ -87,9 +89,10 @@ test("PIN locks the page on reload and unlocks after a wrong attempt", async ({
   );
   await expect(page.getByLabel("PIN")).toHaveClass(/pin-input-incorrect/);
   await expect(page.getByLabel("PIN")).toHaveValue("");
-  await expect(page.getByLabel("PIN")).toBeFocused();
+  await expect(page.getByLabel("PIN")).not.toBeFocused();
   await page.clock.fastForward(2000);
   await expect(page.getByRole("button", { name: "Unlock" })).toBeVisible();
+  await page.getByLabel("PIN").click();
   await page.getByLabel("PIN").fill("secure123");
   await page.getByRole("button", { name: "Unlock" }).click();
   await expect(page.getByTestId("profile")).toBeVisible();
@@ -118,6 +121,7 @@ test("locked PIN controls keep their geometry at 360px in every language", async
     const button = panel.locator(".pin-action");
     const forgotLink = panel.locator(".text-button");
     await expect(panel).toBeVisible();
+    await expect(page.getByLabel("PIN")).not.toBeFocused();
     await expect(button).toBeVisible();
     await expect(forgotLink).toBeVisible();
 
@@ -140,6 +144,7 @@ test("locked PIN controls keep their geometry at 360px in every language", async
       };
       return { button: rect(button), link: rect(link), card: rect(card) };
     });
+    await page.getByLabel("PIN").click();
     await page.getByLabel("PIN").fill("wrong000");
     await button.click();
     await expect(button).toHaveClass(/pin-action-error/);
@@ -186,6 +191,7 @@ test("locked PIN controls keep their geometry at 360px in every language", async
     expect(after.textFits).toBe(true);
 
     await page.clock.fastForward(2100);
+    await page.getByLabel("PIN").click();
     await page.getByLabel("PIN").fill("secure123");
     await button.click();
     await expect(page.getByTestId("profile")).toBeVisible();
@@ -410,6 +416,7 @@ test("the unlock button displays and enforces a persisted countdown", async ({
   });
   await page.reload();
   await page.clock.install();
+  await page.getByLabel("PIN").click();
   await page.getByLabel("PIN").fill("wrong000");
   await page.getByRole("button", { name: "Unlock" }).click();
   const unlockButton = page.getByRole("button", { name: /^Wait \d+:\d{2}$/ });
@@ -417,6 +424,7 @@ test("the unlock button displays and enforces a persisted countdown", async ({
   await expect(unlockButton).toBeDisabled();
   await page.clock.fastForward(5 * 60_000);
   await expect(page.getByRole("button", { name: "Unlock" })).toBeEnabled();
+  await page.getByLabel("PIN").click();
   await page.getByLabel("PIN").fill("secure123");
   await page.getByRole("button", { name: "Unlock" }).click();
   await expect(page.getByTestId("profile")).toBeVisible();

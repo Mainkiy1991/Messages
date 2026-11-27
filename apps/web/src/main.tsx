@@ -501,7 +501,6 @@ function App() {
       setPinInputIncorrect(true);
       setPin("");
       setOldPin("");
-      window.requestAnimationFrame(() => pinInputRef.current?.focus());
     }
   }
   async function refreshPinCooldown(): Promise<boolean> {
@@ -1178,7 +1177,6 @@ function App() {
     setDraft(message.text);
     setComposerError("");
     window.requestAnimationFrame(() => {
-      composerRef.current?.focus();
       resizeComposer();
     });
   }
@@ -1648,7 +1646,6 @@ function App() {
             <h1>{t.pinUnlockTitle}</h1>
             <label>
               <input
-                autoFocus
                 ref={pinInputRef}
                 aria-label={t.pinTitle}
                 className={`pin-input${pinInputIncorrect ? " pin-input-incorrect" : ""}`}

@@ -192,6 +192,7 @@ test("PIN unlock works with a device account", async ({ page }) => {
 
   expect((await readSessionStore(page)).keys).not.toContain("deviceKeys");
   await page.reload();
+  await page.getByLabel("PIN").click();
   await page.getByLabel("PIN").fill("secure123");
   await page.getByRole("button", { name: "Unlock" }).click();
   await expect(page.getByTestId("profile")).toBeVisible();

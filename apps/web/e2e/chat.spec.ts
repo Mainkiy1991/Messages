@@ -2375,6 +2375,7 @@ test.describe("real browser chat", () => {
     await expect(a.page.getByTestId("message-input")).toHaveValue(
       "First version",
     );
+    await expect(a.page.getByTestId("message-input")).not.toBeFocused();
     // Only the message that is being edited gets the accent outline.
     expect(await outline(firstBubble)).toBe("solid");
     expect(await outline(widthBubble)).toBe("none");
