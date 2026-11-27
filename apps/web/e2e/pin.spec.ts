@@ -106,6 +106,38 @@ test("PIN locks the page on reload and unlocks after a wrong attempt", async ({
   await expect(page.getByTestId("profile")).toBeVisible();
 });
 
+test("phone keyboard line break unlocks with the current PIN", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    if (!localStorage.getItem("messages-lang")) {
+      localStorage.setItem("messages-lang", "en");
+    }
+  });
+  await createAccount(page);
+  await enablePin(page);
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Enter your PIN to unlock" }),
+  ).toBeVisible();
+  await page.getByLabel("PIN").evaluate((element) => {
+    const field = element as HTMLTextAreaElement;
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!;
+    setter.call(field, "secure123\n");
+    field.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertCompositionText",
+        data: "\n",
+      }),
+    );
+  });
+  await expect(page.getByTestId("profile")).toBeVisible();
+});
+
 test("locked PIN controls keep their geometry at 360px in every language", async ({
   page,
 }) => {

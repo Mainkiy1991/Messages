@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from "react";
 import type { ChangeEvent, ComponentProps, KeyboardEvent } from "react";
 
 export function stripLineBreaks(value: string): string {
@@ -23,6 +24,11 @@ export function SingleLineField({
   onKeyDown,
   ...props
 }: SingleLineFieldProps) {
+  const onEnterRef = useRef(onEnter);
+  useLayoutEffect(() => {
+    onEnterRef.current = onEnter;
+  });
+
   function handleChange(event: ChangeEvent<HTMLTextAreaElement>) {
     const raw = event.currentTarget.value;
     const value = stripLineBreaks(raw);
@@ -31,7 +37,11 @@ export function SingleLineField({
     if (raw !== value) event.currentTarget.value = value;
     onChange?.(event);
     if (lineBreakWasTyped(raw, inputType)) {
-      window.setTimeout(() => (onEnter ? onEnter() : form?.requestSubmit()), 0);
+      window.setTimeout(
+        () =>
+          onEnterRef.current ? onEnterRef.current() : form?.requestSubmit(),
+        0,
+      );
     }
   }
 
@@ -46,7 +56,7 @@ export function SingleLineField({
     ) {
       event.preventDefault();
       const form = event.currentTarget.form;
-      if (onEnter) onEnter();
+      if (onEnterRef.current) onEnterRef.current();
       else form?.requestSubmit();
     }
   }
