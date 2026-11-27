@@ -733,7 +733,7 @@ select {
 .new-chat-menu-item {
   width: 100%;
   min-height: 48px;
-  text-align: left;
+  text-align: center;
 }
 .new-chat-screen-form {
   display: grid;
