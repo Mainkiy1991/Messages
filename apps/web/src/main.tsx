@@ -29,6 +29,7 @@ import {
   type AccountKeys,
 } from "./session.js";
 import { indexedDbOutbox } from "./lib/outbox.js";
+import { nextFabState } from "./lib/fab-visibility.js";
 import { copyText } from "./lib/clipboard.js";
 import { phraseMatchesAccount } from "./lib/seed-check.js";
 import {
@@ -147,6 +148,8 @@ function App() {
   const [showForgotPinConfirmation, setShowForgotPinConfirmation] =
     useState(false);
   const [chatMenuOpen, setChatMenuOpen] = useState(false);
+  const [newChatFabHidden, setNewChatFabHidden] = useState(false);
+  const newChatFabAnchorRef = useRef(0);
   const [chatState, setChatState] = useState<ChatControllerState>({
     chats: [],
     activePeer: "",
@@ -791,6 +794,10 @@ function App() {
   const chats = withSavedChat(chatState.chats, userId);
   const chatListPeerIds = chats.map((chat) => chat.peerId).join(",");
   const activePeer = chatState.activePeer;
+  useEffect(() => {
+    newChatFabAnchorRef.current = 0;
+    setNewChatFabHidden(false);
+  }, [activePeer]);
   const socketState = chatState.connectionState;
   const isSavedChat = activePeer !== "" && activePeer === userId;
   const chatTitle = (peerId: string) =>
@@ -1907,14 +1914,21 @@ function App() {
               />
             )}
             <section className={`messenger ${activePeer ? "show-chat" : ""}`}>
-              <aside className="chat-sidebar">
-                <button
-                  className="secondary new-chat-toggle"
-                  data-testid="new-chat-toggle"
-                  onClick={openNewChat}
-                >
-                  ＋ {t.newChat}
-                </button>
+              <aside
+                className="chat-sidebar"
+                onScroll={(event) => {
+                  const next = nextFabState(
+                    {
+                      hidden: newChatFabHidden,
+                      anchor: newChatFabAnchorRef.current,
+                    },
+                    event.currentTarget.scrollTop,
+                  );
+                  newChatFabAnchorRef.current = next.anchor;
+                  if (next.hidden !== newChatFabHidden)
+                    setNewChatFabHidden(next.hidden);
+                }}
+              >
                 <div data-testid="chat-list">
                   {chats.map((chat) => {
                     const longPress = longPressHandlersFor(chat.peerId);
@@ -2057,6 +2071,25 @@ function App() {
                     );
                   })}
                 </div>
+                <button
+                  className={`primary new-chat-toggle ${newChatFabHidden ? "new-chat-toggle-hidden" : ""}`}
+                  data-testid="new-chat-toggle"
+                  aria-label={t.newChat}
+                  title={t.newChat}
+                  onClick={openNewChat}
+                >
+                  <svg
+                    aria-hidden="true"
+                    focusable="false"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  >
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                </button>
               </aside>
               <section className="conversation">
                 {activePeer ? (
