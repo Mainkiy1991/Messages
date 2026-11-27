@@ -2892,6 +2892,76 @@ test.describe("real browser chat", () => {
       );
     });
 
+    test("phone keyboard line break saves an edited contact name", async ({
+      browser,
+    }) => {
+      const alice = await openUser(browser);
+      const bob = await openUser(browser);
+      await createAccount(alice.page);
+      const bobAccount = await createAccount(bob.page);
+      await openContacts(alice.page);
+      await addContact(alice.page, bobAccount.id, "Bob", "");
+      await alice.page
+        .locator(`[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`)
+        .click();
+      await alice.page.getByRole("button", { name: "Edit name" }).click();
+      await alice.page.getByTestId("contact-name-input").evaluate((element) => {
+        const field = element as HTMLTextAreaElement;
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          "value",
+        )!.set!;
+        setter.call(field, "New name\n");
+        field.dispatchEvent(
+          new InputEvent("input", {
+            bubbles: true,
+            inputType: "insertCompositionText",
+            data: "\n",
+          }),
+        );
+      });
+      await expect(alice.page.getByTestId("contact-card-name")).toHaveText(
+        "New name",
+      );
+      await expect(alice.page.getByTestId("contact-name-input")).toHaveCount(0);
+    });
+
+    test("phone keyboard line break saves an edited contact description", async ({
+      browser,
+    }) => {
+      const alice = await openUser(browser);
+      const bob = await openUser(browser);
+      await createAccount(alice.page);
+      const bobAccount = await createAccount(bob.page);
+      await openContacts(alice.page);
+      await addContact(alice.page, bobAccount.id, "Bob", "");
+      await alice.page
+        .locator(`[data-testid="contact-row"][data-peer-id="${bobAccount.id}"]`)
+        .click();
+      await alice.page
+        .getByRole("button", { name: "Edit description" })
+        .click();
+      await alice.page.getByTestId("contact-note-input").evaluate((element) => {
+        const field = element as HTMLTextAreaElement;
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          "value",
+        )!.set!;
+        setter.call(field, "New description\n");
+        field.dispatchEvent(
+          new InputEvent("input", {
+            bubbles: true,
+            inputType: "insertCompositionText",
+            data: "\n",
+          }),
+        );
+      });
+      await expect(alice.page.getByTestId("contact-card-note")).toHaveText(
+        "New description",
+      );
+      await expect(alice.page.getByTestId("contact-note-input")).toHaveCount(0);
+    });
+
     test("writing opens the chat and deleting chat preserves contact", async ({
       browser,
     }) => {

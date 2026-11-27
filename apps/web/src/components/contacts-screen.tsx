@@ -577,6 +577,9 @@ export function ContactsScreen({
                       data-testid="contact-name-input"
                       value={name}
                       disabled={busy}
+                      onEnter={() => {
+                        if (!busy) void save("name", name);
+                      }}
                       onKeyDown={(e) => {
                         if (e.key === "Escape") {
                           e.stopPropagation();
@@ -740,6 +743,9 @@ export function ContactsScreen({
                       data-testid="contact-note-input"
                       value={note}
                       disabled={busy}
+                      onEnter={() => {
+                        if (!busy) void save("note", note);
+                      }}
                       onKeyDown={(e) => {
                         if (e.key === "Escape") {
                           e.stopPropagation();
