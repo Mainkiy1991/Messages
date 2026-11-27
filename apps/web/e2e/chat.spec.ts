@@ -3403,6 +3403,33 @@ test.describe("real browser chat", () => {
     await expect(alice.page.locator(".empty-chat")).toBeVisible();
   });
 
+  test("new chat menu text is centered and ID fields do not autofocus", async ({
+    browser,
+  }) => {
+    const alice = await openUser(browser);
+    await createAccount(alice.page);
+    await alice.page.setViewportSize({ width: 360, height: 640 });
+    await alice.page.getByRole("button", { name: /^New chat/u }).click();
+    const idChoice = alice.page.getByRole("button", { name: /^By ID/u });
+    const textCenterDifference = await idChoice.evaluate((button) => {
+      const range = document.createRange();
+      range.selectNodeContents(button);
+      const textBounds = range.getBoundingClientRect();
+      const buttonBounds = button.getBoundingClientRect();
+      return Math.abs(
+        textBounds.left +
+          textBounds.width / 2 -
+          (buttonBounds.left + buttonBounds.width / 2),
+      );
+    });
+    expect(textCenterDifference).toBeLessThanOrEqual(2);
+    await idChoice.click();
+    await expect(alice.page.getByTestId("peer-id-input")).not.toBeFocused();
+    await expect(
+      alice.page.getByLabel(/^Name \(optional\)$/u),
+    ).not.toBeFocused();
+  });
+
   test("new chat from contacts shows a hint when there are no contacts", async ({
     browser,
   }) => {

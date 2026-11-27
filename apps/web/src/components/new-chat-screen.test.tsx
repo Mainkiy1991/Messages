@@ -48,4 +48,9 @@ describe("new chat screen", () => {
     expect(html).toContain('data-testid="new-chat-name-hint"');
     expect(html).not.toContain(">Отмена<");
   });
+  it("disables autocomplete on both ID form fields without autofocus", () => {
+    const html = render({ view: "id" });
+    expect(html.match(/autocomplete="off"/giu)).toHaveLength(2);
+    expect(html).not.toMatch(/autofocus/iu);
+  });
 });

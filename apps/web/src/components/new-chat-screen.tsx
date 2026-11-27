@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Language } from "../i18n.js";
 import { supportedLanguages } from "../i18n.js";
 import { sortContactEntries } from "./contacts-screen.js";
@@ -48,7 +48,6 @@ export function NewChatScreen(props: NewChatScreenProps) {
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const idRef = useRef<HTMLInputElement>(null);
   const locale =
     supportedLanguages.find((x) => x.code === language)?.locale ?? "en-US";
   const sorted = useMemo(
@@ -66,8 +65,7 @@ export function NewChatScreen(props: NewChatScreenProps) {
     return () => document.removeEventListener("keydown", handleEscape);
   }, [onBack]);
   useEffect(() => {
-    if (view === "id") idRef.current?.focus();
-    else {
+    if (view !== "id") {
       setId("");
       setName("");
       setError("");
@@ -186,10 +184,16 @@ export function NewChatScreen(props: NewChatScreenProps) {
             }}
           >
             <input
-              ref={idRef}
               aria-label={t.peerId}
               placeholder={t.peerId}
               data-testid="peer-id-input"
+              autoComplete="off"
+              data-lpignore="true"
+              data-1p-ignore="true"
+              data-form-type="other"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
               value={id}
               disabled={busy}
               onChange={(event) => setId(event.target.value)}
@@ -197,6 +201,10 @@ export function NewChatScreen(props: NewChatScreenProps) {
             <input
               aria-label={t.contactName}
               placeholder={t.contactName}
+              autoComplete="off"
+              data-lpignore="true"
+              data-1p-ignore="true"
+              data-form-type="other"
               value={name}
               disabled={busy}
               onChange={(event) => setName(event.target.value)}
