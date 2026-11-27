@@ -202,6 +202,7 @@ function App() {
   const newChatViewRef = useRef<NewChatView | null>(null);
   const newChatHistoryRef = useRef(false);
   const newChatClosingRef = useRef(false);
+  const newChatRestoringRef = useRef(false);
   const longPressHandlersRef = useRef(new Map<string, LongPressHandlers>());
   const chatPointerTypesRef = useRef(new Map<string, string>());
 
@@ -254,6 +255,7 @@ function App() {
     newChatOpenRef.current = false;
     newChatHistoryRef.current = false;
     newChatClosingRef.current = false;
+    newChatRestoringRef.current = false;
     newChatViewRef.current = null;
     setNewChatView(null);
   }
@@ -284,6 +286,7 @@ function App() {
     newChatOpenRef.current = false;
     newChatHistoryRef.current = false;
     newChatClosingRef.current = false;
+    newChatRestoringRef.current = false;
     newChatViewRef.current = null;
     setNewChatView(null);
   }
@@ -472,6 +475,7 @@ function App() {
     newChatOpenRef.current = false;
     newChatHistoryRef.current = false;
     newChatClosingRef.current = false;
+    newChatRestoringRef.current = false;
     newChatViewRef.current = null;
     setNewChatView(null);
     setPhrase("");
@@ -742,6 +746,7 @@ function App() {
     newChatOpenRef.current = false;
     newChatHistoryRef.current = false;
     newChatClosingRef.current = false;
+    newChatRestoringRef.current = false;
     newChatViewRef.current = null;
     setNewChatView(null);
     setPhrase("");
@@ -847,19 +852,21 @@ function App() {
     if (screen !== "home") return;
     const onPopState = (event: PopStateEvent) => {
       if (newChatOpenRef.current) {
+        if (newChatRestoringRef.current) {
+          newChatRestoringRef.current = false;
+          if ((event.state as { newChat?: unknown } | null)?.newChat) return;
+        }
         if (!newChatClosingRef.current && newChatViewRef.current !== "menu") {
-          window.history.pushState(
-            { ...(event.state ?? {}), newChat: true },
-            "",
-            window.location.href,
-          );
+          newChatRestoringRef.current = true;
           newChatViewRef.current = "menu";
           setNewChatView("menu");
+          window.history.forward();
           return;
         }
         newChatOpenRef.current = false;
         newChatHistoryRef.current = false;
         newChatClosingRef.current = false;
+        newChatRestoringRef.current = false;
         newChatViewRef.current = null;
         setNewChatView(null);
         return;
@@ -1078,6 +1085,7 @@ function App() {
             newChatOpenRef.current = false;
             newChatHistoryRef.current = false;
             newChatClosingRef.current = false;
+            newChatRestoringRef.current = false;
             newChatViewRef.current = null;
             setNewChatView(null);
             showAuthScreen("welcome");

@@ -3474,12 +3474,34 @@ test.describe("real browser chat", () => {
     const alice = await openUser(browser);
     await createAccount(alice.page);
     await alice.page.setViewportSize({ width: 360, height: 640 });
+    await alice.page.evaluate(() => {
+      const originalPushState = window.history.pushState.bind(window.history);
+      const trackedWindow = window as Window & { __pushCount: number };
+      trackedWindow.__pushCount = 0;
+      window.history.pushState = (...args) => {
+        trackedWindow.__pushCount += 1;
+        originalPushState(...args);
+      };
+    });
+    const initialPushCount = await alice.page.evaluate(
+      () => (window as Window & { __pushCount: number }).__pushCount,
+    );
     const open = () =>
       alice.page.getByRole("button", { name: /New chat/u }).click();
     await open();
+    const pushCountAfterOpen = await alice.page.evaluate(
+      () => (window as Window & { __pushCount: number }).__pushCount,
+    );
+    expect(pushCountAfterOpen).toBe(initialPushCount + 1);
     const url = alice.page.url();
     await alice.page.getByTestId("new-chat-by-id").click();
     await alice.page.goBack();
+    await alice.page.waitForFunction(() => history.state?.newChat === true);
+    await expect(alice.page.getByTestId("new-chat-screen")).toBeVisible();
+    const pushCountAfterFirstBack = await alice.page.evaluate(
+      () => (window as Window & { __pushCount: number }).__pushCount,
+    );
+    expect(pushCountAfterFirstBack).toBe(pushCountAfterOpen);
     await expect(alice.page.getByTestId("new-chat-form")).toHaveCount(0);
     await expect(alice.page.getByTestId("new-chat-by-id")).toBeVisible();
     await expect(alice.page.getByTestId("new-chat-screen")).toBeVisible();
@@ -3496,6 +3518,26 @@ test.describe("real browser chat", () => {
     await open();
     await alice.page.keyboard.press("Escape");
     await expect(alice.page.getByTestId("new-chat-screen")).toHaveCount(0);
+  });
+
+  test("phone Back from new chat contacts returns to menu, then closes window", async ({
+    browser,
+  }) => {
+    const alice = await openUser(browser);
+    await createAccount(alice.page);
+    await alice.page.setViewportSize({ width: 360, height: 640 });
+    await alice.page.getByRole("button", { name: /New chat/u }).click();
+    await alice.page.getByTestId("new-chat-from-contacts").click();
+    await expect(
+      alice.page.getByText("No contacts yet. Start a chat by ID."),
+    ).toBeVisible();
+
+    await alice.page.goBack();
+    await alice.page.waitForFunction(() => history.state?.newChat === true);
+    await expect(alice.page.getByTestId("new-chat-by-id")).toBeVisible();
+    await alice.page.goBack();
+    await expect(alice.page.getByTestId("new-chat-screen")).toHaveCount(0);
+    await expect(alice.page.getByTestId("chat-list")).toBeVisible();
   });
 
   test("new chat window opens a chat and Back returns to the chat list", async ({
