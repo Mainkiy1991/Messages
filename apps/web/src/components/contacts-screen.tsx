@@ -210,8 +210,6 @@ export function ContactsScreen({
   const [editing, setEditing] = useState<"name" | "note" | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [copied, setCopied] = useState(false);
-  const idRef = useRef<HTMLInputElement>(null);
-  const addNameRef = useRef<HTMLInputElement>(null);
   const editRef = useRef<HTMLInputElement>(null);
   const nameEditButtonRef = useRef<HTMLButtonElement>(null);
   const noteEditButtonRef = useRef<HTMLButtonElement>(null);
@@ -219,10 +217,6 @@ export function ContactsScreen({
   const copyTimer = useRef<number | undefined>(undefined);
   const locale =
     supportedLanguages.find((x) => x.code === language)?.locale ?? "en-US";
-  useEffect(() => {
-    if (view.view === "add") idRef.current?.focus();
-    if (view.view === "peerAdd") addNameRef.current?.focus();
-  }, [view]);
   useEffect(() => {
     if (view.view === "list") setFromChat(false);
   }, [view]);
@@ -529,7 +523,6 @@ export function ContactsScreen({
             <label>
               {strings.contactsId}
               <input
-                ref={view.view === "add" ? idRef : undefined}
                 data-testid="contact-add-id"
                 value={view.view === "peerAdd" ? view.peerId : id}
                 readOnly={view.view === "peerAdd"}
@@ -540,7 +533,6 @@ export function ContactsScreen({
             <label>
               {strings.contactsName}
               <input
-                ref={view.view === "peerAdd" ? addNameRef : undefined}
                 data-testid="contact-add-name"
                 value={name}
                 disabled={busy}

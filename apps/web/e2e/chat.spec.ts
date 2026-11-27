@@ -3487,6 +3487,73 @@ test.describe("real browser chat", () => {
     ).not.toBeFocused();
   });
 
+  test("new chat ID fields are single-line textareas on a phone viewport", async ({
+    browser,
+  }) => {
+    const alice = await openUser(browser);
+    await createAccount(alice.page);
+    await alice.page.setViewportSize({ width: 360, height: 640 });
+    await startNewChatById(alice.page);
+
+    for (const field of [
+      alice.page.getByTestId("peer-id-input"),
+      alice.page.getByLabel(/^Name \(optional\)$/u),
+    ]) {
+      const layout = await field.evaluate((element) => ({
+        tagName: element.tagName,
+        scrollHeight: element.scrollHeight,
+        clientHeight: element.clientHeight,
+        height: element.getBoundingClientRect().height,
+      }));
+      expect(layout.tagName).toBe("TEXTAREA");
+      expect(layout.scrollHeight).toBeLessThanOrEqual(layout.clientHeight);
+      expect(layout.height).toBeGreaterThanOrEqual(36);
+      expect(layout.height).toBeLessThanOrEqual(56);
+    }
+  });
+
+  test("Enter submits the new chat ID without adding a line break", async ({
+    browser,
+  }) => {
+    const alice = await openUser(browser);
+    const bob = await openUser(browser);
+    await createAccount(alice.page);
+    const bobAccount = await createAccount(bob.page);
+    await alice.page.setViewportSize({ width: 360, height: 640 });
+    await startNewChatById(alice.page);
+    const idField = alice.page.getByTestId("peer-id-input");
+    await idField.fill(bobAccount.id);
+    await idField.press("Enter");
+    expect(await idField.inputValue()).not.toMatch(/[\r\n]/u);
+    await expect(alice.page.locator(".conversation-head")).toBeVisible();
+  });
+
+  test("contact add forms open without focusing their fields", async ({
+    browser,
+  }) => {
+    const alice = await openUser(browser);
+    const bob = await openUser(browser);
+    await createAccount(alice.page);
+    const bobAccount = await createAccount(bob.page);
+    await alice.page.setViewportSize({ width: 360, height: 640 });
+
+    await alice.page.getByTestId("profile").click();
+    await alice.page.getByTestId("profile-contacts").click();
+    await expect(alice.page.getByTestId("contacts-screen")).toBeVisible();
+    await alice.page.getByTestId("contact-add-open").click();
+    await expect(alice.page.getByTestId("contact-add-id")).toBeVisible();
+    await expect(alice.page.getByTestId("contact-add-id")).not.toBeFocused();
+    await alice.page.getByTestId("contacts-back").click();
+    await alice.page.getByTestId("contacts-back").click();
+
+    await openChat(alice.page, bobAccount.id);
+    await alice.page.locator(".contact-name-trigger").click();
+    await expect(alice.page.getByTestId("contact-peer-title")).toBeVisible();
+    await alice.page.getByTestId("contact-peer-add").click();
+    await expect(alice.page.getByTestId("contact-add-name")).toBeVisible();
+    await expect(alice.page.getByTestId("contact-add-name")).not.toBeFocused();
+  });
+
   test("new chat from contacts shows a hint when there are no contacts", async ({
     browser,
   }) => {

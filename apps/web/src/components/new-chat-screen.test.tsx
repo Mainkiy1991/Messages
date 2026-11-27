@@ -51,6 +51,7 @@ describe("new chat screen", () => {
   it("disables autocomplete on both ID form fields without autofocus", () => {
     const html = render({ view: "id" });
     expect(html.match(/autocomplete="off"/giu)).toHaveLength(2);
+    expect(html.match(/<textarea/giu)).toHaveLength(2);
     expect(html).not.toMatch(/autofocus/iu);
   });
 });
