@@ -3871,7 +3871,7 @@ test.describe("real browser chat", () => {
     await first.page.locator(".contact-name-trigger").click();
     await first.page.getByTestId("contact-remove").click();
     await first.page.getByTestId("contact-remove-confirm").click();
-    await expect(first.page.getByTestId("contact-peer-title")).toBeVisible();
+    await expect(first.page.getByTestId("contact-row")).toHaveCount(0);
     await first.page.getByTestId("contacts-back").click();
     await expect(secondChat).toHaveText(startsWithText(bob.id.slice(-10)));
   });
