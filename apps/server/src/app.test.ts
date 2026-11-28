@@ -55,7 +55,7 @@ suite("server authentication (PostgreSQL)", () => {
 
   beforeAll(async () => {
     await pool!.query(
-      "DROP TABLE IF EXISTS conversation_clears, presence, read_markers, contact_books, messages, devices, sessions, users, schema_migrations CASCADE",
+      "DROP TABLE IF EXISTS conversation_clears, presence, read_markers, profile_shares, profiles, contact_books, messages, devices, sessions, users, schema_migrations CASCADE",
     );
     await pool!.query("DROP SEQUENCE IF EXISTS messages_change_seq");
     await pool!.query(
@@ -140,6 +140,12 @@ suite("server authentication (PostgreSQL)", () => {
     await pool!.query(
       await readFile(
         join(import.meta.dirname, "..", "migrations", "010_devices.sql"),
+        "utf8",
+      ),
+    );
+    await pool!.query(
+      await readFile(
+        join(import.meta.dirname, "..", "migrations", "013_profiles.sql"),
         "utf8",
       ),
     );
@@ -3179,6 +3185,627 @@ suite("server authentication (PostgreSQL)", () => {
     });
     expect(denied.statusCode).toBe(403);
     expect(denied.json()).toEqual({ error: "origin_forbidden" });
+  });
+
+  it("returns an empty profile and requires authentication for all profile routes", async () => {
+    const owner = await createAccount();
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/profile",
+          headers: { authorization: `Bearer ${owner.token}` },
+        })
+      ).json(),
+    ).toEqual({ version: "0", blob: null });
+    for (const [method, url, payload] of [
+      ["GET", "/profile", undefined],
+      [
+        "PUT",
+        "/profile",
+        { baseVersion: "0", blob: Buffer.alloc(48, 1).toString("base64") },
+      ],
+      [
+        "PUT",
+        `/profile/shares/${"a".repeat(64)}`,
+        { wrap: Buffer.alloc(73, 2).toString("base64") },
+      ],
+      ["GET", `/profiles/${"a".repeat(64)}`, undefined],
+      ["GET", "/profiles", undefined],
+    ] as const) {
+      expect((await app.inject({ method, url, payload })).statusCode).toBe(401);
+    }
+  });
+
+  it("creates and updates the owner's encrypted profile with optimistic versions", async () => {
+    const owner = await createAccount();
+    const blob1 = Buffer.alloc(48, 1).toString("base64");
+    const blob2 = Buffer.alloc(49, 2).toString("base64");
+    const put = (baseVersion: string, blob: string) =>
+      app.inject({
+        method: "PUT",
+        url: "/profile",
+        headers: { authorization: `Bearer ${owner.token}` },
+        payload: { baseVersion, blob },
+      });
+    expect((await put("0", blob1)).json()).toEqual({ version: "1" });
+    expect((await put("1", blob2)).json()).toEqual({ version: "2" });
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/profile",
+          headers: { authorization: `Bearer ${owner.token}` },
+        })
+      ).json(),
+    ).toEqual({ version: "2", blob: blob2 });
+  });
+
+  it("rejects invalid profile blocks and stale versions without changing stored data", async () => {
+    const owner = await createAccount();
+    const headers = { authorization: `Bearer ${owner.token}` };
+    const valid = Buffer.alloc(48, 1).toString("base64");
+    await app.inject({
+      method: "PUT",
+      url: "/profile",
+      headers,
+      payload: { baseVersion: "0", blob: valid },
+    });
+    const conflict = await app.inject({
+      method: "PUT",
+      url: "/profile",
+      headers,
+      payload: {
+        baseVersion: "0",
+        blob: Buffer.alloc(48, 2).toString("base64"),
+      },
+    });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json()).toEqual({
+      error: "version_conflict",
+      version: "1",
+      blob: valid,
+    });
+    for (const payload of [
+      { baseVersion: "1", blob: "%" },
+      { baseVersion: "1", blob: "A".repeat(2049) },
+      { baseVersion: "1", blob: Buffer.alloc(40, 1).toString("base64") },
+      { baseVersion: "1", blob: valid, extra: true },
+      { baseVersion: "x", blob: valid },
+      { baseVersion: "1", blob: "" },
+    ])
+      expect(
+        (await app.inject({ method: "PUT", url: "/profile", headers, payload }))
+          .statusCode,
+      ).toBe(400);
+    expect(
+      (await app.inject({ method: "GET", url: "/profile", headers })).json(),
+    ).toEqual({ version: "1", blob: valid });
+  });
+
+  it("sends profile_updated only to the owner and authorized recipients", async () => {
+    const owner = await createAccount();
+    const recipient = await createAccount();
+    const stranger = await createAccount();
+    const url = await listen();
+    const ownerSocket = (await connectAuth(owner.token, url)).socket;
+    const recipientSocket = (await connectAuth(recipient.token, url)).socket;
+    const strangerSocket = (await connectAuth(stranger.token, url)).socket;
+    await app.inject({
+      method: "PUT",
+      url: `/profile/shares/${recipient.userId}`,
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { wrap: Buffer.alloc(73, 2).toString("base64") },
+    });
+    const ownerFrame = nextFrame(
+      ownerSocket,
+      (frame) => frame.type === "profile_updated",
+    );
+    const recipientFrame = nextFrame(
+      recipientSocket,
+      (frame) => frame.type === "profile_updated",
+    );
+    const response = await app.inject({
+      method: "PUT",
+      url: "/profile",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: {
+        baseVersion: "0",
+        blob: Buffer.alloc(48, 1).toString("base64"),
+      },
+    });
+    expect(response.json()).toEqual({ version: "1" });
+    const frame = {
+      type: "profile_updated",
+      owner: owner.userId,
+      version: "1",
+    };
+    await expect(ownerFrame).resolves.toEqual(frame);
+    await expect(recipientFrame).resolves.toEqual(frame);
+    expect(Object.keys(frame).sort()).toEqual(["owner", "type", "version"]);
+    expect(
+      (frameBuffers.get(strangerSocket) ?? []).filter(
+        (item) => item.type === "profile_updated",
+      ),
+    ).toEqual([]);
+    ownerSocket.close();
+    recipientSocket.close();
+    strangerSocket.close();
+  });
+
+  it("sends no profile_updated frame on version conflict", async () => {
+    const owner = await createAccount();
+    const socket = (await connectAuth(owner.token, await listen())).socket;
+    const put = (version: string, value: number) =>
+      app.inject({
+        method: "PUT",
+        url: "/profile",
+        headers: { authorization: `Bearer ${owner.token}` },
+        payload: {
+          baseVersion: version,
+          blob: Buffer.alloc(48, value).toString("base64"),
+        },
+      });
+    const first = nextFrame(
+      socket,
+      (frame) => frame.type === "profile_updated",
+    );
+    await put("0", 1);
+    await first;
+    expect((await put("0", 2)).statusCode).toBe(409);
+    const updated = nextFrame(
+      socket,
+      (frame) => frame.type === "profile_updated",
+    );
+    await put("1", 3);
+    await expect(updated).resolves.toEqual({
+      type: "profile_updated",
+      owner: owner.userId,
+      version: "2",
+    });
+    expect(
+      (frameBuffers.get(socket) ?? []).filter(
+        (frame) => frame.type === "profile_updated",
+      ),
+    ).toEqual([]);
+    socket.close();
+  });
+
+  it("creates profile shares once and validates recipient identity and wrap", async () => {
+    const owner = await createAccount();
+    const peer = await createAccount();
+    const headers = { authorization: `Bearer ${owner.token}` };
+    const url = `/profile/shares/${peer.userId}`;
+    const wrap = Buffer.alloc(73, 2).toString("base64");
+    expect(
+      (
+        await app.inject({ method: "PUT", url, headers, payload: { wrap } })
+      ).json(),
+    ).toEqual({ created: true });
+    expect(
+      (
+        await app.inject({ method: "PUT", url, headers, payload: { wrap } })
+      ).json(),
+    ).toEqual({ created: false });
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: `/profile/shares/${owner.userId}`,
+          headers,
+          payload: { wrap },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: `/profile/shares/${"f".repeat(64)}`,
+          headers,
+          payload: { wrap },
+        })
+      ).statusCode,
+    ).toBe(404);
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: "/profile/shares/invalid",
+          headers,
+          payload: { wrap },
+        })
+      ).statusCode,
+    ).toBe(404);
+    for (const bad of [
+      "%",
+      Buffer.alloc(72, 2).toString("base64"),
+      Buffer.alloc(74, 2).toString("base64"),
+      "A".repeat(129),
+    ])
+      expect(
+        (
+          await app.inject({
+            method: "PUT",
+            url,
+            headers,
+            payload: { wrap: bad },
+          })
+        ).statusCode,
+      ).toBe(400);
+  });
+
+  it("enforces the per-owner share limit while keeping existing shares idempotent", async () => {
+    const limited = await buildApp({
+      databaseUrl: databaseUrl!,
+      profileSharesLimit: 2,
+    });
+    try {
+      const owner = await createAccount();
+      const peers = await Promise.all([
+        createAccount(),
+        createAccount(),
+        createAccount(),
+      ]);
+      const headers = { authorization: `Bearer ${owner.token}` };
+      const wrap = Buffer.alloc(73, 2).toString("base64");
+      for (const peer of peers.slice(0, 2))
+        expect(
+          (
+            await limited.inject({
+              method: "PUT",
+              url: `/profile/shares/${peer.userId}`,
+              headers,
+              payload: { wrap },
+            })
+          ).statusCode,
+        ).toBe(200);
+      expect(
+        (
+          await limited.inject({
+            method: "PUT",
+            url: `/profile/shares/${peers[2]!.userId}`,
+            headers,
+            payload: { wrap },
+          })
+        ).json(),
+      ).toEqual({ error: "share_limit" });
+      expect(
+        (
+          await limited.inject({
+            method: "PUT",
+            url: `/profile/shares/${peers[0]!.userId}`,
+            headers,
+            payload: { wrap },
+          })
+        ).json(),
+      ).toEqual({ created: false });
+    } finally {
+      await limited.close();
+    }
+  });
+
+  it("notifies a recipient when a profile share is created, but not on repeat", async () => {
+    const owner = await createAccount();
+    const recipient = await createAccount();
+    const socket = (await connectAuth(recipient.token, await listen())).socket;
+    const headers = { authorization: `Bearer ${owner.token}` };
+    const wrap = Buffer.alloc(73, 2).toString("base64");
+    await app.inject({
+      method: "PUT",
+      url: "/profile",
+      headers,
+      payload: {
+        baseVersion: "0",
+        blob: Buffer.alloc(48, 1).toString("base64"),
+      },
+    });
+    const first = nextFrame(
+      socket,
+      (frame) => frame.type === "profile_updated",
+    );
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: `/profile/shares/${recipient.userId}`,
+          headers,
+          payload: { wrap },
+        })
+      ).json(),
+    ).toEqual({ created: true });
+    await expect(first).resolves.toEqual({
+      type: "profile_updated",
+      owner: owner.userId,
+      version: "1",
+    });
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: `/profile/shares/${recipient.userId}`,
+          headers,
+          payload: { wrap },
+        })
+      ).json(),
+    ).toEqual({ created: false });
+    expect(
+      (frameBuffers.get(socket) ?? []).filter(
+        (frame) => frame.type === "profile_updated",
+      ),
+    ).toHaveLength(0);
+    socket.close();
+  });
+
+  it("notifies a new recipient on the first profile write when no profile existed at share time", async () => {
+    const owner = await createAccount();
+    const recipient = await createAccount();
+    const socket = (await connectAuth(recipient.token, await listen())).socket;
+    const headers = { authorization: `Bearer ${owner.token}` };
+    await app.inject({
+      method: "PUT",
+      url: `/profile/shares/${recipient.userId}`,
+      headers,
+      payload: { wrap: Buffer.alloc(73, 2).toString("base64") },
+    });
+    expect(
+      (frameBuffers.get(socket) ?? []).filter(
+        (frame) => frame.type === "profile_updated",
+      ),
+    ).toHaveLength(0);
+    const signal = nextFrame(
+      socket,
+      (frame) => frame.type === "profile_updated",
+    );
+    await app.inject({
+      method: "PUT",
+      url: "/profile",
+      headers,
+      payload: {
+        baseVersion: "0",
+        blob: Buffer.alloc(48, 1).toString("base64"),
+      },
+    });
+    await expect(signal).resolves.toEqual({
+      type: "profile_updated",
+      owner: owner.userId,
+      version: "1",
+    });
+    socket.close();
+  });
+
+  it("returns a shared profile only to its recipient and hides absent data uniformly", async () => {
+    const owner = await createAccount();
+    const recipient = await createAccount();
+    const outsider = await createAccount();
+    const wrap = Buffer.alloc(73, 2).toString("base64");
+    const get = (token: string, id: string) =>
+      app.inject({
+        method: "GET",
+        url: `/profiles/${id}`,
+        headers: { authorization: `Bearer ${token}` },
+      });
+    const noShare = await get(outsider.token, owner.userId);
+    await app.inject({
+      method: "PUT",
+      url: `/profile/shares/${recipient.userId}`,
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { wrap },
+    });
+    const noProfile = await get(recipient.token, owner.userId);
+    expect(noProfile.statusCode).toBe(404);
+    expect(noProfile.json()).toEqual(noShare.json());
+    expect((await get(recipient.token, owner.userId)).statusCode).toBe(404);
+    await app.inject({
+      method: "PUT",
+      url: "/profile",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: {
+        baseVersion: "0",
+        blob: Buffer.alloc(48, 1).toString("base64"),
+      },
+    });
+    const profile = await get(recipient.token, owner.userId);
+    expect(profile.statusCode).toBe(200);
+    expect(Object.keys(profile.json()).sort()).toEqual([
+      "blob",
+      "ownerId",
+      "version",
+      "wrap",
+    ]);
+    expect((await get(recipient.token, recipient.userId)).statusCode).toBe(404);
+    expect((await get(recipient.token, "invalid")).statusCode).toBe(404);
+    expect((await get(outsider.token, owner.userId)).statusCode).toBe(404);
+  });
+
+  it("isolates a profile share from a different recipient in detail and list routes", async () => {
+    const owner = await createAccount();
+    const recipient = await createAccount();
+    const other = await createAccount();
+    const headers = { authorization: `Bearer ${owner.token}` };
+    await app.inject({
+      method: "PUT",
+      url: `/profile/shares/${recipient.userId}`,
+      headers,
+      payload: { wrap: Buffer.alloc(73, 2).toString("base64") },
+    });
+    await app.inject({
+      method: "PUT",
+      url: "/profile",
+      headers,
+      payload: {
+        baseVersion: "0",
+        blob: Buffer.alloc(48, 1).toString("base64"),
+      },
+    });
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/profiles/${owner.userId}`,
+          headers: { authorization: `Bearer ${other.token}` },
+        })
+      ).statusCode,
+    ).toBe(404);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/profiles",
+          headers: { authorization: `Bearer ${other.token}` },
+        })
+      ).json().items,
+    ).toEqual([]);
+  });
+
+  it("lists only shared profiles in owner order and paginates without gaps", async () => {
+    const reader = await createAccount();
+    const headers = { authorization: `Bearer ${reader.token}` };
+    const wrap = Buffer.alloc(73, 2).toString("base64");
+    const owners = await Promise.all([
+      createAccount(),
+      createAccount(),
+      createAccount(),
+    ]);
+    const pending = await createAccount();
+    const unshared = await createAccount();
+    for (const owner of [...owners, pending])
+      await app.inject({
+        method: "PUT",
+        url: `/profile/shares/${reader.userId}`,
+        headers: { authorization: `Bearer ${owner.token}` },
+        payload: { wrap },
+      });
+    for (const owner of [...owners, unshared])
+      await app.inject({
+        method: "PUT",
+        url: "/profile",
+        headers: { authorization: `Bearer ${owner.token}` },
+        payload: {
+          baseVersion: "0",
+          blob: Buffer.alloc(48, 1).toString("base64"),
+        },
+      });
+    let after: string | null = null;
+    const seen: string[] = [];
+    do {
+      const response: Awaited<ReturnType<typeof app.inject>> = await app.inject(
+        {
+          method: "GET",
+          url: `/profiles?limit=1${after ? `&after=${after}` : ""}`,
+          headers,
+        },
+      );
+      const body = response.json() as {
+        items: { ownerId: string }[];
+        nextAfter: string | null;
+      };
+      seen.push(...body.items.map((item) => item.ownerId));
+      after = body.nextAfter;
+    } while (after);
+    expect(seen).toEqual(owners.map((owner) => owner.userId).sort());
+    for (const query of [
+      "?limit=0",
+      "?limit=101",
+      "?limit=x",
+      "?after=bad",
+      "?extra=1",
+    ])
+      expect(
+        (await app.inject({ method: "GET", url: `/profiles${query}`, headers }))
+          .statusCode,
+      ).toBe(400);
+  });
+
+  it("shows the latest shared profile version and ciphertext in detail reads", async () => {
+    const owner = await createAccount();
+    const reader = await createAccount();
+    const headers = { authorization: `Bearer ${owner.token}` };
+    await app.inject({
+      method: "PUT",
+      url: `/profile/shares/${reader.userId}`,
+      headers,
+      payload: { wrap: Buffer.alloc(73, 2).toString("base64") },
+    });
+    const blob = Buffer.alloc(49, 3).toString("base64");
+    await app.inject({
+      method: "PUT",
+      url: "/profile",
+      headers,
+      payload: {
+        baseVersion: "0",
+        blob: Buffer.alloc(48, 1).toString("base64"),
+      },
+    });
+    await app.inject({
+      method: "PUT",
+      url: "/profile",
+      headers,
+      payload: { baseVersion: "1", blob },
+    });
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/profiles/${owner.userId}`,
+          headers: { authorization: `Bearer ${reader.token}` },
+        })
+      ).json(),
+    ).toMatchObject({ version: "2", blob });
+  });
+
+  it("enforces profile table checks and cascades profile and share deletion", async () => {
+    const owner = await createAccount();
+    const recipient = await createAccount();
+    await expect(
+      pool!.query(
+        "INSERT INTO profile_shares(owner_id,recipient_id,wrap) VALUES($1,$1,$2)",
+        [owner.userId, Buffer.alloc(73, 2).toString("base64")],
+      ),
+    ).rejects.toThrow();
+    await expect(
+      pool!.query(
+        "INSERT INTO profiles(user_id,version,blob) VALUES($1,1,$2)",
+        [owner.userId, "x".repeat(2049)],
+      ),
+    ).rejects.toThrow();
+    await pool!.query(
+      "INSERT INTO profiles(user_id,version,blob) VALUES($1,1,$2)",
+      [owner.userId, Buffer.alloc(48, 1).toString("base64")],
+    );
+    await pool!.query(
+      "INSERT INTO profile_shares(owner_id,recipient_id,wrap) VALUES($1,$2,$3)",
+      [owner.userId, recipient.userId, Buffer.alloc(73, 2).toString("base64")],
+    );
+    await pool!.query("DELETE FROM users WHERE id=$1", [owner.userId]);
+    expect(
+      (
+        await pool!.query("SELECT 1 FROM profiles WHERE user_id=$1", [
+          owner.userId,
+        ])
+      ).rowCount,
+    ).toBe(0);
+    expect(
+      (
+        await pool!.query("SELECT 1 FROM profile_shares WHERE owner_id=$1", [
+          owner.userId,
+        ])
+      ).rowCount,
+    ).toBe(0);
+    const owner2 = await createAccount();
+    await pool!.query(
+      "INSERT INTO profile_shares(owner_id,recipient_id,wrap) VALUES($1,$2,$3)",
+      [owner2.userId, recipient.userId, Buffer.alloc(73, 2).toString("base64")],
+    );
+    await pool!.query("DELETE FROM users WHERE id=$1", [recipient.userId]);
+    expect(
+      (
+        await pool!.query(
+          "SELECT 1 FROM profile_shares WHERE recipient_id=$1",
+          [recipient.userId],
+        )
+      ).rowCount,
+    ).toBe(0);
   });
 
   it("stores contacts with optimistic locking, atomic conflicts, and user isolation", async () => {
