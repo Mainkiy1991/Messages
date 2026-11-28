@@ -247,6 +247,8 @@ export class ChatController {
   private contactsWriting = 0;
   private contactsRefreshing = false;
   private contactsRefreshAgain = false;
+  private contactsPendingVersion: bigint | null = null;
+  private contactsPendingForce = false;
   private outboxLoaded = false;
   private accountDataLoading: Promise<void> | null = null;
   private readonly accountDataRetryTimers = new Map<
@@ -644,8 +646,12 @@ export class ChatController {
   }
 
   private async refreshContacts(): Promise<void> {
-    if (!this.contactsLoaded || this.stopped || this.contactsWriting > 0)
+    if (this.stopped) return;
+    if (this.contactsWriting > 0) {
+      this.contactsPendingForce = true;
       return;
+    }
+    if (!this.contactsLoaded) return;
     if (this.contactsRefreshing) {
       this.contactsRefreshAgain = true;
       return;
@@ -659,23 +665,38 @@ export class ChatController {
       const book = await get(session.token);
       if (
         this.stopped ||
-        this.contactsWriting > 0 ||
         typeof book.version !== "string" ||
-        !/^\d{1,19}$/u.test(book.version) ||
+        !/^\d{1,19}$/u.test(book.version)
+      )
+        return;
+      const version = BigInt(book.version);
+      if (this.contactsWriting > 0) {
+        if (
+          this.contactsPendingVersion === null ||
+          version > this.contactsPendingVersion
+        )
+          this.contactsPendingVersion = version;
+        return;
+      }
+      if (
         typeof book.blob !== "string" ||
-        BigInt(book.version) <= BigInt(this.contactsVersion)
+        version <= BigInt(this.contactsVersion)
       )
         return;
       const { contacts, notes: contactNotes } = decryptContactBookFull({
         historyKey: this.keys.historyKey,
         blob: book.blob,
       });
-      if (
-        this.stopped ||
-        this.contactsWriting > 0 ||
-        BigInt(book.version) <= BigInt(this.contactsVersion)
-      )
+      if (this.stopped) return;
+      if (this.contactsWriting > 0) {
+        if (
+          this.contactsPendingVersion === null ||
+          version > this.contactsPendingVersion
+        )
+          this.contactsPendingVersion = version;
         return;
+      }
+      if (version <= BigInt(this.contactsVersion)) return;
       this.contactsVersion = book.version;
       this.update({ contacts, contactNotes });
     } catch {
@@ -1337,6 +1358,15 @@ export class ChatController {
       return { ok: false, error: "save_failed" };
     } finally {
       this.contactsWriting--;
+      if (this.contactsWriting === 0) {
+        const refreshPending =
+          this.contactsPendingForce ||
+          (this.contactsPendingVersion !== null &&
+            this.contactsPendingVersion > BigInt(this.contactsVersion));
+        this.contactsPendingVersion = null;
+        this.contactsPendingForce = false;
+        if (refreshPending) void this.refreshContacts();
+      }
     }
   }
 
@@ -2274,7 +2304,14 @@ export class ChatController {
         this.contactsLoaded &&
         BigInt(frame.version) > BigInt(this.contactsVersion)
       )
-        void this.refreshContacts();
+        if (this.contactsWriting > 0) {
+          const version = BigInt(frame.version);
+          if (
+            this.contactsPendingVersion === null ||
+            version > this.contactsPendingVersion
+          )
+            this.contactsPendingVersion = version;
+        } else void this.refreshContacts();
       return;
     }
     if (
