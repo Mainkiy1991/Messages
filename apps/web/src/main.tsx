@@ -160,6 +160,9 @@ function App() {
     contactNotes: {},
     contactsError: false,
     contactsReady: false,
+    ownProfile: null,
+    ownProfileReady: false,
+    peerProfiles: {},
     waking: false,
     presence: {},
   });
@@ -470,6 +473,9 @@ function App() {
       contactNotes: {},
       contactsError: false,
       contactsReady: false,
+      ownProfile: null,
+      ownProfileReady: false,
+      peerProfiles: {},
       waking: false,
       presence: {},
     });
@@ -740,6 +746,9 @@ function App() {
       contactNotes: {},
       contactsError: false,
       contactsReady: false,
+      ownProfile: null,
+      ownProfileReady: false,
+      peerProfiles: {},
       waking: false,
       presence: {},
     });
@@ -1083,6 +1092,9 @@ function App() {
               contactNotes: {},
               contactsError: false,
               contactsReady: false,
+              ownProfile: null,
+              ownProfileReady: false,
+              peerProfiles: {},
               waking: false,
               presence: {},
             });

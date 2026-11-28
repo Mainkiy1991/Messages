@@ -26,6 +26,11 @@ import {
   getDevices,
   revokeDevice,
   revokeOtherDevices,
+  getProfile,
+  putProfile,
+  putProfileShare,
+  getPeerProfile,
+  getProfiles,
 } from "./api.js";
 import { ApiError, resolveApiUrl } from "./api.js";
 
@@ -35,6 +40,76 @@ describe("API server address", () => {
       "https://messages-server.onrender.com",
     );
     expect(resolveApiUrl(undefined)).toBe("http://localhost:3000");
+  });
+});
+
+describe("profile API", () => {
+  it.each([
+    [
+      "getProfile",
+      (f: typeof fetch) => getProfile("token", f),
+      "GET",
+      "/profile",
+      undefined,
+    ],
+    [
+      "putProfile",
+      (f: typeof fetch) => putProfile("token", "2", "blob", f),
+      "PUT",
+      "/profile",
+      { baseVersion: "2", blob: "blob" },
+    ],
+    [
+      "putProfileShare",
+      (f: typeof fetch) => putProfileShare("token", "peer", "wrap", f),
+      "PUT",
+      "/profile/shares/peer",
+      { wrap: "wrap" },
+    ],
+    [
+      "getPeerProfile",
+      (f: typeof fetch) => getPeerProfile("token", "owner", f),
+      "GET",
+      "/profiles/owner",
+      undefined,
+    ],
+    [
+      "getProfiles",
+      (f: typeof fetch) => getProfiles("token", "owner", 100, f),
+      "GET",
+      "/profiles?limit=100&after=owner",
+      undefined,
+    ],
+  ] as const)(
+    "%s sends its request and authorization",
+    async (_name, call, method, path, body) => {
+      let captured: { url: string; init?: RequestInit } | undefined;
+      const fetcher: typeof fetch = async (input, init) => {
+        captured = { url: String(input), init };
+        return Response.json({ version: "1", blob: null });
+      };
+      await call(fetcher);
+      expect(captured?.url.endsWith(path)).toBe(true);
+      expect(captured?.init?.method ?? "GET").toBe(method);
+      expect(new Headers(captured?.init?.headers).get("Authorization")).toBe(
+        "Bearer token",
+      );
+      if (body) expect(JSON.parse(String(captured?.init?.body))).toEqual(body);
+    },
+  );
+
+  it.each([
+    (f: typeof fetch) => getProfile("token", f),
+    (f: typeof fetch) => putProfile("token", "1", "blob", f),
+    (f: typeof fetch) => putProfileShare("token", "peer", "wrap", f),
+  ])("converts profile server errors into ApiError", async (call) => {
+    const fetcher: typeof fetch = async () =>
+      Response.json({ error: "profile_failed" }, { status: 500 });
+    await expect(call(fetcher)).rejects.toMatchObject({
+      name: "ApiError",
+      status: 500,
+      code: "profile_failed",
+    });
   });
 });
 

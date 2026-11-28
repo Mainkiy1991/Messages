@@ -13,6 +13,9 @@ import {
   encryptTextMessage,
   newReplayMessageId,
   signKeyBinding,
+  deriveProfileKey,
+  encryptProfile,
+  wrapProfileKey,
 } from "@messages/crypto";
 import {
   ApiError,
@@ -6469,6 +6472,448 @@ describe("ChatController contact actions", () => {
       ok: false,
       error: "not_a_contact",
     });
+    controller.stop();
+  });
+});
+
+describe("ChatController profiles", () => {
+  const profileFixture = (
+    owner: typeof alice,
+    ownerId: string,
+    recipient: typeof alice,
+    recipientId: string,
+    name: string,
+    about: string,
+    version: string,
+  ) => ({
+    ownerId,
+    version,
+    blob: encryptProfile({
+      profileKey: deriveProfileKey(owner.historyKey),
+      ownerId,
+      name,
+      about,
+    }),
+    wrap: wrapProfileKey({
+      ownerEncryptionPrivateKey: owner.encryption.privateKey,
+      recipientEncryptionPublicKey: recipient.encryption.publicKey,
+      ownerId,
+      recipientId,
+      profileKey: deriveProfileKey(owner.historyKey),
+    }),
+  });
+  const load = (controller: ChatController) =>
+    (controller as unknown as { loadProfiles(): Promise<void> }).loadProfiles();
+
+  it("loads and decrypts the owner's profile", async () => {
+    const own = encryptProfile({
+      profileKey: deriveProfileKey(alice.historyKey),
+      ownerId: aliceId,
+      name: "Alice",
+      about: "Hello",
+    });
+    const controller = contactController(
+      {},
+      {},
+      {
+        getProfile: async () => ({ version: "1", blob: own }),
+        getProfiles: async () => ({ items: [], nextAfter: null }),
+      },
+    );
+    await load(controller);
+    expect(controller.getSnapshot()).toMatchObject({
+      ownProfile: { name: "Alice", about: "Hello" },
+      ownProfileReady: true,
+    });
+    controller.stop();
+  });
+
+  it("marks an empty profile as loaded", async () => {
+    const controller = contactController(
+      {},
+      {},
+      {
+        getProfile: async () => ({ version: "0", blob: null }),
+        getProfiles: async () => ({ items: [], nextAfter: null }),
+      },
+    );
+    await load(controller);
+    expect(controller.getSnapshot()).toMatchObject({
+      ownProfile: null,
+      ownProfileReady: true,
+    });
+    controller.stop();
+  });
+
+  it("loads profiles over multiple pages and skips the owner", async () => {
+    const first = profileFixture(bob, bobId, alice, aliceId, "Bob", "B", "1");
+    const second = profileFixture(
+      charlie,
+      charlieId,
+      alice,
+      aliceId,
+      "Charlie",
+      "C",
+      "2",
+    );
+    let calls = 0;
+    const controller = contactController(
+      {},
+      {},
+      {
+        getProfile: async () => ({ version: "0", blob: null }),
+        getProfiles: async () =>
+          ++calls === 1
+            ? {
+                items: [first, { ...first, ownerId: aliceId }],
+                nextAfter: bobId,
+              }
+            : { items: [second], nextAfter: null },
+      },
+    );
+    await load(controller);
+    expect(controller.getSnapshot().peerProfiles).toEqual({
+      [bobId]: { name: "Bob", about: "B" },
+      [charlieId]: { name: "Charlie", about: "C" },
+    });
+    controller.stop();
+  });
+
+  it("skips invalid wrappers and continues with valid profiles", async () => {
+    const valid = profileFixture(bob, bobId, alice, aliceId, "Bob", "B", "1");
+    const wrongWrap = profileFixture(
+      charlie,
+      charlieId,
+      bob,
+      bobId,
+      "Charlie",
+      "C",
+      "1",
+    );
+    const controller = contactController(
+      {},
+      {},
+      {
+        getProfile: async () => ({ version: "0", blob: null }),
+        getProfiles: async () => ({
+          items: [wrongWrap, valid],
+          nextAfter: null,
+        }),
+      },
+    );
+    await expect(load(controller)).resolves.toBeUndefined();
+    expect(controller.getSnapshot().peerProfiles).toEqual({
+      [bobId]: { name: "Bob", about: "B" },
+    });
+    controller.stop();
+  });
+
+  it("keeps a newer peer profile when an older page arrives", async () => {
+    const newer = profileFixture(bob, bobId, alice, aliceId, "New", "", "2");
+    const older = profileFixture(bob, bobId, alice, aliceId, "Old", "", "1");
+    const controller = contactController(
+      {},
+      {},
+      {
+        getProfile: async () => ({ version: "0", blob: null }),
+        getProfiles: async () => ({ items: [newer], nextAfter: null }),
+      },
+    );
+    await load(controller);
+    const deps = (controller as unknown as { deps: ChatControllerDependencies })
+      .deps;
+    deps.getProfiles = async () => ({ items: [older], nextAfter: null });
+    await load(controller);
+    expect(controller.getSnapshot().peerProfiles[bobId]?.name).toBe("New");
+    controller.stop();
+  });
+
+  it.each([
+    ["", "", "name_required"],
+    ["x".repeat(65), "", "name_too_long"],
+    ["Valid", "x".repeat(201), "about_too_long"],
+    ["Bad\nname", "", "invalid_chars"],
+    ["Bad\u202Ename", "", "invalid_chars"],
+    ["Valid", "Bad\u0000about", "invalid_chars"],
+  ] as const)(
+    "rejects invalid profile input (%s)",
+    async (name, about, error) => {
+      const putProfile = vi.fn(async () => ({ version: "2" }));
+      const controller = contactController(
+        {},
+        {},
+        {
+          getProfile: async () => ({ version: "0", blob: null }),
+          getProfiles: async () => ({ items: [], nextAfter: null }),
+          putProfile,
+        },
+      );
+      await load(controller);
+      expect(await controller.saveOwnProfile(name, about)).toEqual({
+        ok: false,
+        error,
+      });
+      expect(putProfile).not.toHaveBeenCalled();
+      controller.stop();
+    },
+  );
+
+  it("saves trimmed values using the current base version", async () => {
+    const sent: string[] = [];
+    const current = encryptProfile({
+      profileKey: deriveProfileKey(alice.historyKey),
+      ownerId: aliceId,
+      name: "Old",
+      about: "",
+    });
+    const controller = contactController(
+      {},
+      {},
+      {
+        getProfile: async () => ({ version: "4", blob: current }),
+        getProfiles: async () => ({ items: [], nextAfter: null }),
+        putProfile: async (_token, version, blob) => {
+          sent.push(version, blob);
+          return { version: "5" };
+        },
+      },
+    );
+    await load(controller);
+    expect(await controller.saveOwnProfile(" Alice ", " about ")).toEqual({
+      ok: true,
+    });
+    expect(sent[0]).toBe("4");
+    expect(controller.getSnapshot().ownProfile).toEqual({
+      name: "Alice",
+      about: "about",
+    });
+    controller.stop();
+  });
+
+  it("leaves the own profile unready when decryption fails", async () => {
+    const controller = contactController(
+      {},
+      {},
+      {
+        getProfile: async () => {
+          throw new ApiError(500, "failed");
+        },
+        getProfiles: async () => ({ items: [], nextAfter: null }),
+      },
+    );
+    await expect(load(controller)).resolves.toBeUndefined();
+    expect(controller.getSnapshot().ownProfileReady).toBe(false);
+    controller.stop();
+  });
+
+  it("refreshes a peer after a newer profile_updated frame", async () => {
+    const peer = profileFixture(
+      bob,
+      bobId,
+      alice,
+      aliceId,
+      "Bob newer",
+      "",
+      "2",
+    );
+    const controller = contactController(
+      {},
+      {},
+      { getPeerProfile: async () => peer },
+    );
+    await deliverFrame(controller, {
+      type: "profile_updated",
+      owner: bobId,
+      version: "2",
+    });
+    await waitFor(
+      () => controller.getSnapshot().peerProfiles[bobId]?.name === "Bob newer",
+    );
+    controller.stop();
+  });
+
+  it("does not refresh a peer for equal or older versions", async () => {
+    const getPeerProfile = vi.fn(async () =>
+      profileFixture(bob, bobId, alice, aliceId, "Bob", "", "1"),
+    );
+    const controller = contactController({}, {}, { getPeerProfile });
+    const versions = (
+      controller as unknown as { peerProfileVersions: Map<string, string> }
+    ).peerProfileVersions;
+    versions.set(bobId, "2");
+    await deliverFrame(controller, {
+      type: "profile_updated",
+      owner: bobId,
+      version: "2",
+    });
+    await deliverFrame(controller, {
+      type: "profile_updated",
+      owner: bobId,
+      version: "1",
+    });
+    expect(getPeerProfile).not.toHaveBeenCalled();
+    controller.stop();
+  });
+
+  it.each([
+    { owner: "not-an-id", version: "3" },
+    { owner: bobId, version: "not-a-version" },
+    { owner: bobId, version: 4 },
+  ])("ignores malformed profile_updated frames", async (value) => {
+    const getPeerProfile = vi.fn(async () =>
+      profileFixture(bob, bobId, alice, aliceId, "Bob", "", "1"),
+    );
+    const controller = contactController({}, {}, { getPeerProfile });
+    await deliverFrame(controller, {
+      type: "profile_updated",
+      ...value,
+    } as IncomingFrame);
+    expect(getPeerProfile).not.toHaveBeenCalled();
+    controller.stop();
+  });
+
+  it("ignores profile_updated frames after stop", async () => {
+    const getPeerProfile = vi.fn(async () =>
+      profileFixture(bob, bobId, alice, aliceId, "Bob", "", "1"),
+    );
+    const controller = contactController({}, {}, { getPeerProfile });
+    controller.stop();
+    await deliverFrame(controller, {
+      type: "profile_updated",
+      owner: bobId,
+      version: "1",
+    });
+    expect(getPeerProfile).not.toHaveBeenCalled();
+  });
+
+  it("retries a profile save after a version conflict", async () => {
+    const versions: string[] = [];
+    const current = encryptProfile({
+      profileKey: deriveProfileKey(alice.historyKey),
+      ownerId: aliceId,
+      name: "Old",
+      about: "",
+    });
+    const controller = contactController(
+      {},
+      {},
+      {
+        getProfile: async () => ({ version: "4", blob: current }),
+        getProfiles: async () => ({ items: [], nextAfter: null }),
+        putProfile: async (_token, version) => {
+          versions.push(version);
+          if (versions.length === 1)
+            throw new ApiError(409, "version_conflict", { version: "5" });
+          return { version: "6" };
+        },
+      },
+    );
+    await load(controller);
+    expect(await controller.saveOwnProfile("Updated")).toEqual({ ok: true });
+    expect(versions).toEqual(["4", "5"]);
+    controller.stop();
+  });
+
+  it("returns server_unavailable for a network failure while saving", async () => {
+    const current = encryptProfile({
+      profileKey: deriveProfileKey(alice.historyKey),
+      ownerId: aliceId,
+      name: "Old",
+      about: "",
+    });
+    const controller = contactController(
+      {},
+      {},
+      {
+        getProfile: async () => ({ version: "1", blob: current }),
+        getProfiles: async () => ({ items: [], nextAfter: null }),
+        putProfile: async () => {
+          throw new TypeError("offline");
+        },
+      },
+    );
+    await load(controller);
+    expect(await controller.saveOwnProfile("Updated")).toEqual({
+      ok: false,
+      error: "server_unavailable",
+    });
+    controller.stop();
+  });
+
+  it("re-reads a newer remote profile received during a local write", async () => {
+    const remote = encryptProfile({
+      profileKey: deriveProfileKey(alice.historyKey),
+      ownerId: aliceId,
+      name: "Remote v3",
+      about: "remote",
+    });
+    const initial = encryptProfile({
+      profileKey: deriveProfileKey(alice.historyKey),
+      ownerId: aliceId,
+      name: "Initial",
+      about: "",
+    });
+    let reads = 0;
+    let releasePut!: (value: { version: string }) => void;
+    let putStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      putStarted = resolve;
+    });
+    const write = new Promise<{ version: string }>((resolve) => {
+      releasePut = resolve;
+    });
+    let remoteApplied!: () => void;
+    const applied = new Promise<void>((resolve) => {
+      remoteApplied = resolve;
+    });
+    const controller = contactController(
+      {},
+      {},
+      {
+        getProfile: async () =>
+          ++reads === 1
+            ? { version: "1", blob: initial }
+            : { version: "3", blob: remote },
+        getProfiles: async () => ({ items: [], nextAfter: null }),
+        putProfile: async () => {
+          putStarted();
+          return write;
+        },
+        onChange: (state) => {
+          if (state.ownProfile?.name === "Remote v3") remoteApplied();
+        },
+      },
+    );
+    await load(controller);
+    const save = controller.saveOwnProfile("Local v2");
+    await started;
+    await deliverFrame(controller, {
+      type: "profile_updated",
+      owner: aliceId,
+      version: "3",
+    });
+    releasePut({ version: "2" });
+    expect(await save).toEqual({ ok: true });
+    await applied;
+    expect(controller.getSnapshot().ownProfile?.name).toBe("Remote v3");
+    expect(reads).toBe(2);
+    controller.stop();
+  });
+
+  it("does not share a profile just by selecting an existing chat", async () => {
+    const putProfileShare = vi.fn(async () => ({ created: true }));
+    const controller = contactController({}, {}, { putProfileShare });
+    const target = controller as unknown as { update(patch: object): void };
+    target.update({
+      chats: [
+        { peerId: bobId, messages: [], unreadCount: 0, historyLoaded: true },
+      ],
+    });
+    controller.selectChat(bobId);
+    await waitFor(() => putProfileShare.mock.calls.length > 0, 100).catch(
+      () => {},
+    );
+    expect(putProfileShare).not.toHaveBeenCalled();
     controller.stop();
   });
 });
