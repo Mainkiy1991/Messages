@@ -3831,6 +3831,12 @@ test.describe("real browser chat", () => {
     const alice = await createAccount(first.page);
     const bob = await createAccount(bobUser.page);
     await openChat(first.page, bob.id);
+    await send(first.page, "Contact sync conversation");
+    await expect(
+      first.page
+        .locator('[data-testid="message"][data-direction="out"]')
+        .filter({ hasText: startsWithText("Contact sync conversation") }),
+    ).toBeVisible();
     await first.page.getByTestId("profile").click();
     await first.page.getByTestId("profile-contacts").click();
     await first.page.getByTestId("contact-add-open").click();
