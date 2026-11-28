@@ -798,6 +798,10 @@ export class ChatController {
     return this.profileLoadPromise;
   }
 
+  async reloadProfiles(): Promise<void> {
+    await this.loadProfiles();
+  }
+
   private async refreshProfiles(): Promise<void> {
     await this.loadProfiles();
   }
