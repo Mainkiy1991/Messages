@@ -5668,6 +5668,245 @@ describe("ChatController contact actions", () => {
     controller.stop();
   });
 
+  it("refreshes encrypted contacts after a newer contacts_updated frame", async () => {
+    let reads = 0;
+    const getContacts = vi.fn(async () => {
+      reads++;
+      return reads === 1
+        ? { version: "1", blob: null }
+        : {
+            version: "2",
+            blob: encryptContactBook({
+              historyKey: alice.historyKey,
+              contacts: { [bobId]: "Remote Bob" },
+              notes: { [bobId]: "remote note" },
+            }),
+          };
+    });
+    const controller = contactController({}, {}, { getContacts });
+    await loadContactBook(controller);
+    await deliverFrame(controller, { type: "contacts_updated", version: "2" });
+    await waitFor(
+      () => controller.getSnapshot().contacts[bobId] === "Remote Bob",
+    );
+    expect(controller.getSnapshot().contactNotes).toEqual({
+      [bobId]: "remote note",
+    });
+    expect(getContacts).toHaveBeenCalledTimes(2);
+    controller.stop();
+  });
+
+  it("refreshes contacts on reconnect but not as an extra first-connect read", async () => {
+    vi.stubGlobal("window", {});
+    let reads = 0;
+    const f = makeController({
+      initialSession: session("token-reconnect-contacts"),
+      getContacts: async () => {
+        reads++;
+        return reads === 1
+          ? { version: "1", blob: null }
+          : {
+              version: "2",
+              blob: encryptContactBook({
+                historyKey: alice.historyKey,
+                contacts: { [bobId]: "After reconnect" },
+                notes: {},
+              }),
+            };
+      },
+    });
+    const onState = (
+      f.controller as unknown as {
+        connection: { handlers: { onState(state: "connected"): void } };
+      }
+    ).connection.handlers.onState;
+    onState("connected");
+    await waitFor(() => f.controller.getSnapshot().contactsReady);
+    expect(reads).toBe(1);
+    onState("connected");
+    await waitFor(
+      () => f.controller.getSnapshot().contacts[bobId] === "After reconnect",
+    );
+    expect(reads).toBe(2);
+    f.controller.stop();
+  });
+
+  it.each(["1", "0", "", "12x", 2])(
+    "ignores equal, older, or malformed contact update versions (%s)",
+    async (version) => {
+      const getContacts = vi.fn(async () => ({ version: "2", blob: null }));
+      const controller = contactController(
+        { [bobId]: "Bob" },
+        {},
+        { getContacts },
+      );
+      await loadContactBook(controller);
+      const before = controller.getSnapshot();
+      await deliverFrame(controller, { type: "contacts_updated", version });
+      expect(getContacts).toHaveBeenCalledTimes(1);
+      expect(controller.getSnapshot()).toEqual(before);
+      controller.stop();
+    },
+  );
+
+  it("keeps local contact edits when an older background read overlaps a save", async () => {
+    let releaseSave!: (value: { version: string }) => void;
+    let releaseRead!: (value: ContactBookResponse) => void;
+    let saveStarted!: () => void;
+    let refreshStarted!: () => void;
+    const saveGate = new Promise<{ version: string }>((resolve) => {
+      releaseSave = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      saveStarted = resolve;
+    });
+    const refreshing = new Promise<void>((resolve) => {
+      refreshStarted = resolve;
+    });
+    let reads = 0;
+    const controller = contactController(
+      {},
+      {},
+      {
+        getContacts: async () => {
+          reads++;
+          if (reads === 1) return { version: "1", blob: null };
+          refreshStarted();
+          return new Promise<ContactBookResponse>((resolve) => {
+            releaseRead = resolve;
+          });
+        },
+        putContacts: async () => {
+          saveStarted();
+          return saveGate;
+        },
+      },
+    );
+    await loadContactBook(controller);
+    await deliverFrame(controller, { type: "contacts_updated", version: "2" });
+    await refreshing;
+    const edit = controller.addContact(bobId, "Local Bob");
+    await started;
+    releaseRead({
+      version: "1",
+      blob: encryptContactBook({
+        historyKey: alice.historyKey,
+        contacts: {},
+        notes: {},
+      }),
+    });
+    releaseSave({ version: "2" });
+    await expect(edit).resolves.toEqual({ ok: true });
+    expect(controller.getSnapshot().contacts).toEqual({ [bobId]: "Local Bob" });
+    controller.stop();
+  });
+
+  it("re-reads a newer remote contacts version received during a local write", async () => {
+    let releaseSave!: (value: { version: string }) => void;
+    let saveStarted!: () => void;
+    const saveGate = new Promise<{ version: string }>((resolve) => {
+      releaseSave = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      saveStarted = resolve;
+    });
+    let reads = 0;
+    const controller = contactController(
+      {},
+      {},
+      {
+        getContacts: async () => {
+          reads++;
+          return reads === 1
+            ? { version: "1", blob: null }
+            : {
+                version: "3",
+                blob: encryptContactBook({
+                  historyKey: alice.historyKey,
+                  contacts: {
+                    [bobId]: "Local Bob",
+                    [charlieId]: "Remote Carol",
+                  },
+                  notes: {},
+                }),
+              };
+        },
+        putContacts: async () => {
+          saveStarted();
+          return saveGate;
+        },
+      },
+    );
+    await loadContactBook(controller);
+    const edit = controller.addContact(bobId, "Local Bob");
+    await started;
+    await deliverFrame(controller, { type: "contacts_updated", version: "3" });
+    expect(reads).toBe(1);
+    releaseSave({ version: "2" });
+    await expect(edit).resolves.toEqual({ ok: true });
+    await waitFor(
+      () => controller.getSnapshot().contacts[charlieId] === "Remote Carol",
+    );
+    expect(controller.getSnapshot().contacts).toEqual({
+      [bobId]: "Local Bob",
+      [charlieId]: "Remote Carol",
+    });
+    expect(
+      (controller as unknown as { contactsVersion: string }).contactsVersion,
+    ).toBe("3");
+    expect(reads).toBe(2);
+    controller.stop();
+  });
+
+  it("does not re-read for the local write's own contacts update frame", async () => {
+    let releaseSave!: (value: { version: string }) => void;
+    let saveStarted!: () => void;
+    const saveGate = new Promise<{ version: string }>((resolve) => {
+      releaseSave = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      saveStarted = resolve;
+    });
+    const getContacts = vi.fn(async () => ({ version: "1", blob: null }));
+    const controller = contactController(
+      {},
+      {},
+      {
+        getContacts,
+        putContacts: async () => {
+          saveStarted();
+          return saveGate;
+        },
+      },
+    );
+    await loadContactBook(controller);
+    const edit = controller.addContact(bobId, "Local Bob");
+    await started;
+    await deliverFrame(controller, { type: "contacts_updated", version: "2" });
+    releaseSave({ version: "2" });
+    await expect(edit).resolves.toEqual({ ok: true });
+    expect(getContacts).toHaveBeenCalledTimes(1);
+    expect(controller.getSnapshot().contacts).toEqual({ [bobId]: "Local Bob" });
+    controller.stop();
+  });
+
+  it("silently ignores contact refresh fetch and decrypt failures", async () => {
+    const getContacts = vi.fn(async () => ({ version: "2", blob: "broken" }));
+    const controller = contactController(
+      { [bobId]: "Bob" },
+      {},
+      { getContacts },
+    );
+    await loadContactBook(controller);
+    const before = controller.getSnapshot();
+    await deliverFrame(controller, { type: "contacts_updated", version: "2" });
+    await waitFor(() => getContacts.mock.calls.length === 2);
+    await Promise.resolve();
+    expect(controller.getSnapshot()).toEqual(before);
+    expect(controller.getSnapshot().contactsError).toBe(false);
+    controller.stop();
+  });
+
   it.each(["", "A".repeat(64), "A".repeat(65)])(
     "rejects invalid contact ID %s without network",
     async (id) => {

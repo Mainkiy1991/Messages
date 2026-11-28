@@ -3822,4 +3822,57 @@ test.describe("real browser chat", () => {
     await expect(alice.page.locator(".chat-sidebar")).toBeVisible();
     await expect(alice.page.getByTestId("new-chat-screen")).toHaveCount(0);
   });
+
+  test("syncs renamed and removed contacts to another device without reloading", async ({
+    browser,
+  }) => {
+    const first = await openUser(browser);
+    const bobUser = await openUser(browser);
+    const alice = await createAccount(first.page);
+    const bob = await createAccount(bobUser.page);
+    await openChat(first.page, bob.id);
+    await send(first.page, "Contact sync conversation");
+    await expect(
+      first.page
+        .locator('[data-testid="message"][data-direction="out"]')
+        .filter({ hasText: startsWithText("Contact sync conversation") }),
+    ).toBeVisible();
+    await first.page.getByTestId("profile").click();
+    await first.page.getByTestId("profile-contacts").click();
+    await first.page.getByTestId("contact-add-open").click();
+    await first.page.getByTestId("contact-add-id").fill(bob.id);
+    await first.page.getByTestId("contact-add-name").fill("Bob Original");
+    await first.page.getByTestId("contact-add-submit").click();
+    await expect(first.page.getByTestId("contact-row")).toContainText(
+      "Bob Original",
+    );
+    await first.page.getByTestId("contact-row").click();
+    await first.page.getByTestId("contacts-back").click();
+    await first.page.getByTestId("contacts-back").click();
+    await expect(first.page.locator(".contact-name-trigger")).toContainText(
+      "Bob Original",
+    );
+
+    const second = await openUser(browser);
+    expect(await signIn(second.page, alice.phrase)).toBe(alice.id);
+    const secondChat = chatWith(second.page, bob.id);
+    await expect(secondChat).toHaveText(startsWithText("Bob Original"));
+
+    await first.page.locator(".contact-name-trigger").click();
+    await first.page.getByRole("button", { name: "Edit name" }).click();
+    await first.page.getByTestId("contact-name-input").fill("Bob Renamed");
+    await first.page.getByTestId("contact-save-name").click();
+    await expect(first.page.getByTestId("contact-card-name")).toHaveText(
+      "Bob Renamed",
+    );
+    await first.page.getByTestId("contacts-back").click();
+    await expect(secondChat).toHaveText(startsWithText("Bob Renamed"));
+
+    await first.page.locator(".contact-name-trigger").click();
+    await first.page.getByTestId("contact-remove").click();
+    await first.page.getByTestId("contact-remove-confirm").click();
+    await expect(first.page.getByTestId("contact-row")).toHaveCount(0);
+    await first.page.getByTestId("contacts-back").click();
+    await expect(secondChat).toHaveText(startsWithText(bob.id.slice(-10)));
+  });
 });

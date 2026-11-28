@@ -62,6 +62,12 @@ const sequenceValueSchema = z
   .regex(/^\d{1,19}$/u)
   .refine((value) => BigInt(value) <= 9223372036854775807n);
 const userIdSchema = z.string().regex(/^[0-9a-f]{64}$/u);
+export const contactsUpdatedSchema = z
+  .object({
+    type: z.literal("contacts_updated"),
+    version: sequenceValueSchema,
+  })
+  .strict();
 export const conversationClearedSchema = z
   .object({
     type: z.literal("conversation_cleared"),

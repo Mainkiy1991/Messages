@@ -19,6 +19,7 @@ import { z } from "zod";
 import { loadConfig } from "./config.js";
 import {
   closeWebSocketsForToken,
+  contactsUpdatedSchema,
   conversationClearedSchema,
   decodeBase64Size,
   messageDeletedSchema,
@@ -1090,7 +1091,14 @@ export async function buildApp(options: {
        WHERE contact_books.version=$2::bigint RETURNING version::text AS version`,
         [request.userId, baseVersion, blob],
       );
-      if (updated.rowCount) return { version: updated.rows[0].version };
+      if (updated.rowCount) {
+        const version = updated.rows[0].version;
+        messageHub.sendToUser(
+          request.userId!,
+          contactsUpdatedSchema.parse({ type: "contacts_updated", version }),
+        );
+        return { version };
+      }
       const current = await pool.query(
         "SELECT version::text AS version, blob FROM contact_books WHERE user_id=$1",
         [request.userId],

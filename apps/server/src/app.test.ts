@@ -3222,6 +3222,90 @@ suite("server authentication (PostgreSQL)", () => {
     ).toBe(401);
   });
 
+  it("sends only the new contacts version to the owner's socket after a successful PUT", async () => {
+    const owner = await createAccount();
+    const socket = (await connectAuth(owner.token, await listen())).socket;
+    const framePromise = nextFrame(
+      socket,
+      (frame) => frame.type === "contacts_updated",
+    );
+    const response = await app.inject({
+      method: "PUT",
+      url: "/contacts",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { baseVersion: "0", blob: "YQ==" },
+    });
+    expect(response.json()).toEqual({ version: "1" });
+    const frame = await framePromise;
+    expect(frame).toEqual({ type: "contacts_updated", version: "1" });
+    expect(Object.keys(frame).sort()).toEqual(["type", "version"]);
+  });
+
+  it("does not send contact updates to another user's socket", async () => {
+    const owner = await createAccount();
+    const other = await createAccount();
+    const url = await listen();
+    const ownerSocket = (await connectAuth(owner.token, url)).socket;
+    const otherSocket = (await connectAuth(other.token, url)).socket;
+    const ownerFrame = nextFrame(
+      ownerSocket,
+      (frame) => frame.type === "contacts_updated",
+    );
+    const response = await app.inject({
+      method: "PUT",
+      url: "/contacts",
+      headers: { authorization: `Bearer ${owner.token}` },
+      payload: { baseVersion: "0", blob: "YQ==" },
+    });
+    expect(response.statusCode).toBe(200);
+    await expect(ownerFrame).resolves.toEqual({
+      type: "contacts_updated",
+      version: "1",
+    });
+    expect(
+      (frameBuffers.get(otherSocket) ?? []).filter(
+        (frame) => frame.type === "contacts_updated",
+      ),
+    ).toEqual([]);
+  });
+
+  it("sends no contact update for a version conflict", async () => {
+    const owner = await createAccount();
+    const socket = (await connectAuth(owner.token, await listen())).socket;
+    const put = (baseVersion: string, blob: string) =>
+      app.inject({
+        method: "PUT",
+        url: "/contacts",
+        headers: { authorization: `Bearer ${owner.token}` },
+        payload: { baseVersion, blob },
+      });
+    const firstFrame = nextFrame(
+      socket,
+      (frame) => frame.type === "contacts_updated",
+    );
+    expect((await put("0", "YQ==")).statusCode).toBe(200);
+    await expect(firstFrame).resolves.toEqual({
+      type: "contacts_updated",
+      version: "1",
+    });
+    const conflict = await put("0", "Yg==");
+    expect(conflict.statusCode).toBe(409);
+    const successFrame = nextFrame(
+      socket,
+      (frame) => frame.type === "contacts_updated",
+    );
+    expect((await put("1", "Yw==")).statusCode).toBe(200);
+    await expect(successFrame).resolves.toEqual({
+      type: "contacts_updated",
+      version: "2",
+    });
+    expect(
+      (frameBuffers.get(socket) ?? []).filter(
+        (frame) => frame.type === "contacts_updated",
+      ),
+    ).toEqual([]);
+  });
+
   it("serves WebSocket messages as decryptable sender history and recipient ciphertext", async () => {
     const sender = await createAccount();
     const recipient = await createAccount();
