@@ -6902,14 +6902,23 @@ describe("ChatController profiles", () => {
   });
 
   it("shares only for a brand new chat, not an existing or selected chat", async () => {
-    const putProfileShare = vi.fn(async () => ({ created: true }));
+    const putProfileShare = vi.fn<
+      NonNullable<ChatControllerDependencies["putProfileShare"]>
+    >(async () => ({ created: true }));
     const controller = contactController(
       {},
       {},
       {
         putProfileShare,
         getConversations: async () => ({
-          conversations: [{ peerId: charlieId, lastSeq: "0", unreadCount: 0 }],
+          conversations: [
+            {
+              peerId: charlieId,
+              lastSeq: "0",
+              unreadCount: 0,
+              lastCreatedAt: future(),
+            },
+          ],
           cleared: [],
         }),
         getHistory: async () => ({ hasMore: false, messages: [] }),
@@ -7008,7 +7017,9 @@ describe("ChatController profiles", () => {
   });
 
   it("shares the profile key once after sendText and the wrap opens for the peer", async () => {
-    const putProfileShare = vi.fn(async () => ({ created: true }));
+    const putProfileShare = vi.fn<
+      NonNullable<ChatControllerDependencies["putProfileShare"]>
+    >(async () => ({ created: true }));
     const f = makeController({
       initialSession: session("profile-share"),
       getHistory: async () => ({ hasMore: false, messages: [] }),
@@ -7044,7 +7055,9 @@ describe("ChatController profiles", () => {
   });
 
   it("does not share when sending to saved messages", async () => {
-    const putProfileShare = vi.fn(async () => ({ created: true }));
+    const putProfileShare = vi.fn<
+      NonNullable<ChatControllerDependencies["putProfileShare"]>
+    >(async () => ({ created: true }));
     const f = makeController({
       initialSession: session("saved-profile"),
       getHistory: async () => ({ hasMore: false, messages: [] }),
@@ -7066,7 +7079,7 @@ describe("ChatController profiles", () => {
 
   it("does not mark a peer shared when the share request fails", async () => {
     const putProfileShare = vi
-      .fn()
+      .fn<NonNullable<ChatControllerDependencies["putProfileShare"]>>()
       .mockRejectedValueOnce(new ApiError(500, "failed"))
       .mockResolvedValue({ created: true });
     const f = makeController({
@@ -7093,7 +7106,9 @@ describe("ChatController profiles", () => {
   });
 
   it("shares after a successful addContact and not after a failed one", async () => {
-    const putProfileShare = vi.fn(async () => ({ created: true }));
+    const putProfileShare = vi.fn<
+      NonNullable<ChatControllerDependencies["putProfileShare"]>
+    >(async () => ({ created: true }));
     const controller = contactController({}, {}, { putProfileShare });
     await loadContactBook(controller);
     expect(await controller.addContact(bobId, "Bob")).toEqual({ ok: true });
@@ -7278,11 +7293,9 @@ describe("ChatController profiles", () => {
   });
 
   it("gives up after repeated version conflicts", async () => {
-    const putProfile = vi.fn(
-      async (_token: string, _version: string, _blob: string) => {
-        throw new ApiError(409, "version_conflict", { version: "2" });
-      },
-    );
+    const putProfile = vi.fn(async () => {
+      throw new ApiError(409, "version_conflict", { version: "2" });
+    });
     const initial = encryptProfile({
       profileKey: deriveProfileKey(alice.historyKey),
       ownerId: aliceId,
