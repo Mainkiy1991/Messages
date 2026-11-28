@@ -57,6 +57,17 @@ export type HistoryMessage = {
   deleted?: boolean;
 };
 export type ContactBookResponse = { version: string; blob: string | null };
+export type ProfileResponse = { version: string; blob: string | null };
+export type PeerProfileItem = {
+  ownerId: string;
+  version: string;
+  blob: string;
+  wrap: string;
+};
+export type ProfilesPage = {
+  items: PeerProfileItem[];
+  nextAfter: string | null;
+};
 export type DeviceRow = {
   deviceId: string;
   labelCiphertext: string;
@@ -472,6 +483,60 @@ export function putContacts(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ baseVersion, blob }),
   });
+}
+
+export function getProfile(token: string, fetcher: FetchLike = fetch) {
+  return request<ProfileResponse>(fetcher, "/profile", token);
+}
+
+export function putProfile(
+  token: string,
+  baseVersion: string,
+  blob: string,
+  fetcher: FetchLike = fetch,
+) {
+  return request<{ version: string }>(fetcher, "/profile", token, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ baseVersion, blob }),
+  });
+}
+
+export function putProfileShare(
+  token: string,
+  peerId: string,
+  wrap: string,
+  fetcher: FetchLike = fetch,
+) {
+  return request<{ created: boolean }>(
+    fetcher,
+    `/profile/shares/${peerId}`,
+    token,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wrap }),
+    },
+  );
+}
+
+export function getPeerProfile(
+  token: string,
+  ownerId: string,
+  fetcher: FetchLike = fetch,
+) {
+  return request<PeerProfileItem>(fetcher, `/profiles/${ownerId}`, token);
+}
+
+export function getProfiles(
+  token: string,
+  after: string | null,
+  limit: number,
+  fetcher: FetchLike = fetch,
+) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (after) params.set("after", after);
+  return request<ProfilesPage>(fetcher, `/profiles?${params}`, token);
 }
 
 export function verifyUserKeys(peerId: string, value: UserKeys): Uint8Array {

@@ -6,6 +6,13 @@ import {
   encryptContactBook,
   encryptHistoryEntry,
   encryptTextMessage,
+  deriveProfileKey,
+  decryptProfile,
+  encryptProfile,
+  unwrapProfileKey,
+  wrapProfileKey,
+  PROFILE_NAME_MAX_CHARS,
+  PROFILE_ABOUT_MAX_CHARS,
   MAX_EDIT_REV,
   newClientMsgId,
   newReplayMessageId,
@@ -14,6 +21,9 @@ import {
 import { MAX_CONVERSATIONS } from "@messages/shared";
 import {
   getContacts,
+  getProfile,
+  getProfiles,
+  getPeerProfile,
   getConversations,
   getHistory,
   getHistoryAfter,
@@ -23,6 +33,8 @@ import {
   eraseConversation as eraseConversationRequest,
   deleteMessage as deleteMessageRow,
   putContacts,
+  putProfile,
+  putProfileShare,
   getDevices,
   revokeDevice as revokeDeviceRequest,
   revokeOtherDevices as revokeOtherDevicesRequest,
@@ -32,6 +44,9 @@ import {
   type HistoryMessage,
   type DevicesResponse,
   type RevokeOthersResponse,
+  type ProfileResponse,
+  type PeerProfileItem,
+  type ProfilesPage,
 } from "./api.js";
 import { decryptDevices, type DeviceInfo } from "./devices.js";
 import { indexedDbOutbox, type OutboxStore } from "./outbox.js";
@@ -101,7 +116,19 @@ export type ChatControllerState = {
   contactsReady: boolean;
   waking: boolean;
   presence: Record<string, { online: boolean; lastSeenAt: string | null }>;
+  ownProfile: { name: string; about: string } | null;
+  ownProfileReady: boolean;
+  peerProfiles: Record<string, { name: string; about: string }>;
 };
+export type ProfileError =
+  | "name_required"
+  | "name_too_long"
+  | "about_too_long"
+  | "invalid_chars"
+  | "profile_not_loaded"
+  | "server_unavailable"
+  | "save_failed";
+export type ProfileResult = { ok: true } | { ok: false; error: ProfileError };
 export type ContactError =
   | "invalid_id"
   | "own_id"
@@ -216,6 +243,23 @@ export type ChatControllerDependencies = {
   /** Erases the content of your own row; the answer is an empty 204. */
   deleteMessage?: (id: string, token: string) => Promise<void>;
   getContacts?: (token: string) => Promise<ContactBookResponse>;
+  getProfile?: (token: string) => Promise<ProfileResponse>;
+  putProfile?: (
+    token: string,
+    baseVersion: string,
+    blob: string,
+  ) => Promise<{ version: string }>;
+  putProfileShare?: (
+    token: string,
+    peerId: string,
+    wrap: string,
+  ) => Promise<{ created: boolean }>;
+  getPeerProfile?: (token: string, ownerId: string) => Promise<PeerProfileItem>;
+  getProfiles?: (
+    token: string,
+    after: string | null,
+    limit: number,
+  ) => Promise<ProfilesPage>;
   getHistoryAfter?: (
     peerId: string,
     token: string,
@@ -249,6 +293,18 @@ export class ChatController {
   private contactsRefreshAgain = false;
   private contactsPendingVersion: bigint | null = null;
   private contactsPendingForce = false;
+  private ownProfileVersion = "0";
+  private profileWriting = 0;
+  private profileRefreshing = false;
+  private profileRefreshAgain = false;
+  private profilePendingVersion: bigint | null = null;
+  private profilePendingForce = false;
+  private profileLoadPromise: Promise<void> | null = null;
+  private peerProfileVersions = new Map<string, string>();
+  private peerProfileRequests = new Map<string, Promise<void>>();
+  private peerProfileAgain = new Set<string>();
+  private profileShared = new Set<string>();
+  private profileSharing = new Set<string>();
   private outboxLoaded = false;
   private accountDataLoading: Promise<void> | null = null;
   private readonly accountDataRetryTimers = new Map<
@@ -300,6 +356,9 @@ export class ChatController {
     contactsReady: false,
     waking: false,
     presence: {},
+    ownProfile: null,
+    ownProfileReady: false,
+    peerProfiles: {},
   };
 
   constructor(
@@ -331,6 +390,7 @@ export class ChatController {
             if (this.hasConnected) {
               void this.refreshHistoryHeads();
               void this.refreshContacts();
+              void this.refreshProfiles();
             }
             this.hasConnected = true;
           }
@@ -404,6 +464,8 @@ export class ChatController {
       if (!this.conversationsLoaded)
         await this.loadConversations(session.token);
       if (!this.contactsLoaded) await this.loadContacts(session.token);
+      if (this.conversationsLoaded && this.contactsLoaded)
+        void this.loadProfiles();
       if (this.conversationsLoaded) {
         await this.flushOutbox();
         this.connection.setSendingPaused(false);
@@ -707,6 +769,346 @@ export class ChatController {
         this.contactsRefreshAgain = false;
         void this.refreshContacts();
       }
+    }
+  }
+
+  private loadProfiles(): Promise<void> {
+    if (this.profileLoadPromise) return this.profileLoadPromise;
+    this.profileLoadPromise = (async () => {
+      await this.refreshOwnProfile();
+      let after: string | null = null;
+      for (let pageNumber = 0; pageNumber < 20 && !this.stopped; pageNumber++) {
+        const session = await this.connection.ensureSession();
+        const get =
+          this.deps.getProfiles ??
+          ((token, cursor, limit) =>
+            getProfiles(token, cursor, limit, this.deps.fetcher));
+        const page = await this.withFreshSession(session.token, (token) =>
+          get(token, after, 100),
+        );
+        await this.applyPeerProfilePage(page);
+        if (!page.nextAfter || page.nextAfter === after) break;
+        after = page.nextAfter;
+      }
+    })()
+      .catch(() => {})
+      .finally(() => {
+        this.profileLoadPromise = null;
+      });
+    return this.profileLoadPromise;
+  }
+
+  async reloadProfiles(): Promise<void> {
+    await this.loadProfiles();
+  }
+
+  private async refreshProfiles(): Promise<void> {
+    await this.loadProfiles();
+  }
+
+  private async applyPeerProfilePage(page: ProfilesPage): Promise<void> {
+    for (let start = 0; start < page.items.length; start += 4) {
+      const accepted: Array<{
+        ownerId: string;
+        version: string;
+        profile: { name: string; about: string };
+      }> = [];
+      await Promise.all(
+        page.items.slice(start, start + 4).map(async (item) => {
+          try {
+            const version = this.validProfileVersion(item.version);
+            if (
+              !version ||
+              item.ownerId === this.userId ||
+              version <=
+                BigInt(this.peerProfileVersions.get(item.ownerId) ?? "0")
+            )
+              return;
+            const key = await this.getVerifiedPeerKey(item.ownerId);
+            const profileKey = unwrapProfileKey({
+              recipientEncryptionPrivateKey: this.keys.encryption.privateKey,
+              ownerEncryptionPublicKey: key,
+              ownerId: item.ownerId,
+              recipientId: this.userId,
+              wrap: item.wrap,
+            });
+            const profile = decryptProfile({
+              profileKey,
+              ownerId: item.ownerId,
+              blob: item.blob,
+            });
+            accepted.push({
+              ownerId: item.ownerId,
+              version: item.version,
+              profile,
+            });
+          } catch {
+            /* Invalid or inaccessible profiles are skipped. */
+          }
+        }),
+      );
+      if (!accepted.length || this.stopped) continue;
+      const peerProfiles = { ...this.state.peerProfiles };
+      for (const item of accepted) {
+        if (
+          BigInt(item.version) <=
+          BigInt(this.peerProfileVersions.get(item.ownerId) ?? "0")
+        )
+          continue;
+        peerProfiles[item.ownerId] = item.profile;
+        this.peerProfileVersions.set(item.ownerId, item.version);
+      }
+      this.update({ peerProfiles });
+    }
+  }
+
+  private validProfileVersion(value: unknown): bigint | null {
+    return typeof value === "string" && /^\d{1,19}$/u.test(value)
+      ? BigInt(value)
+      : null;
+  }
+
+  private async refreshOwnProfile(): Promise<void> {
+    if (this.stopped) return;
+    if (this.profileWriting > 0) {
+      this.profilePendingForce = true;
+      return;
+    }
+    if (this.profileRefreshing) {
+      this.profileRefreshAgain = true;
+      return;
+    }
+    this.profileRefreshing = true;
+    try {
+      const session = await this.connection.ensureSession();
+      const get =
+        this.deps.getProfile ??
+        ((token) => getProfile(token, this.deps.fetcher));
+      const response = await this.withFreshSession(session.token, get);
+      const version = this.validProfileVersion(response.version);
+      if (version === null || this.stopped) return;
+      if (this.profileWriting > 0) {
+        if (
+          this.profilePendingVersion === null ||
+          version > this.profilePendingVersion
+        )
+          this.profilePendingVersion = version;
+        return;
+      }
+      if (response.blob === null && response.version === "0") {
+        if (version < BigInt(this.ownProfileVersion)) return;
+        if (version > BigInt(this.ownProfileVersion))
+          this.ownProfileVersion = response.version;
+        if (!this.state.ownProfileReady || this.state.ownProfile !== null)
+          this.update({ ownProfile: null, ownProfileReady: true });
+        return;
+      }
+      if (
+        typeof response.blob !== "string" ||
+        version <= BigInt(this.ownProfileVersion)
+      )
+        return;
+      const ownProfile = decryptProfile({
+        profileKey: deriveProfileKey(this.keys.historyKey),
+        ownerId: this.userId,
+        blob: response.blob,
+      });
+      if (
+        this.stopped ||
+        this.profileWriting > 0 ||
+        version <= BigInt(this.ownProfileVersion)
+      )
+        return;
+      this.ownProfileVersion = response.version;
+      this.update({ ownProfile, ownProfileReady: true });
+    } catch {
+      /* Background profile reads fail silently. */
+    } finally {
+      this.profileRefreshing = false;
+      if (this.profileRefreshAgain) {
+        this.profileRefreshAgain = false;
+        void this.refreshOwnProfile();
+      }
+    }
+  }
+
+  private async refreshPeerProfile(ownerId: string): Promise<void> {
+    if (this.stopped) return;
+    const running = this.peerProfileRequests.get(ownerId);
+    if (running) {
+      this.peerProfileAgain.add(ownerId);
+      return running;
+    }
+    const request = (async () => {
+      try {
+        const session = await this.connection.ensureSession();
+        const get =
+          this.deps.getPeerProfile ??
+          ((token, id) => getPeerProfile(token, id, this.deps.fetcher));
+        const item = await this.withFreshSession(session.token, (token) =>
+          get(token, ownerId),
+        );
+        const version = this.validProfileVersion(item.version);
+        if (
+          !version ||
+          item.ownerId !== ownerId ||
+          version <= BigInt(this.peerProfileVersions.get(ownerId) ?? "0") ||
+          this.stopped
+        )
+          return;
+        const key = await this.getVerifiedPeerKey(ownerId);
+        const profileKey = unwrapProfileKey({
+          recipientEncryptionPrivateKey: this.keys.encryption.privateKey,
+          ownerEncryptionPublicKey: key,
+          ownerId,
+          recipientId: this.userId,
+          wrap: item.wrap,
+        });
+        const profile = decryptProfile({
+          profileKey,
+          ownerId,
+          blob: item.blob,
+        });
+        if (
+          this.stopped ||
+          version <= BigInt(this.peerProfileVersions.get(ownerId) ?? "0")
+        )
+          return;
+        this.peerProfileVersions.set(ownerId, item.version);
+        this.update({
+          peerProfiles: { ...this.state.peerProfiles, [ownerId]: profile },
+        });
+      } catch {
+        /* Missing or inaccessible profiles fail silently. */
+      }
+    })();
+    this.peerProfileRequests.set(ownerId, request);
+    try {
+      await request;
+    } finally {
+      this.peerProfileRequests.delete(ownerId);
+      if (this.peerProfileAgain.delete(ownerId))
+        void this.refreshPeerProfile(ownerId);
+    }
+  }
+
+  async saveOwnProfile(
+    nameInput: string,
+    aboutInput = "",
+  ): Promise<ProfileResult> {
+    if (!this.state.ownProfileReady)
+      return { ok: false, error: "profile_not_loaded" };
+    const name = nameInput.trim();
+    const about = aboutInput.trim();
+    if (!name) return { ok: false, error: "name_required" };
+    if (Array.from(name).length > PROFILE_NAME_MAX_CHARS)
+      return { ok: false, error: "name_too_long" };
+    if (Array.from(about).length > PROFILE_ABOUT_MAX_CHARS)
+      return { ok: false, error: "about_too_long" };
+    let blob: string;
+    try {
+      blob = encryptProfile({
+        profileKey: deriveProfileKey(this.keys.historyKey),
+        ownerId: this.userId,
+        name,
+        about,
+      });
+    } catch (error) {
+      if (error instanceof TypeError)
+        return { ok: false, error: "invalid_chars" };
+      return { ok: false, error: "save_failed" };
+    }
+    this.profileWriting++;
+    try {
+      const session = await this.connection.ensureSession();
+      const put =
+        this.deps.putProfile ??
+        ((token, base, value) =>
+          putProfile(token, base, value, this.deps.fetcher));
+      let baseVersion = this.ownProfileVersion;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const result = await this.withFreshSession(session.token, (token) =>
+            put(token, baseVersion, blob),
+          );
+          this.ownProfileVersion = result.version;
+          this.update({ ownProfile: { name, about }, ownProfileReady: true });
+          return { ok: true };
+        } catch (error) {
+          if (
+            error instanceof ApiError &&
+            error.status === 409 &&
+            error.code === "version_conflict"
+          ) {
+            const version = this.validProfileVersion(error.data?.version);
+            if (version === null) return { ok: false, error: "save_failed" };
+            baseVersion = String(version);
+            continue;
+          }
+          if (
+            error instanceof TypeError ||
+            (error instanceof ApiError &&
+              (error.status === 0 || error.code === "network_timeout"))
+          )
+            return { ok: false, error: "server_unavailable" };
+          return { ok: false, error: "save_failed" };
+        }
+      }
+      return { ok: false, error: "save_failed" };
+    } catch (error) {
+      return {
+        ok: false,
+        error:
+          error instanceof TypeError ||
+          (error instanceof ApiError && error.status === 0)
+            ? "server_unavailable"
+            : "save_failed",
+      };
+    } finally {
+      this.profileWriting--;
+      if (this.profileWriting === 0) {
+        const shouldRefresh =
+          this.profilePendingForce ||
+          (this.profilePendingVersion !== null &&
+            this.profilePendingVersion > BigInt(this.ownProfileVersion));
+        this.profilePendingForce = false;
+        this.profilePendingVersion = null;
+        if (shouldRefresh) void this.refreshOwnProfile();
+      }
+    }
+  }
+
+  private async shareProfileWith(peerId: string): Promise<void> {
+    if (
+      peerId === this.userId ||
+      this.stopped ||
+      this.profileShared.has(peerId) ||
+      this.profileSharing.has(peerId)
+    )
+      return;
+    this.profileSharing.add(peerId);
+    try {
+      const key = await this.getVerifiedPeerKey(peerId);
+      const wrap = wrapProfileKey({
+        ownerEncryptionPrivateKey: this.keys.encryption.privateKey,
+        recipientEncryptionPublicKey: key,
+        ownerId: this.userId,
+        recipientId: peerId,
+        profileKey: deriveProfileKey(this.keys.historyKey),
+      });
+      const session = await this.connection.ensureSession();
+      const put =
+        this.deps.putProfileShare ??
+        ((token, id, value) =>
+          putProfileShare(token, id, value, this.deps.fetcher));
+      await this.withFreshSession(session.token, (token) =>
+        put(token, peerId, wrap),
+      );
+      this.profileShared.add(peerId);
+    } catch {
+      /* Sharing is best effort and retried on the next action. */
+    } finally {
+      this.profileSharing.delete(peerId);
     }
   }
 
@@ -1436,7 +1838,7 @@ export class ChatController {
     } catch (error) {
       return { ok: false, error: this.peerKeyError(error) as ContactError };
     }
-    return this.mutateContactBook((book) => {
+    const result = await this.mutateContactBook((book) => {
       if (peerId in book.contacts) return "already_contact";
       if (Object.keys(book.contacts).length >= CONTACT_LIMIT)
         return "limit_reached";
@@ -1445,6 +1847,8 @@ export class ChatController {
       if (note.value) notes[peerId] = note.value;
       return { contacts, notes };
     });
+    if (result.ok) void this.shareProfileWith(peerId);
+    return result;
   }
 
   async renameContact(
@@ -1547,11 +1951,13 @@ export class ChatController {
       this.setError(this.peerKeyError(error));
       return;
     }
-    if (
+    const isNewChat =
       !this.serverConversationPeers.has(peerId) &&
-      !this.state.chats.some((chat) => chat.peerId === peerId)
-    )
+      !this.state.chats.some((chat) => chat.peerId === peerId);
+    if (isNewChat) {
       this.sessionLocalPeers.add(peerId);
+      void this.shareProfileWith(peerId);
+    }
     try {
       const now = new Date((this.deps.now ?? Date.now)()).toISOString();
       const chats = this.state.chats.some((chat) => chat.peerId === peerId)
@@ -1847,6 +2253,7 @@ export class ChatController {
       this.upsertMessage(peerId, message);
       this.update({ error: "" });
       this.connection.send(frame);
+      if (peerId !== this.userId) void this.shareProfileWith(peerId);
     } catch {
       this.setError("server_unavailable");
     }
@@ -2295,6 +2702,32 @@ export class ChatController {
   }
 
   private async handleFrame(frame: IncomingFrame): Promise<void> {
+    if (frame.type === "profile_updated") {
+      if (this.stopped) return;
+      if (
+        typeof frame.owner !== "string" ||
+        !/^[0-9a-f]{64}$/u.test(frame.owner) ||
+        typeof frame.version !== "string" ||
+        !/^\d{1,19}$/u.test(frame.version)
+      )
+        return;
+      const version = BigInt(frame.version);
+      if (frame.owner === this.userId) {
+        if (version > BigInt(this.ownProfileVersion)) {
+          if (this.profileWriting > 0) {
+            if (
+              this.profilePendingVersion === null ||
+              version > this.profilePendingVersion
+            )
+              this.profilePendingVersion = version;
+          } else void this.refreshOwnProfile();
+        }
+      } else if (
+        version > BigInt(this.peerProfileVersions.get(frame.owner) ?? "0")
+      )
+        void this.refreshPeerProfile(frame.owner);
+      return;
+    }
     if (
       frame.type === "contacts_updated" &&
       typeof frame.version === "string" &&
