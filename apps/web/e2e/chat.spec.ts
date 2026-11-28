@@ -3840,6 +3840,7 @@ test.describe("real browser chat", () => {
     await expect(first.page.getByTestId("contact-row")).toContainText(
       "Bob Original",
     );
+    await first.page.getByTestId("contact-row").click();
     await first.page.getByTestId("contacts-back").click();
     await first.page.getByTestId("contacts-back").click();
     await expect(first.page.locator(".contact-name-trigger")).toContainText(
