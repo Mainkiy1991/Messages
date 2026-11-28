@@ -244,6 +244,9 @@ export class ChatController {
   private contactsVersion = "0";
   private conversationsLoaded = false;
   private contactsLoaded = false;
+  private contactsWriting = 0;
+  private contactsRefreshing = false;
+  private contactsRefreshAgain = false;
   private outboxLoaded = false;
   private accountDataLoading: Promise<void> | null = null;
   private readonly accountDataRetryTimers = new Map<
@@ -323,7 +326,10 @@ export class ChatController {
             typeof window !== "undefined"
           ) {
             void this.loadAccountData();
-            if (this.hasConnected) void this.refreshHistoryHeads();
+            if (this.hasConnected) {
+              void this.refreshHistoryHeads();
+              void this.refreshContacts();
+            }
             this.hasConnected = true;
           }
         },
@@ -634,6 +640,52 @@ export class ChatController {
       const result = await request(session.token);
       this.markServerResponded();
       return result;
+    }
+  }
+
+  private async refreshContacts(): Promise<void> {
+    if (!this.contactsLoaded || this.stopped || this.contactsWriting > 0)
+      return;
+    if (this.contactsRefreshing) {
+      this.contactsRefreshAgain = true;
+      return;
+    }
+    this.contactsRefreshing = true;
+    try {
+      const session = await this.connection.ensureSession();
+      const get =
+        this.deps.getContacts ??
+        ((token: string) => getContacts(token, this.deps.fetcher));
+      const book = await get(session.token);
+      if (
+        this.stopped ||
+        this.contactsWriting > 0 ||
+        typeof book.version !== "string" ||
+        !/^\d{1,19}$/u.test(book.version) ||
+        typeof book.blob !== "string" ||
+        BigInt(book.version) <= BigInt(this.contactsVersion)
+      )
+        return;
+      const { contacts, notes: contactNotes } = decryptContactBookFull({
+        historyKey: this.keys.historyKey,
+        blob: book.blob,
+      });
+      if (
+        this.stopped ||
+        this.contactsWriting > 0 ||
+        BigInt(book.version) <= BigInt(this.contactsVersion)
+      )
+        return;
+      this.contactsVersion = book.version;
+      this.update({ contacts, contactNotes });
+    } catch {
+      // Background refreshes are retried on the next frame or reconnect.
+    } finally {
+      this.contactsRefreshing = false;
+      if (this.contactsRefreshAgain) {
+        this.contactsRefreshAgain = false;
+        void this.refreshContacts();
+      }
     }
   }
 
@@ -1190,97 +1242,102 @@ export class ChatController {
       | { contacts: Record<string, string>; notes: Record<string, string> }
       | ContactError,
   ): Promise<ContactResult> {
-    const initial = {
-      contacts: { ...this.state.contacts },
-      notes: { ...this.state.contactNotes },
-    };
-    let book = apply(initial);
-    if (typeof book === "string") return { ok: false, error: book };
-    const save =
-      this.deps.putContacts ??
-      ((token, version, blob) =>
-        putContacts(token, version, blob, this.deps.fetcher));
-    const fetchBook =
-      this.deps.getContacts ??
-      ((token) => getContacts(token, this.deps.fetcher));
+    this.contactsWriting++;
     try {
-      const session = await this.connection.ensureSession();
-      let version = this.contactsVersion;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          let encrypted: string;
+      const initial = {
+        contacts: { ...this.state.contacts },
+        notes: { ...this.state.contactNotes },
+      };
+      let book = apply(initial);
+      if (typeof book === "string") return { ok: false, error: book };
+      const save =
+        this.deps.putContacts ??
+        ((token, version, blob) =>
+          putContacts(token, version, blob, this.deps.fetcher));
+      const fetchBook =
+        this.deps.getContacts ??
+        ((token) => getContacts(token, this.deps.fetcher));
+      try {
+        const session = await this.connection.ensureSession();
+        let version = this.contactsVersion;
+        for (let attempt = 0; attempt < 3; attempt++) {
           try {
-            encrypted = encryptContactBook({
-              historyKey: this.keys.historyKey,
-              contacts: book.contacts,
-              notes: book.notes,
-            });
-          } catch (error) {
-            if (error instanceof RangeError)
-              return { ok: false, error: "book_too_large" };
-            return { ok: false, error: "save_failed" };
-          }
-          const result = await save(session.token, version, encrypted);
-          this.contactsVersion = result.version;
-          this.update({
-            contacts: book.contacts,
-            contactNotes: book.notes,
-            contactsError: false,
-          });
-          return { ok: true };
-        } catch (error) {
-          if (
-            !(error instanceof ApiError) ||
-            error.status !== 409 ||
-            error.code !== "version_conflict" ||
-            attempt === 2
-          )
-            throw error;
-          const conflict = error.data;
-          const latest: ContactBookResponse =
-            conflict &&
-            typeof conflict.version === "string" &&
-            (typeof conflict.blob === "string" || conflict.blob === null)
-              ? { version: conflict.version, blob: conflict.blob }
-              : await fetchBook(session.token);
-          let remote: {
-            contacts: Record<string, string>;
-            notes: Record<string, string>;
-          };
-          try {
-            remote = latest.blob
-              ? decryptContactBookFull({
-                  historyKey: this.keys.historyKey,
-                  blob: latest.blob,
-                })
-              : { contacts: {}, notes: {} };
-          } catch {
-            return { ok: false, error: "save_failed" };
-          }
-          book = apply(remote);
-          if (typeof book === "string") {
-            this.contactsVersion = latest.version;
+            let encrypted: string;
+            try {
+              encrypted = encryptContactBook({
+                historyKey: this.keys.historyKey,
+                contacts: book.contacts,
+                notes: book.notes,
+              });
+            } catch (error) {
+              if (error instanceof RangeError)
+                return { ok: false, error: "book_too_large" };
+              return { ok: false, error: "save_failed" };
+            }
+            const result = await save(session.token, version, encrypted);
+            this.contactsVersion = result.version;
             this.update({
-              contacts: remote.contacts,
-              contactNotes: remote.notes,
+              contacts: book.contacts,
+              contactNotes: book.notes,
+              contactsError: false,
             });
-            return { ok: false, error: book };
+            return { ok: true };
+          } catch (error) {
+            if (
+              !(error instanceof ApiError) ||
+              error.status !== 409 ||
+              error.code !== "version_conflict" ||
+              attempt === 2
+            )
+              throw error;
+            const conflict = error.data;
+            const latest: ContactBookResponse =
+              conflict &&
+              typeof conflict.version === "string" &&
+              (typeof conflict.blob === "string" || conflict.blob === null)
+                ? { version: conflict.version, blob: conflict.blob }
+                : await fetchBook(session.token);
+            let remote: {
+              contacts: Record<string, string>;
+              notes: Record<string, string>;
+            };
+            try {
+              remote = latest.blob
+                ? decryptContactBookFull({
+                    historyKey: this.keys.historyKey,
+                    blob: latest.blob,
+                  })
+                : { contacts: {}, notes: {} };
+            } catch {
+              return { ok: false, error: "save_failed" };
+            }
+            book = apply(remote);
+            if (typeof book === "string") {
+              this.contactsVersion = latest.version;
+              this.update({
+                contacts: remote.contacts,
+                contactNotes: remote.notes,
+              });
+              return { ok: false, error: book };
+            }
+            version = latest.version;
           }
-          version = latest.version;
         }
+      } catch (error) {
+        /* localized UI error is displayed by the caller */
+        if (error instanceof RangeError)
+          return { ok: false, error: "book_too_large" };
+        if (
+          error instanceof TypeError ||
+          (error instanceof ApiError &&
+            (error.status === 0 || error.code === "network_timeout"))
+        )
+          return { ok: false, error: "server_unavailable" };
       }
-    } catch (error) {
-      /* localized UI error is displayed by the caller */
-      if (error instanceof RangeError)
-        return { ok: false, error: "book_too_large" };
-      if (
-        error instanceof TypeError ||
-        (error instanceof ApiError &&
-          (error.status === 0 || error.code === "network_timeout"))
-      )
-        return { ok: false, error: "server_unavailable" };
+      return { ok: false, error: "save_failed" };
+    } finally {
+      this.contactsWriting--;
     }
-    return { ok: false, error: "save_failed" };
   }
 
   async saveContactName(peerId: string, value: string): Promise<boolean> {
@@ -2208,6 +2265,18 @@ export class ChatController {
   }
 
   private async handleFrame(frame: IncomingFrame): Promise<void> {
+    if (
+      frame.type === "contacts_updated" &&
+      typeof frame.version === "string" &&
+      /^\d{1,19}$/u.test(frame.version)
+    ) {
+      if (
+        this.contactsLoaded &&
+        BigInt(frame.version) > BigInt(this.contactsVersion)
+      )
+        void this.refreshContacts();
+      return;
+    }
     if (
       frame.type === "messages_erased" &&
       typeof frame.from === "string" &&
