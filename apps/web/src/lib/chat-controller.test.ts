@@ -6930,6 +6930,8 @@ describe("ChatController profiles", () => {
     expect(putProfileShare).toHaveBeenCalledTimes(1);
     controller.selectChat(bobId);
     await waitFor(() => controller.getSnapshot().activePeer === bobId);
+    controller.selectChat(charlieId);
+    await waitFor(() => controller.getSnapshot().activePeer === charlieId);
     for (let i = 0; i < 4; i++) await Promise.resolve();
     expect(putProfileShare).toHaveBeenCalledTimes(1);
     controller.stop();
