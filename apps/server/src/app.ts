@@ -14,6 +14,8 @@ import {
   verifyDeviceAuth,
   verifyDeviceRegistration,
   verifyKeyBinding,
+  PROFILE_BLOB_MAX_LENGTH,
+  PROFILE_WRAP_MAX_LENGTH,
 } from "@messages/crypto";
 import { z } from "zod";
 import { loadConfig } from "./config.js";
@@ -25,6 +27,7 @@ import {
   messageDeletedSchema,
   messageUpdatedSchema,
   messagesErasedSchema,
+  profileUpdatedSchema,
   registerWebSocket,
 } from "./ws.js";
 import { MAX_CONVERSATIONS } from "@messages/shared";
@@ -109,6 +112,44 @@ const contactsSchema = z
       ),
   })
   .strict();
+const profileSchema = z
+  .object({
+    baseVersion: z
+      .string()
+      .refine(
+        (value) =>
+          /^\d{1,19}$/u.test(value) && BigInt(value) <= 9223372036854775806n,
+      ),
+    blob: z
+      .string()
+      .regex(
+        /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u,
+      ),
+  })
+  .strict();
+const profileWrapSchema = z
+  .object({
+    wrap: z
+      .string()
+      .regex(
+        /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u,
+      ),
+  })
+  .strict();
+const profilesQuerySchema = z
+  .object({
+    after: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/u)
+      .optional(),
+    limit: z
+      .string()
+      .regex(/^\d+$/u)
+      .optional()
+      .transform((value) => (value === undefined ? 50 : Number(value)))
+      .refine((value) => value >= 1 && value <= 100),
+  })
+  .strict();
 const challenges = new Map<string, { challenge: string; expiresAt: number }>();
 const emptyBodySchema = z.object({}).strict();
 const base64Schema = z
@@ -167,6 +208,7 @@ export async function buildApp(options: {
   trustProxy?: boolean;
   wsAuthTimeoutMs?: number;
   wsBatchSize?: number;
+  profileSharesLimit?: number;
 }): Promise<FastifyInstance> {
   const config = loadConfig({
     ...process.env,
@@ -1108,6 +1150,161 @@ export async function buildApp(options: {
         version: current.rows[0]?.version ?? "0",
         blob: current.rows[0]?.blob ?? null,
       });
+    },
+  );
+  app.get("/profile", { preHandler: authenticate }, async (request) => {
+    const result = await pool.query(
+      "SELECT version::text AS version, blob FROM profiles WHERE user_id=$1",
+      [request.userId],
+    );
+    return result.rowCount ? result.rows[0] : { version: "0", blob: null };
+  });
+  app.put(
+    "/profile",
+    {
+      preHandler: authenticate,
+      bodyLimit: 8 * 1024,
+      config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      const parsed = profileSchema.safeParse(request.body);
+      if (!parsed.success)
+        return reply.code(400).send({ error: "invalid_request" });
+      const { baseVersion, blob } = parsed.data;
+      const decoded = Buffer.from(blob, "base64");
+      if (
+        blob.length > PROFILE_BLOB_MAX_LENGTH ||
+        decoded.length < 41 ||
+        decoded.toString("base64") !== blob
+      )
+        return reply.code(400).send({ error: "invalid_request" });
+      const updated = await pool.query(
+        `INSERT INTO profiles(user_id,version,blob) SELECT $1,1,$3 WHERE $2::bigint=0 OR EXISTS(SELECT 1 FROM profiles WHERE user_id=$1) ON CONFLICT(user_id) DO UPDATE SET version=profiles.version+1,blob=EXCLUDED.blob,updated_at=now() WHERE profiles.version=$2::bigint RETURNING version::text AS version`,
+        [request.userId, baseVersion, blob],
+      );
+      if (updated.rowCount) {
+        const version = updated.rows[0].version;
+        const frame = profileUpdatedSchema.parse({
+          type: "profile_updated",
+          owner: request.userId,
+          version,
+        });
+        messageHub.sendToUser(request.userId!, frame);
+        const recipients = await pool.query<{ recipient_id: string }>(
+          "SELECT recipient_id FROM profile_shares WHERE owner_id=$1",
+          [request.userId],
+        );
+        for (const row of recipients.rows)
+          messageHub.sendToUser(row.recipient_id, frame);
+        return { version };
+      }
+      const current = await pool.query(
+        "SELECT version::text AS version,blob FROM profiles WHERE user_id=$1",
+        [request.userId],
+      );
+      return reply.code(409).send({
+        error: "version_conflict",
+        version: current.rows[0]?.version ?? "0",
+        blob: current.rows[0]?.blob ?? null,
+      });
+    },
+  );
+  app.put<{ Params: { peerId: string } }>(
+    "/profile/shares/:peerId",
+    {
+      preHandler: authenticate,
+      bodyLimit: 1024,
+      config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      const { peerId } = request.params;
+      if (!/^[0-9a-f]{64}$/u.test(peerId))
+        return reply.code(404).send({ error: "not_found" });
+      const parsed = profileWrapSchema.safeParse(request.body);
+      if (!parsed.success)
+        return reply.code(400).send({ error: "invalid_request" });
+      const { wrap } = parsed.data;
+      if (
+        wrap.length > PROFILE_WRAP_MAX_LENGTH ||
+        Buffer.from(wrap, "base64").toString("base64") !== wrap ||
+        Buffer.from(wrap, "base64").length !== 73 ||
+        peerId === request.userId
+      )
+        return reply.code(400).send({ error: "invalid_request" });
+      const peer = await pool.query("SELECT 1 FROM users WHERE id=$1", [
+        peerId,
+      ]);
+      if (!peer.rowCount) return reply.code(404).send({ error: "not_found" });
+      const existing = await pool.query(
+        "SELECT 1 FROM profile_shares WHERE owner_id=$1 AND recipient_id=$2",
+        [request.userId, peerId],
+      );
+      if (existing.rowCount) return { created: false };
+      const count = await pool.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM profile_shares WHERE owner_id=$1",
+        [request.userId],
+      );
+      if (Number(count.rows[0]!.count) >= (options.profileSharesLimit ?? 1000))
+        return reply.code(409).send({ error: "share_limit" });
+      const inserted = await pool.query(
+        "INSERT INTO profile_shares(owner_id,recipient_id,wrap) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING 1",
+        [request.userId, peerId, wrap],
+      );
+      if (!inserted.rowCount) return { created: false };
+      const profile = await pool.query<{ version: string }>(
+        "SELECT version::text AS version FROM profiles WHERE user_id=$1",
+        [request.userId],
+      );
+      if (profile.rowCount)
+        messageHub.sendToUser(
+          peerId,
+          profileUpdatedSchema.parse({
+            type: "profile_updated",
+            owner: request.userId,
+            version: profile.rows[0]!.version,
+          }),
+        );
+      return { created: true };
+    },
+  );
+  app.get<{ Params: { ownerId: string } }>(
+    "/profiles/:ownerId",
+    {
+      preHandler: authenticate,
+      config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      const { ownerId } = request.params;
+      if (!/^[0-9a-f]{64}$/u.test(ownerId) || ownerId === request.userId)
+        return reply.code(404).send({ error: "not_found" });
+      const result = await pool.query(
+        `SELECT p.user_id AS "ownerId",p.version::text AS version,p.blob,s.wrap FROM profiles p JOIN profile_shares s ON s.owner_id=p.user_id WHERE p.user_id=$1 AND s.recipient_id=$2`,
+        [ownerId, request.userId],
+      );
+      return result.rows[0] ?? reply.code(404).send({ error: "not_found" });
+    },
+  );
+  app.get(
+    "/profiles",
+    {
+      preHandler: authenticate,
+      config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
+    },
+    async (request, reply) => {
+      const parsed = profilesQuerySchema.safeParse(request.query);
+      if (!parsed.success)
+        return reply.code(400).send({ error: "invalid_request" });
+      const { after, limit } = parsed.data;
+      const result = await pool.query(
+        `SELECT p.user_id AS "ownerId",p.version::text AS version,p.blob,s.wrap FROM profiles p JOIN profile_shares s ON s.owner_id=p.user_id WHERE s.recipient_id=$1 AND ($2::text IS NULL OR p.user_id>$2) ORDER BY p.user_id LIMIT $3`,
+        [request.userId, after ?? null, limit + 1],
+      );
+      const hasMore = result.rows.length > limit;
+      const items = result.rows.slice(0, limit);
+      return {
+        items,
+        nextAfter: hasMore ? (items.at(-1)?.ownerId ?? null) : null,
+      };
     },
   );
   app.get<{ Params: { userId: string } }>(

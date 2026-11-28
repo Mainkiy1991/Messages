@@ -68,6 +68,13 @@ export const contactsUpdatedSchema = z
     version: sequenceValueSchema,
   })
   .strict();
+export const profileUpdatedSchema = z
+  .object({
+    type: z.literal("profile_updated"),
+    owner: userIdSchema,
+    version: sequenceValueSchema,
+  })
+  .strict();
 export const conversationClearedSchema = z
   .object({
     type: z.literal("conversation_cleared"),
