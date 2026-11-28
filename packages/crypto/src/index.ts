@@ -288,6 +288,13 @@ const HISTORY_INFO = encoder.encode("messages/v1/history-entry");
 const CONTACTS_INFO = encoder.encode("messages/v1/contacts");
 export const CONTACT_BOOK_MAX_BYTES = 200 * 1024;
 const DEVICE_LABEL_INFO = "messages/v1/device-label";
+const PROFILE_KEY_INFO = "messages/v1/profile-key";
+const PROFILE_AAD_PREFIX = "messages/v1/profile";
+const PROFILE_WRAP_INFO = "messages/v1/profile-wrap";
+export const PROFILE_NAME_MAX_CHARS = 64;
+export const PROFILE_ABOUT_MAX_CHARS = 200;
+export const PROFILE_BLOB_MAX_LENGTH = 2048;
+export const PROFILE_WRAP_MAX_LENGTH = 128;
 const VERSION = 1;
 const MESSAGE_VERSION_V2 = 2;
 const NONCE_LENGTH = 24;
@@ -743,6 +750,199 @@ export function decryptContactBookFull(input: {
       notes[userId] = note;
     }
     return { contacts, notes };
+  } catch {
+    throw new DecryptError();
+  }
+}
+
+export function deriveProfileKey(historyKey: Uint8Array): Uint8Array {
+  checkKey(historyKey);
+  return hkdf(
+    sha256,
+    historyKey,
+    HKDF_SALT,
+    encoder.encode(PROFILE_KEY_INFO),
+    32,
+  );
+}
+
+function validateProfileField(
+  value: unknown,
+  maxChars: number,
+  required: boolean,
+): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    (required && value.trim().length === 0) ||
+    Array.from(value.trim()).length > maxChars ||
+    /\p{Cc}/u.test(value) ||
+    /[\u061C\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/u.test(value)
+  )
+    throw new TypeError("Invalid profile field");
+}
+
+export function encryptProfile(input: {
+  profileKey: Uint8Array;
+  ownerId: string;
+  name: string;
+  about?: string;
+}): string {
+  checkKey(input.profileKey);
+  checkId(input.ownerId, 64, /^[0-9a-f]{64}$/u);
+  const rawAbout = input.about ?? "";
+  validateProfileField(input.name, PROFILE_NAME_MAX_CHARS, true);
+  validateProfileField(rawAbout, PROFILE_ABOUT_MAX_CHARS, false);
+  const name = input.name.trim();
+  const about = rawAbout.trim();
+  const nonce = randomBytes(NONCE_LENGTH);
+  const aad = encoder.encode(`${PROFILE_AAD_PREFIX}\n${input.ownerId}`);
+  const plaintext = encoder.encode(JSON.stringify({ v: VERSION, name, about }));
+  const blob = bytesToBase64(
+    concat(
+      Uint8Array.of(VERSION),
+      nonce,
+      xchacha20poly1305(input.profileKey, nonce, aad).encrypt(plaintext),
+    ),
+  );
+  if (blob.length > PROFILE_BLOB_MAX_LENGTH)
+    throw new TypeError("Profile is too large");
+  return blob;
+}
+
+export function decryptProfile(input: {
+  profileKey: Uint8Array;
+  ownerId: string;
+  blob: string;
+}): { name: string; about: string } {
+  try {
+    checkKey(input.profileKey);
+    checkId(input.ownerId, 64, /^[0-9a-f]{64}$/u);
+    if (
+      typeof input.blob !== "string" ||
+      input.blob.length > PROFILE_BLOB_MAX_LENGTH
+    )
+      throw new Error();
+    const decoded = decodeEnvelope(base64ToBytes(input.blob));
+    const aad = encoder.encode(`${PROFILE_AAD_PREFIX}\n${input.ownerId}`);
+    const value = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(
+        xchacha20poly1305(input.profileKey, decoded.nonce, aad).decrypt(
+          decoded.body,
+        ),
+      ),
+    ) as Record<string, unknown>;
+    if (
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      Object.keys(value).length !== 3 ||
+      value.v !== VERSION ||
+      typeof value.name !== "string" ||
+      typeof value.about !== "string"
+    )
+      throw new Error();
+    validateProfileField(value.name, PROFILE_NAME_MAX_CHARS, true);
+    validateProfileField(value.about, PROFILE_ABOUT_MAX_CHARS, false);
+    return { name: value.name.trim(), about: value.about.trim() };
+  } catch {
+    throw new DecryptError();
+  }
+}
+
+export function wrapProfileKey(input: {
+  ownerEncryptionPrivateKey: Uint8Array;
+  recipientEncryptionPublicKey: Uint8Array;
+  ownerId: string;
+  recipientId: string;
+  profileKey: Uint8Array;
+}): string {
+  checkKey(input.ownerEncryptionPrivateKey);
+  checkKey(input.recipientEncryptionPublicKey);
+  checkKey(input.profileKey);
+  checkIds(input.ownerId, input.recipientId);
+  const ownerPublic = x25519.getPublicKey(input.ownerEncryptionPrivateKey);
+  let shared: Uint8Array;
+  try {
+    shared = x25519.getSharedSecret(
+      input.ownerEncryptionPrivateKey,
+      input.recipientEncryptionPublicKey,
+    );
+  } catch {
+    throw new TypeError("Invalid X25519 shared secret");
+  }
+  if (shared.every((byte) => byte === 0))
+    throw new TypeError("Invalid X25519 shared secret");
+  const key = hkdf(
+    sha256,
+    shared,
+    HKDF_SALT,
+    concat(
+      encoder.encode(PROFILE_WRAP_INFO),
+      ownerPublic,
+      input.recipientEncryptionPublicKey,
+    ),
+    32,
+  );
+  const nonce = randomBytes(NONCE_LENGTH);
+  const aad = encoder.encode(
+    `${PROFILE_WRAP_INFO}\n${input.ownerId}\n${input.recipientId}\n${bytesToHex(ownerPublic)}\n${bytesToHex(input.recipientEncryptionPublicKey)}`,
+  );
+  const result = bytesToBase64(
+    concat(
+      Uint8Array.of(VERSION),
+      nonce,
+      xchacha20poly1305(key, nonce, aad).encrypt(input.profileKey),
+    ),
+  );
+  if (result.length > PROFILE_WRAP_MAX_LENGTH)
+    throw new TypeError("Profile wrap is too large");
+  return result;
+}
+
+export function unwrapProfileKey(input: {
+  recipientEncryptionPrivateKey: Uint8Array;
+  ownerEncryptionPublicKey: Uint8Array;
+  ownerId: string;
+  recipientId: string;
+  wrap: string;
+}): Uint8Array {
+  try {
+    checkKey(input.recipientEncryptionPrivateKey);
+    checkKey(input.ownerEncryptionPublicKey);
+    checkIds(input.ownerId, input.recipientId);
+    if (
+      typeof input.wrap !== "string" ||
+      input.wrap.length > PROFILE_WRAP_MAX_LENGTH
+    )
+      throw new Error();
+    const decoded = decodeEnvelope(base64ToBytes(input.wrap));
+    const recipientPublic = x25519.getPublicKey(
+      input.recipientEncryptionPrivateKey,
+    );
+    const shared = x25519.getSharedSecret(
+      input.recipientEncryptionPrivateKey,
+      input.ownerEncryptionPublicKey,
+    );
+    if (shared.every((byte) => byte === 0)) throw new Error();
+    const key = hkdf(
+      sha256,
+      shared,
+      HKDF_SALT,
+      concat(
+        encoder.encode(PROFILE_WRAP_INFO),
+        input.ownerEncryptionPublicKey,
+        recipientPublic,
+      ),
+      32,
+    );
+    const aad = encoder.encode(
+      `${PROFILE_WRAP_INFO}\n${input.ownerId}\n${input.recipientId}\n${bytesToHex(input.ownerEncryptionPublicKey)}\n${bytesToHex(recipientPublic)}`,
+    );
+    const profileKey = xchacha20poly1305(key, decoded.nonce, aad).decrypt(
+      decoded.body,
+    );
+    if (profileKey.length !== 32) throw new Error();
+    return profileKey;
   } catch {
     throw new DecryptError();
   }
